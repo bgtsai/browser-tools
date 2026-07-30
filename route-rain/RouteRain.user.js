@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.13.0
+// @version      0.13.1
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -970,8 +970,15 @@
         btn.setAttribute('data-' + PREFIX + '-btn', '1');
         btn.setAttribute('aria-label', BUTTON_LABEL);
         btn.textContent = BUTTON_LABEL;
-        const cs = getComputedStyle(referenceBtn);
-        COPIED_STYLE_PROPS.forEach(k => { btn.style[k] = cs[k]; });
+        // 顏色與字重掛在承載文字的內層元素上，不在 <button> 本身——
+        // 從 button 抄會拿到繼承來的預設值，字就變成深色粗體、跟旁邊的藍字不一樣。
+        const textHolder = [...referenceBtn.querySelectorAll('*')].reverse()
+            .find(el => el.textContent.trim() === referenceBtn.textContent.trim()) || referenceBtn;
+        const csBtn = getComputedStyle(referenceBtn);
+        const csText = getComputedStyle(textHolder);
+        COPIED_STYLE_PROPS.forEach(k => { btn.style[k] = csBtn[k]; });
+        ['color', 'fontFamily', 'fontSize', 'fontWeight', 'letterSpacing', 'lineHeight']
+            .forEach(k => { btn.style[k] = csText[k]; });
         btn.style.setProperty('background', 'transparent', 'important');
         btn.style.setProperty('border', '0', 'important');
         btn.style.setProperty('cursor', 'pointer', 'important');
