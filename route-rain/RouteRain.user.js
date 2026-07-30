@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.4.0
+// @version      0.5.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -822,6 +822,14 @@
    這裡一併壓掉；另外標示啟用狀態 */
 [data-${PREFIX}-btn]::before,[data-${PREFIX}-btn]::after,
 [data-${PREFIX}-btn] *::before,[data-${PREFIX}-btn] *::after{content:none !important}
+/* 原按鈕若是絕對定位（例如靠右釘住），複製出來的會落在同一個位置而與原按鈕重疊。
+   強制回到一般流排版，並讓寬度隨文字撐開，不要沿用原本的固定寬度。 */
+[data-${PREFIX}-btn]{position:relative !important;inset:auto !important;
+  float:none !important;width:auto !important;min-width:0 !important;
+  max-width:none !important;flex:0 0 auto !important;white-space:nowrap !important;
+  margin-right:4px !important;transform:none !important}
+[data-${PREFIX}-btn] *{position:static !important;width:auto !important;
+  min-width:0 !important;max-width:none !important;white-space:nowrap !important}
 [data-${PREFIX}-btn][data-${PREFIX}-on="1"]{background:#e8f0fe;border-radius:8px}
 .${PREFIX}-wrap{font-family:inherit;display:flex;flex-direction:column}
 .${PREFIX}-bar{display:flex;align-items:center;justify-content:space-between;
@@ -834,7 +842,9 @@
    否則列會被標頭切掉一半（就是「不完整的色塊」） */
 /* scroll-padding 把「黏在頂端／左側」的標頭尺寸算進去，否則吸附後仍會被標頭切掉半格。
    橫向只保證左側切齊（右側視畫面寬度自然截斷，這是刻意取捨） */
-.${PREFIX}-scroll{overflow:auto;max-height:calc(100vh - 300px);
+/* overflow-anchor:none 關掉瀏覽器的捲動錨定——內容一有變動它就會自行調整捲動位置，
+   跟 scroll-snap 疊在一起會互相打架、造成畫面亂跳 */
+.${PREFIX}-scroll{overflow:auto;max-height:calc(100vh - 300px);overflow-anchor:none;
   scroll-snap-type:both proximity;
   scroll-padding-top:${HEADER_H_PX}px;scroll-padding-left:${ROWH_W_PX}px}
 .${PREFIX}-msg{padding:14px 12px;font-size:13px;color:#3c4043;line-height:1.7}
@@ -873,7 +883,11 @@
   box-shadow:-20px 0 0 #fff}
 .${PREFIX}-rh.${PREFIX}-hl{background:#e8f0fe;box-shadow:-20px 0 0 #e8f0fe}
 .${PREFIX}-rh .${PREFIX}-t{font-weight:600;color:#202124}
-.${PREFIX}-rh .${PREFIX}-m{color:#80868b;font-size:11px;min-width:40px;text-align:right}
+/* 固定寬度＋等寬數字：hover 時整欄標籤要在「+504分」與「05:19」之間切換，
+   寬度只要有變化就會觸發回流，捲動錨定與 scroll-snap 會跟著重新對位，
+   表現出來就是「滑鼠移回表格時整個跳到最上面」。寬度鎖死才不會回流。 */
+.${PREFIX}-rh .${PREFIX}-m{color:#80868b;font-size:11px;text-align:right;
+  width:46px;flex:0 0 46px;font-variant-numeric:tabular-nums}
 .${PREFIX}-rh.${PREFIX}-hl .${PREFIX}-m{color:#1a73e8;font-weight:700}
 .${PREFIX}-d{display:flex;align-items:center;justify-content:center}
 .${PREFIX}-c{width:${CELL_PX}px;height:${CELL_PX}px;border-radius:2px;cursor:pointer;display:block}
