@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.16.0
+// @version      0.17.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -31,6 +31,7 @@
     const PREFIX = 'rr';                       // 自己加到 DOM 上的 class／屬性一律加專案前綴
     const BUTTON_LABEL = '旅途中的雨';         // 注入到面板上的按鈕文字
     const BUTTON_GAP_PX = 8;                   // 注入按鈕與原「選項」之間的間距
+    const CLOSE_LABEL = '關閉';                // 面板開啟時，按鈕改成這個文字並移到「選項」的位置
 
     // 節點切分
     const SUBDIVIDE_SEC = 15 * 60;             // 同一鄉鎮停留超過此秒數就多切一個節點
@@ -112,6 +113,7 @@
         container: null,
         hiddenBlocks: [],
         originalPanelWidth: '',
+        panelBg: '',
         optionsClickHandler: null,
         townCache: null,
     };
@@ -843,7 +845,7 @@
         return null;
     }
 
-    async function getForecast(auth, nodes, timeFrom, timeTo) {
+    async function getForecast(auth, nodes, timeFrom, timeTo, onFetchStart) {
         const neededTowns = [...new Set(nodes.map(n => n.town))];
         const fromMs = timeFrom.getTime(), toMs = timeTo.getTime();
         const cache = loadCache();
@@ -864,6 +866,7 @@
             log('快取不可用（' + shortfall.reason + '），重新取得');
         }
 
+        if (onFetchStart) onFetchStart();   // 只有確定要發請求時才通知畫面
         const res = await fetchForecast(auth, nodes, timeFrom, timeTo);
         // 只有全部成功才寫入快取，否則下次會沿用一份本來就不完整的資料
         if (!res.failures.length) saveCache(res.forecast, fromMs, toMs);
@@ -891,13 +894,86 @@
         };
     }
 
+    /**
+     * 金鑰設定面板。
+     * 用業界慣例的密碼欄型式：輸入框右側嵌一顆眼睛按鈕、以細分隔線隔開，
+     * 預設遮蔽（type=password），按下才顯示明碼。
+     * 金鑰只存在 GM 儲存空間（使用者自己的瀏覽器），不會出現在腳本原始碼或 repo 裡。
+     */
     function openSettings() {
+        document.getElementById(PREFIX + '-modal')?.remove();
         const cur = getKeys();
-        const g = prompt('Google Maps API 金鑰（Routes API）\n\n這組金鑰只存在你自己的瀏覽器裡，不會上傳、也不在腳本原始碼中。', cur.google);
-        if (g !== null) GM_setValue(KEY_GOOGLE, g.trim());
-        const c = prompt('中央氣象署開放資料授權碼（CWA-xxxxxxxx-…）\n\n同樣只存在本機。', cur.cwa);
-        if (c !== null) GM_setValue(KEY_CWA, c.trim());
-        alert('已儲存。重新按一次「路雨」即可。');
+
+        const back = document.createElement('div');
+        back.id = PREFIX + '-modal';
+        back.className = PREFIX + '-modal-back';
+
+        const box = document.createElement('div');
+        box.className = PREFIX + '-modal';
+
+        const field = (labelText, hintText, value, name) => `
+<label class="${PREFIX}-f">
+  <span class="${PREFIX}-flabel">${labelText}</span>
+  <span class="${PREFIX}-hint">${hintText}</span>
+  <span class="${PREFIX}-inwrap">
+    <input type="password" name="${name}" value="${(value || '').replace(/"/g, '&quot;')}"
+           autocomplete="off" spellcheck="false">
+    <button type="button" class="${PREFIX}-eye" data-${PREFIX}-eye aria-label="顯示或隱藏內容">
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+        <path class="${PREFIX}-eye-open" fill="currentColor"
+          d="M12 5c-5 0-9 4.5-9 7s4 7 9 7 9-4.5 9-7-4-7-9-7Zm0 11.5A4.5 4.5 0 1 1 12 7.5a4.5 4.5 0 0 1 0 9Zm0-2.2a2.3 2.3 0 1 0 0-4.6 2.3 2.3 0 0 0 0 4.6Z"/>
+        <path class="${PREFIX}-eye-off" fill="currentColor" style="display:none"
+          d="M3.3 4.7 4.7 3.3l16 16-1.4 1.4-3-3A10.6 10.6 0 0 1 12 19c-5 0-9-4.5-9-7 0-1.4 1.2-3.3 3.1-4.8L3.3 4.7Zm5.3 5.3A4.5 4.5 0 0 0 12 16.5c.7 0 1.4-.2 2-.5l-1.6-1.6a2.3 2.3 0 0 1-2.8-2.8L8.6 10Zm3.4-5A10.4 10.4 0 0 1 21 12a11 11 0 0 1-2.4 3.3l-1.5-1.5A9 9 0 0 0 18.9 12C18 10.6 15.4 7 12 7c-.4 0-.8 0-1.2.1L9.4 5.7c.8-.2 1.7-.3 2.6-.3Z"/>
+      </svg>
+    </button>
+  </span>
+</label>`;
+
+        box.innerHTML = `
+<div class="${PREFIX}-mtitle">API 金鑰設定</div>
+<div class="${PREFIX}-mdesc">兩組金鑰都只存在你自己的瀏覽器，不會上傳，也不在腳本原始碼中。</div>
+${field('Google Maps API 金鑰', 'Routes API；開發階段可用免綁卡的 Maps Demo Key', cur.google, 'google')}
+${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取得，格式為 CWA-…', cur.cwa, 'cwa')}
+<div class="${PREFIX}-mact">
+  <button type="button" class="${PREFIX}-mbtn" data-${PREFIX}-cancel>取消</button>
+  <button type="button" class="${PREFIX}-mbtn ${PREFIX}-primary" data-${PREFIX}-save>儲存</button>
+</div>`;
+
+        back.appendChild(box);
+        document.body.appendChild(back);
+        box.querySelector('input')?.focus();
+
+        box.addEventListener('click', ev => {
+            const eye = ev.target.closest('[data-' + PREFIX + '-eye]');
+            if (eye) {
+                const input = eye.parentElement.querySelector('input');
+                const show = input.type === 'password';
+                input.type = show ? 'text' : 'password';
+                eye.querySelector('.' + PREFIX + '-eye-open').style.display = show ? 'none' : '';
+                eye.querySelector('.' + PREFIX + '-eye-off').style.display = show ? '' : 'none';
+                return;
+            }
+            if (ev.target.closest('[data-' + PREFIX + '-cancel]')) { back.remove(); return; }
+            if (ev.target.closest('[data-' + PREFIX + '-save]')) {
+                const get = n => box.querySelector(`input[name="${n}"]`).value.trim();
+                GM_setValue(KEY_GOOGLE, get('google'));
+                GM_setValue(KEY_CWA, get('cwa'));
+                back.remove();
+                log('金鑰已儲存');
+                if (state.active && state.container) {
+                    clearBody(state.container);
+                    run(state.container).catch(err => {
+                        warn(err);
+                        clearBody(state.container);
+                        showMessage(state.container, '出錯了：' + err.message);
+                    });
+                }
+            }
+        });
+        back.addEventListener('click', ev => { if (ev.target === back) back.remove(); });
+        document.addEventListener('keydown', function esc(ev) {
+            if (ev.key === 'Escape') { back.remove(); document.removeEventListener('keydown', esc); }
+        });
     }
 
     GM_registerMenuCommand('設定 API 金鑰', openSettings);
@@ -929,6 +1005,30 @@
   transform:none !important}
 [data-${PREFIX}-btn][data-${PREFIX}-on="1"]{background:#e8f0fe;border-radius:8px}
 .${PREFIX}-wrap{font-family:inherit;display:flex;flex-direction:column}
+.${PREFIX}-modal-back{position:fixed;inset:0;background:rgba(32,33,36,.45);z-index:2147483100;
+  display:flex;align-items:center;justify-content:center}
+.${PREFIX}-modal{background:#fff;border-radius:12px;padding:22px 24px;width:420px;max-width:92vw;
+  box-shadow:0 12px 40px rgba(0,0,0,.3);font-family:inherit;color:#202124}
+.${PREFIX}-mtitle{font-size:17px;font-weight:600;margin-bottom:4px}
+.${PREFIX}-mdesc{font-size:12.5px;color:#5f6368;line-height:1.6;margin-bottom:18px}
+.${PREFIX}-f{display:block;margin-bottom:16px}
+.${PREFIX}-flabel{display:block;font-size:13px;font-weight:600;margin-bottom:2px}
+.${PREFIX}-hint{display:block;font-size:11.5px;color:#80868b;margin-bottom:6px;line-height:1.5}
+/* 膠囊形輸入框，右側嵌眼睛按鈕、以細分隔線隔開 */
+.${PREFIX}-inwrap{display:flex;align-items:stretch;border:1px solid #dadce0;border-radius:8px;
+  overflow:hidden;background:#fff}
+.${PREFIX}-inwrap:focus-within{border-color:#1a73e8;box-shadow:0 0 0 1px #1a73e8}
+.${PREFIX}-inwrap input{flex:1;border:0;outline:0;padding:9px 11px;font-size:13px;
+  font-family:"SF Mono",Consolas,monospace;background:transparent;color:#202124;min-width:0}
+.${PREFIX}-eye{border:0;border-left:1px solid #dadce0;background:transparent;cursor:pointer;
+  padding:0 11px;color:#5f6368;display:flex;align-items:center}
+.${PREFIX}-eye:hover{background:#f1f3f4;color:#202124}
+.${PREFIX}-mact{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}
+.${PREFIX}-mbtn{border:0;background:transparent;color:#1a73e8;font-size:13px;font-weight:600;
+  padding:8px 16px;border-radius:6px;cursor:pointer;font-family:inherit}
+.${PREFIX}-mbtn:hover{background:#f1f3f4}
+.${PREFIX}-mbtn.${PREFIX}-primary{background:#1a73e8;color:#fff}
+.${PREFIX}-mbtn.${PREFIX}-primary:hover{background:#1765cc}
 .${PREFIX}-bar{display:flex;align-items:center;justify-content:space-between;
   padding:8px 12px;border-bottom:1px solid #e8eaed;position:sticky;top:0;background:#fff;z-index:5}
 .${PREFIX}-bar b{font-size:13px;color:#202124}
@@ -1052,8 +1152,44 @@
         if (r.width === 0 && r.height === 0) { btn.style.display = 'none'; return; }
         btn.style.display = '';
         btn.style.top = Math.round(r.top) + 'px';
-        btn.style.left = Math.round(r.left - btn.offsetWidth - BUTTON_GAP_PX) + 'px';
         btn.style.height = Math.round(r.height) + 'px';
+        if (state.active) {
+            // 開啟後沒有其他選項可按，按鈕改成「關閉」並移到「選項」的位置蓋住它，
+            // 行為與 Google 自己的面板一致（按下去展開、原位變成關閉）
+            btn.textContent = CLOSE_LABEL;
+            btn.style.left = Math.round(r.left) + 'px';
+            btn.style.minWidth = Math.round(r.width) + 'px';
+            btn.style.background = state.panelBg || '#fff';
+        } else {
+            btn.textContent = BUTTON_LABEL;
+            btn.style.minWidth = '';
+            btn.style.background = 'transparent';
+            btn.style.left = Math.round(r.left - btn.offsetWidth - BUTTON_GAP_PX) + 'px';
+        }
+    }
+
+    /**
+     * 從網站自己的樣式表裡找出「選項」按鈕的 :hover 宣告。
+     * 不用猜的：直接掃 document.styleSheets 找出會命中該按鈕、且帶 :hover 的規則。
+     * 跨網域樣式表讀 cssRules 會拋錯，包在 try 裡略過即可。
+     * 真的找不到才退回近似值，並記 log 說明用的是哪一種。
+     */
+    function readHoverStyle(referenceBtn) {
+        const found = [];
+        for (const sheet of document.styleSheets) {
+            let rules;
+            try { rules = sheet.cssRules; } catch (err) { continue; }
+            if (!rules) continue;
+            for (const rule of rules) {
+                if (!rule.selectorText || rule.selectorText.indexOf(':hover') < 0) continue;
+                const base = rule.selectorText.replace(/:hover/g, '');
+                let hit = false;
+                try { hit = base.split(',').some(s => s.trim() && referenceBtn.matches(s.trim())); }
+                catch (err) { continue; }
+                if (hit) found.push(rule.style.cssText);
+            }
+        }
+        return found;
     }
 
     function ensureButton() {
@@ -1086,6 +1222,17 @@
             btn.style.border = '0';
             btn.style.cursor = 'pointer';
             btn.style.padding = '0 10px';
+
+            const hoverDecls = readHoverStyle(optionsBtn);
+            const styleEl = document.createElement('style');
+            styleEl.id = PREFIX + '-btn-style';
+            styleEl.textContent = hoverDecls.length
+                ? `[data-${PREFIX}-btn]:hover{${hoverDecls.join(';')}}`
+                // 讀不到就用近似值：以文字顏色做低透明度底色，這在多數設計系統裡都是通用做法
+                : `[data-${PREFIX}-btn]:hover{background:color-mix(in srgb, currentColor 10%, transparent) !important;border-radius:8px}`;
+            document.getElementById(PREFIX + '-btn-style')?.remove();
+            document.head.appendChild(styleEl);
+            log('按鈕 hover 樣式來源：', hoverDecls.length ? '取自網站樣式表' : '近似值（樣式表裡找不到對應規則）');
 
             btn.addEventListener('click', ev => {
                 ev.preventDefault();
@@ -1125,6 +1272,7 @@
         const tip = document.getElementById(PREFIX + '-tip');
         if (tip) tip.remove();
         state.active = false;
+        ensureButton();
         log('已關閉');
     }
 
@@ -1178,8 +1326,10 @@
         panel.appendChild(wrap);
         state.container = wrap;
         state.active = true;
+        state.panelBg = getComputedStyle(panel).backgroundColor || '#fff';
         const btn = document.querySelector('[data-' + PREFIX + '-btn]');
         if (btn) btn.setAttribute('data-' + PREFIX + '-on', '1');
+        ensureButton();
 
         // Google 的「選項」面板就展開在灰線以下，而那整段正是我們啟用時隱藏掉的範圍。
         // 若不處理，使用者按「選項」會覺得「沒反應／還是我們的表格」——其實面板開了、只是被藏著。
@@ -1228,7 +1378,13 @@
                 '① <b>Google Maps API 金鑰</b>（Routes API，開發階段可用免綁卡的 Demo Key）<br>' +
                 '② <b>中央氣象署授權碼</b>（opendata.cwa.gov.tw 免費註冊即可取得）<br><br>' +
                 '兩組金鑰只會存在你自己的瀏覽器裡，不會出現在腳本原始碼中。<br><br>' +
-                '請從 Tampermonkey 選單的「設定 API 金鑰」填入。');
+                '請從 Tampermonkey 選單的「設定 API 金鑰」填入，或按下方按鈕。');
+            const openBtn = document.createElement('button');
+            openBtn.className = PREFIX + '-mbtn ' + PREFIX + '-primary';
+            openBtn.textContent = '開啟金鑰設定';
+            openBtn.style.margin = '0 12px';
+            openBtn.addEventListener('click', () => { injectStyle(); openSettings(); });
+            wrap.appendChild(openBtn);
             return;
         }
 
@@ -1293,10 +1449,10 @@
         }
 
         clearBody(wrap);
-        showMessage(wrap, '正在向中央氣象署取得降雨預報…');
         const lastArrive = new Date(departures[departures.length - 1].getTime() + totalSec * 1000);
         const { forecast, failures, callCount, fetchedAt, fromCache } =
-            await getForecast(keys.cwa, nodes, departures[0], lastArrive);
+            await getForecast(keys.cwa, nodes, departures[0], lastArrive,
+                () => { clearBody(wrap); showMessage(wrap, '正在向中央氣象署取得降雨預報…'); });
 
         clearBody(wrap);
         render(wrap, {
