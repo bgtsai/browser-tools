@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.2.0
+// @version      0.3.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -47,7 +47,8 @@
                                                // 預報涵蓋 96 小時、可排到約 370 欄，但步行模式節點多，
                                                // 格數會上萬；第一版先封頂，確認效能後再放寬
     const TIMELINE_AXIS_Y_PX = 27;             // 時間軸線距標頭頂端的距離
-    const HEADER_H_PX = 64;                    // 標頭列高度
+    const HEADER_H_PX = 72;                    // 標頭列高度；要容得下整點圓與其下方的時間標籤，
+                                               // 太矮的話標籤會壓到第一列資料
     const HOUR_DOT_PX = 20;                    // 整點圓直徑；加上 2px 外環後為 24px，
                                                // 剛好等於欄節距，不會溢出到鄰欄被蓋掉
 
@@ -309,11 +310,16 @@
         // 交通方式頁籤在面板最上方那一排（開車／大眾運輸／步行／單車…）。
         // 它不一定帶 aria-selected，實測也可能靠 class 或 aria-label 的「已選取」字樣表示，
         // 所以三種訊號都找，並把所有候選記進 log 以便後續補強判斷條件。
+        // 對應到 Routes API 的 travelMode。Google Maps 提供的選項比 Routes API 支援的多，
+        // 不支援的（航班、叫車）標成 null，之後直接告知使用者，不要退回 DRIVE 硬算出一張錯的表。
         const KEYWORDS = [
             [/步行|走路|walk/i, 'WALK'],
-            [/自行車|單車|腳踏車|bicycl|bike/i, 'BICYCLE'],
-            [/大眾運輸|公共運輸|轉乘|transit/i, 'TRANSIT'],
-            [/開車|駕車|汽車|driv/i, 'DRIVE'],
+            [/機車|摩托車|two[-\s]?wheel|motorcycl/i, 'TWO_WHEELER'],
+            [/自行車|單車|腳踏車|bicycl|bike|cycling/i, 'BICYCLE'],
+            [/大眾運輸|公共運輸|大眾交通|轉乘|捷運|公車|transit/i, 'TRANSIT'],
+            [/駕駛車輛|開車|駕車|汽車|driv/i, 'DRIVE'],
+            [/航班|飛機|flight/i, null],
+            [/叫車|共乘|計程車|ride|taxi/i, null],
         ];
         const cands = [...document.querySelectorAll('button,[role="tab"],[role="radio"]')]
             .map(el => ({
@@ -329,17 +335,22 @@
         log('交通方式候選：', cands.map(x => `${x.selected ? '★' : '　'}${x.label}`).join(' | ') || '（無）',
             '｜網址 3e 代碼=', urlTravelCode);
 
+        const classify = (label, via) => {
+            for (const [re, mode] of KEYWORDS) {
+                if (re.test(label)) return { mode, confident: true, via, label };
+            }
+            return null;
+        };
         const hit = cands.find(x => x.selected);
         if (hit) {
-            for (const [re, mode] of KEYWORDS) if (re.test(hit.label)) return { mode, confident: true, via: 'aria/class' };
+            const r = classify(hit.label, 'aria/class');
+            if (r) return r;
         }
-        // 退而求其次：只有一個候選符合關鍵字時就採用它
         if (cands.length === 1) {
-            for (const [re, mode] of KEYWORDS) {
-                if (re.test(cands[0].label)) return { mode, confident: false, via: '唯一候選' };
-            }
+            const r = classify(cands[0].label, '唯一候選');
+            if (r) return { ...r, confident: false };
         }
-        return { mode: 'DRIVE', confident: false, via: '預設值' };
+        return { mode: 'DRIVE', confident: false, via: '預設值', label: '' };
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -387,7 +398,12 @@
             regionCode: 'TW',
             computeAlternativeRoutes: true,
         };
-        const mids = pts.slice(1, -1);
+        // 大眾運輸不接受中途點，帶了會被 API 拒絕；先剔除並記錄，
+        // 這代表手動拖曳過的路徑在此模式下無法重現
+        const mids = travelMode === 'TRANSIT' ? [] : pts.slice(1, -1);
+        if (travelMode === 'TRANSIT' && pts.length > 2) {
+            warn('大眾運輸模式不支援中途點，已忽略', pts.length - 2, '個途經點');
+        }
         if (mids.length) {
             body.intermediates = mids.map(p => {
                 const item = toLatLng(p);
@@ -805,7 +821,10 @@
         }
         const css = `
 .${PREFIX}-wrap{font-family:inherit;display:flex;flex-direction:column}
-.${PREFIX}-scroll{overflow:auto;max-height:calc(100vh - 360px)}
+/* scroll-padding-top 讓吸附時把黏在頂端的標頭高度算進去，
+   否則列會被標頭切掉一半（就是「不完整的色塊」） */
+.${PREFIX}-scroll{overflow:auto;max-height:calc(100vh - 300px);
+  scroll-snap-type:y proximity;scroll-padding-top:${HEADER_H_PX}px}
 .${PREFIX}-msg{padding:14px 12px;font-size:13px;color:#3c4043;line-height:1.7}
 .${PREFIX}-msg b{color:#1a73e8}
 .${PREFIX}-grid{display:grid;grid-auto-rows:${PITCH_PX}px;width:max-content;
@@ -830,12 +849,13 @@
 .${PREFIX}-h.${PREFIX}-hl .${PREFIX}-dot{background:#1a73e8;transform:translate(-50%,-50%) scale(1.9)}
 .${PREFIX}-h.${PREFIX}-hl .${PREFIX}-hour{transform:translate(-50%,-50%) scale(1.15);
   box-shadow:0 0 0 2px #fff,0 0 0 5px rgba(26,115,232,.42)}
-.${PREFIX}-tl{position:absolute;top:${TIMELINE_AXIS_Y_PX + 14}px;left:50%;transform:translateX(-50%);
+.${PREFIX}-tl{position:absolute;top:${TIMELINE_AXIS_Y_PX + 16}px;left:50%;transform:translateX(-50%);
   font-size:11px;font-weight:700;color:#1a73e8;white-space:nowrap;background:#fff;
   padding:1px 4px;border-radius:3px;display:none}
 .${PREFIX}-h.${PREFIX}-hl .${PREFIX}-tl{display:block}
 /* 列標頭：不透明白底＋往左延伸的陰影，避免捲動時內容從左緣露出來 */
-.${PREFIX}-rh{position:sticky;left:0;z-index:10;background:#fff;display:flex;align-items:center;
+.${PREFIX}-rh{position:sticky;left:0;z-index:10;background:#fff;scroll-snap-align:start;
+  display:flex;align-items:center;
   justify-content:flex-end;padding-right:8px;font-size:12px;white-space:nowrap;
   border-right:1px solid #e8eaed;transition:background .08s;gap:6px;
   box-shadow:-20px 0 0 #fff}
@@ -846,8 +866,10 @@
 .${PREFIX}-d{display:flex;align-items:center;justify-content:center}
 .${PREFIX}-c{width:${CELL_PX}px;height:${CELL_PX}px;border-radius:2px;cursor:pointer;display:block}
 .${PREFIX}-c.${PREFIX}-na{background:repeating-linear-gradient(45deg,#f1f3f4 0 4px,#e0e3e6 4px 8px)}
-/* 說明區在捲動容器之外，永遠固定，且逐行垂直排列 */
-.${PREFIX}-info{padding:10px 12px 14px;border-top:1px solid #e8eaed}
+/* 說明區接在格線正下方、同一個捲動流（不另外開捲軸）；
+   sticky left 讓它橫向捲動時始終貼齊左側地點欄，不會被推出畫面 */
+.${PREFIX}-info{position:sticky;left:0;width:max-content;max-width:${PANEL_WIDE_PX - 40}px;
+  padding:12px 12px 16px;border-top:1px solid #e8eaed;background:#fff}
 .${PREFIX}-legend{display:flex;flex-direction:column;gap:6px;font-size:12px;color:#3c4043}
 .${PREFIX}-legend div{display:flex;align-items:center}
 .${PREFIX}-legend span.${PREFIX}-sw{width:18px;height:18px;border-radius:3px;display:inline-block;
@@ -858,8 +880,8 @@
   color:#fff;border-radius:8px;padding:9px 12px;font-size:12px;line-height:1.6;
   box-shadow:0 6px 20px rgba(0,0,0,.25);max-width:280px}
 .${PREFIX}-tip .${PREFIX}-k{color:#9aa0a6;display:inline-block;min-width:60px}
-.${PREFIX}-note{font-size:11.5px;color:#80868b;padding-top:10px;line-height:1.8}
-.${PREFIX}-note div{margin-bottom:2px}
+.${PREFIX}-note{font-size:11.5px;color:#80868b;padding-top:10px;line-height:1.7}
+.${PREFIX}-note div{margin-bottom:3px}
 .${PREFIX}-warn{color:#c5221f;font-weight:600}
 `;
         const el = document.createElement('style');
@@ -1006,6 +1028,13 @@
         const selected = readSelectedRoute(panel);
         const modeInfo = detectTravelMode(parsed.urlTravelCode);
         log('網址解析：停靠站/控制點共', parsed.points.length, '個；選中路線', selected);
+        if (modeInfo.mode === null) {
+            wrap.innerHTML = '';
+            showMessage(wrap, `目前選的交通方式（<b>${modeInfo.label || '未知'}</b>）` +
+                'Routes API 不支援，無法計算沿途座標與時間。<br><br>' +
+                '可用的有：開車、機車、單車、步行、大眾運輸。');
+            return;
+        }
 
         wrap.innerHTML = '';
         showMessage(wrap, '正在向 Google 取得路徑…');
@@ -1127,7 +1156,6 @@
         });
         grid.innerHTML = parts.join('');
         scroll.appendChild(grid);
-        wrap.appendChild(scroll);
 
         const info = document.createElement('div');
         info.className = PREFIX + '-info';
@@ -1150,9 +1178,12 @@
         const note = document.createElement('div');
         note.className = PREFIX + '-note';
         const lines = [
-            `節點 ${nodes.length} 個／涵蓋 ${new Set(nodes.map(n => n.county + n.town)).size} 個鄉鎮　·　` +
-            `總行程 ${Math.round(totalSec / 60)} 分　·　氣象署呼叫 ${meta.callCount} 次`,
-            `交通方式 ${meta.mode.mode}（判斷依據：${meta.mode.via}）　·　路線比對：${meta.matchNote}`,
+            `節點 ${nodes.length} 個`,
+            `涵蓋 ${new Set(nodes.map(n => n.county + n.town)).size} 個鄉鎮`,
+            `總行程 ${Math.round(totalSec / 60)} 分`,
+            `氣象署呼叫 ${meta.callCount} 次`,
+            `交通方式 ${meta.mode.mode}（判斷依據：${meta.mode.via}）`,
+            `路線比對：${meta.matchNote}`,
         ];
         // 安全網：算出來的行程時間與面板顯示值差太多，通常代表交通方式判斷錯了。
         // 與其安靜地產出一張錯的表，不如直接把矛盾指出來。
@@ -1170,7 +1201,9 @@
         }
         note.innerHTML = lines.map(l => `<div>${l}</div>`).join('');
         info.appendChild(note);
-        wrap.appendChild(info);
+        // 資訊區放進捲動容器、接在格線之後，才不會多出一條獨立捲軸
+        scroll.appendChild(info);
+        wrap.appendChild(scroll);
 
         bindInteractions(grid, nodes, departures, forecast);
     }
