@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.19.0
+// @version      0.20.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -1032,9 +1032,8 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
 .${PREFIX}-bar{display:flex;align-items:center;justify-content:space-between;
   padding:8px 12px;border-bottom:1px solid #e8eaed;position:sticky;top:0;background:#fff;z-index:5}
 .${PREFIX}-bar b{font-size:13px;color:#202124}
-.${PREFIX}-close{border:0;background:#f1f3f4;border-radius:16px;padding:5px 12px;transition:background .12s,color .12s;
-  font-size:12px;color:#3c4043;cursor:pointer;font-family:inherit}
-.${PREFIX}-close:hover{background:#d2e3fc;color:#174ea6}
+/* 外觀由範本沿用「選項」的 class 提供，這裡只留游標與過場，不覆寫顏色與圓角 */
+.${PREFIX}-close{cursor:pointer;transition:background .12s,color .12s}
 /* scroll-padding-top 讓吸附時把黏在頂端的標頭高度算進去，
    否則列會被標頭切掉一半（就是「不完整的色塊」） */
 /* scroll-padding 把「黏在頂端／左側」的標頭尺寸算進去，否則吸附後仍會被標頭切掉半格。
@@ -1123,12 +1122,6 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
     // 按鈕注入
     // ════════════════════════════════════════════════════════════════
 
-    // 從「選項」身上抄過來的樣式屬性。只抄視覺相關的，不碰定位與行為。
-    const COPIED_STYLE_PROPS = [
-        'fontFamily', 'fontSize', 'fontWeight', 'letterSpacing', 'lineHeight',
-        'color', 'height', 'paddingTop', 'paddingBottom', 'paddingLeft', 'paddingRight',
-        'borderRadius', 'textTransform', 'whiteSpace',
-    ];
 
     /**
      * 放置按鈕。
@@ -1175,14 +1168,12 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         if (state.active) {
             // 開啟後沒有其他選項可按，按鈕改成「關閉」並移到「選項」的位置蓋住它，
             // 行為與 Google 自己的面板一致（按下去展開、原位變成關閉）
-            btn.textContent = CLOSE_LABEL;
             btn.style.left = Math.round(r.left) + 'px';
             btn.style.minWidth = Math.round(r.width) + 'px';
             btn.style.setProperty('background', state.panelBg || '#fff', 'important');
             log('關閉按鈕定位：left=', Math.round(r.left), 'top=', Math.round(r.top),
                 'w>=', Math.round(r.width), '底色=', state.panelBg);
         } else {
-            btn.textContent = BUTTON_LABEL;
             btn.style.minWidth = '';
             btn.style.setProperty('background', 'transparent', 'important');
             btn.style.left = Math.round(r.left - btn.offsetWidth - BUTTON_GAP_PX) + 'px';
@@ -1190,44 +1181,38 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
     }
 
     /**
-     * 從網站自己的樣式表裡找出「選項」按鈕的 :hover 宣告。
-     * 不用猜的：直接掃 document.styleSheets 找出會命中該按鈕、且帶 :hover 的規則。
-     * 跨網域樣式表讀 cssRules 會拋錯，包在 try 裡略過即可。
-     * 真的找不到才退回近似值，並記 log 說明用的是哪一種。
+     * 以「選項」按鈕為範本，做出一顆樣式完全一致的按鈕。
+     *
+     * 直接沿用它的 class——class 帶著全部樣式，包含 hover、圓角、字色字重，
+     * 不必逐項抄屬性，也不必去掃樣式表找 :hover 規則。三顆按鈕
+     * （旅途中的雨／關閉／面板內的關閉）都用同一個範本，外觀自然一致。
+     *
+     * 先前不敢複製，是因為早期用 cloneNode 出過問題；但那次的真因是
+     * 「插進 Google 的渲染範圍而被就地重用」，不是複製本身。
+     * 現在按鈕掛在 body、又把 class 以外的屬性全部剝掉，複製結構是安全的。
      */
-    function readHoverStyle(referenceBtn) {
-        // 實測發現：:hover 的宣告不一定掛在 <button> 上，也可能掛在承載文字的內層 div。
-        // 只比對 button 本身會漏掉，所以連同其後代一起比對。
-        const targets = [referenceBtn, ...referenceBtn.querySelectorAll('*')];
-        const found = [];
-        for (const sheet of document.styleSheets) {
-            let rules;
-            try { rules = sheet.cssRules; } catch (err) { continue; }   // 跨網域樣式表讀不到
-            if (!rules) continue;
-            for (const rule of rules) {
-                if (!rule.selectorText || rule.selectorText.indexOf(':hover') < 0) continue;
-                for (const sel of rule.selectorText.split(',')) {
-                    const base = sel.replace(/:hover/g, '').trim();
-                    if (!base) continue;
-                    let hit = false;
-                    try { hit = targets.some(t => t.matches(base)); } catch (err) { continue; }
-                    if (hit) { found.push(rule.style.cssText); break; }
-                }
-            }
-        }
-        return found;
-    }
+    function buildFromTemplate(referenceBtn, label) {
+        const el = referenceBtn.cloneNode(true);
+        // 只留 class：jsaction／jslog／aria-*／id 等一律移除，避免帶著別人的行為與識別
+        const strip = n => {
+            [...n.attributes].forEach(a => { if (a.name !== 'class') n.removeAttribute(a.name); });
+        };
+        strip(el);
+        el.querySelectorAll('*').forEach(strip);
 
-    /** 取按鈕本身與內層元素中最大的圓角——藥丸形的圓角常設在內層，只看 button 會拿到 0 */
-    function readBorderRadius(referenceBtn) {
-        const targets = [referenceBtn, ...referenceBtn.querySelectorAll('*')];
-        let best = 0, bestText = '0px';
-        for (const t of targets) {
-            const v = getComputedStyle(t).borderRadius;
-            const num = parseFloat(v);
-            if (!isNaN(num) && num > best) { best = num; bestText = v; }
-        }
-        return bestText;
+        // 清掉所有文字節點，再把新文字放進原本承載文字的那一層
+        const refText = referenceBtn.textContent.trim();
+        const holder = [...el.querySelectorAll('*')].reverse()
+            .find(x => x.textContent.trim() === refText) || el;
+        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+        const textNodes = [];
+        while (walker.nextNode()) textNodes.push(walker.currentNode);
+        textNodes.forEach(n => { n.textContent = ''; });
+        holder.insertBefore(document.createTextNode(label), holder.firstChild);
+
+        el.type = 'button';
+        el.setAttribute('aria-label', label);
+        return el;
     }
 
     function ensureButton() {
@@ -1239,51 +1224,10 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             return false;
         }
         if (!btn) {
-            btn = document.createElement('button');
-            btn.type = 'button';
+            btn = buildFromTemplate(optionsBtn, BUTTON_LABEL);
             btn.setAttribute('data-' + PREFIX + '-btn', '1');
-            btn.setAttribute('aria-label', BUTTON_LABEL);
-            btn.textContent = BUTTON_LABEL;
-
-            // 顏色與字重掛在承載文字的內層元素上，不在 <button> 本身；
-            // 從 button 抄會拿到繼承來的預設值，字會變成深色粗體。
-            const textHolder = [...optionsBtn.querySelectorAll('*')].reverse()
-                .find(el => el.textContent.trim() === optionsBtn.textContent.trim()) || optionsBtn;
-            const csBtn = getComputedStyle(optionsBtn);
-            const csText = getComputedStyle(textHolder);
-            COPIED_STYLE_PROPS.forEach(k => { btn.style[k] = csBtn[k]; });
-            ['color', 'fontFamily', 'fontSize', 'fontWeight', 'letterSpacing', 'lineHeight']
-                .forEach(k => { btn.style[k] = csText[k]; });
             btn.style.position = 'fixed';
             btn.style.zIndex = '2147483000';
-            btn.style.background = 'transparent';
-            btn.style.border = '0';
-            btn.style.cursor = 'pointer';
-            btn.style.padding = '0 12px';
-            // 藥丸形的圓角常設在內層元素上，從 button 抄會拿到 0
-            btn.style.borderRadius = readBorderRadius(optionsBtn);
-
-            const hoverDecls = readHoverStyle(optionsBtn);
-            const styleEl = document.createElement('style');
-            styleEl.id = PREFIX + '-btn-style';
-            // 每一條宣告都補上 !important。
-            // 原因：面板啟用時按鈕會用行內樣式設背景（要蓋住底下的「選項」），
-            // 而從網站抄來的 hover 宣告沒有 !important，行內樣式會贏 → hover 完全看不出變化。
-            const important = decls => decls
-                .split(';')
-                .map(d => d.trim())
-                .filter(Boolean)
-                .map(d => d.includes('!important') ? d : d + ' !important')
-                .join(';');
-            const radius = readBorderRadius(optionsBtn);
-            styleEl.textContent = hoverDecls.length
-                ? `[data-${PREFIX}-btn]:hover{${important(hoverDecls.join(';'))};border-radius:${radius} !important}`
-                // 讀不到就用近似值：以文字顏色做低透明度底色，這在多數設計系統裡是通用做法
-                : `[data-${PREFIX}-btn]:hover{background:color-mix(in srgb, currentColor 12%, transparent) !important;` +
-                  `border-radius:${radius} !important}`;
-            document.getElementById(PREFIX + '-btn-style')?.remove();
-            document.head.appendChild(styleEl);
-            log('按鈕 hover 樣式來源：', hoverDecls.length ? '取自網站樣式表' : '近似值（樣式表裡找不到對應規則）');
 
             btn.addEventListener('click', ev => {
                 ev.preventDefault();
@@ -1292,10 +1236,25 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             }, true);
 
             document.body.appendChild(btn);
-            log('按鈕已建立並掛在 document.body（fixed 定位），避開 Google 的渲染範圍');
+            log('按鈕已建立（沿用「選項」的 class）並掛在 document.body，避開 Google 的渲染範圍');
         }
+        // 文字要更新時，改的是承載文字的那一層，不是整顆按鈕的 textContent
+        setButtonLabel(btn, state.active ? CLOSE_LABEL : BUTTON_LABEL);
         positionButton(btn, optionsBtn);
         return true;
+    }
+
+    /** 只換文字、不動結構——直接改 textContent 會把內層的樣式節點一起清掉 */
+    function setButtonLabel(btn, label) {
+        const walker = document.createTreeWalker(btn, NodeFilter.SHOW_TEXT);
+        let first = null;
+        const rest = [];
+        while (walker.nextNode()) {
+            if (!first) first = walker.currentNode; else rest.push(walker.currentNode);
+        }
+        if (first) { first.textContent = label; rest.forEach(n => { n.textContent = ''; }); }
+        else btn.appendChild(document.createTextNode(label));
+        btn.setAttribute('aria-label', label);
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -1366,9 +1325,12 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         bar.className = PREFIX + '-bar';
         const title = document.createElement('b');
         title.textContent = BUTTON_LABEL;
-        const closeBtn = document.createElement('button');
-        closeBtn.className = PREFIX + '-close';
-        closeBtn.textContent = '關閉，回到路線';
+        // 用同一個範本，樣式與另外兩顆一致
+        const refBtn = findOptionsButton();
+        const closeBtn = refBtn
+            ? buildFromTemplate(refBtn, '關閉，回到路線')
+            : Object.assign(document.createElement('button'), { textContent: '關閉，回到路線' });
+        closeBtn.classList.add(PREFIX + '-close');
         closeBtn.addEventListener('click', ev => { ev.preventDefault(); ev.stopPropagation(); deactivate(); });
         bar.appendChild(title);
         bar.appendChild(closeBtn);
