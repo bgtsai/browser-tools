@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.10.0
+// @version      0.11.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -975,6 +975,27 @@
         clone.setAttribute('aria-label', '路線降雨預報');
 
         clone.addEventListener('click', ev => {
+            // 診斷用：元素堆疊顯示「選項」上方沒有我們的元素，但實測按「選項」卻觸發這裡。
+            // 兩者矛盾，最可能是量測與點擊發生在不同的版面狀態下（那一列的結構會變動）。
+            // 因此在點擊當下把現場記錄下來：實際被點到的是誰、兩顆按鈕當時各在哪裡。
+            const t = ev.target;
+            const myRect = clone.getBoundingClientRect();
+            const optNow = [...document.querySelectorAll('button')]
+                .find(b => b.textContent.trim() === SITE_SELECTORS.optionsButtonText);
+            const optRect = optNow ? optNow.getBoundingClientRect() : null;
+            const overlap = optRect &&
+                !(myRect.right <= optRect.left || myRect.left >= optRect.right ||
+                    myRect.bottom <= optRect.top || myRect.top >= optRect.bottom);
+            log('點擊事件：被點到的元素=', t && t.tagName,
+                'class=', t && String(t.className).slice(0, 40),
+                'text=', JSON.stringify((t && t.textContent || '').trim().slice(0, 12)),
+                '｜我們的按鈕 rect=', Math.round(myRect.x), Math.round(myRect.y),
+                Math.round(myRect.width) + 'x' + Math.round(myRect.height),
+                '｜選項 rect=', optRect ? `${Math.round(optRect.x)},${Math.round(optRect.y)} ` +
+                    `${Math.round(optRect.width)}x${Math.round(optRect.height)}` : '找不到',
+                '｜兩者重疊=', overlap ? '是' : '否');
+            if (overlap) warn('我們的按鈕與「選項」在點擊當下重疊，這就是選項被攔截的原因');
+
             ev.preventDefault();
             ev.stopPropagation();
             toggle('注入按鈕');
@@ -999,7 +1020,22 @@
         } else {
             clone.style.setProperty('margin-right', BUTTON_GAP_PX + 'px', 'important');
         }
-        log('已注入按鈕，原「選項」定位方式=', optCS.position);
+        // 擺好之後立刻驗證有沒有壓到「選項」。用算出來的座標定位有個風險：
+        // 那一列的結構會隨狀態變動（實測看過多出一層 wrapper），一變就可能飄到「選項」上面。
+        // 與其等使用者踩到，不如當場量、發現重疊就退回一般流排版。
+        const verifyRect = clone.getBoundingClientRect();
+        const optRect2 = optionsBtn.getBoundingClientRect();
+        const overlapping =
+            !(verifyRect.right <= optRect2.left || verifyRect.left >= optRect2.right ||
+                verifyRect.bottom <= optRect2.top || verifyRect.top >= optRect2.bottom);
+        if (overlapping) {
+            warn('注入按鈕與「選項」重疊，改用一般流排版');
+            ['position', 'top', 'bottom', 'left', 'right'].forEach(k => clone.style.removeProperty(k));
+            clone.style.setProperty('position', 'relative', 'important');
+            clone.style.setProperty('margin-right', BUTTON_GAP_PX + 'px', 'important');
+        }
+        log('已注入按鈕，原「選項」定位方式=', optCS.position,
+            '｜擺位後與選項重疊=', overlapping ? '是（已退回一般流）' : '否');
         return true;
     }
 
