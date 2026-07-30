@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.11.0
+// @version      0.12.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -946,7 +946,19 @@
     function injectButton() {
         const optionsBtn = findOptionsButton();
         if (!optionsBtn) return false;
-        if (optionsBtn.parentElement.querySelector('[data-' + PREFIX + '-btn]')) return true;
+
+        // 全文件只允許存在一顆注入按鈕。
+        // 先前的檢查只看「選項」當下的父層有沒有，看不到被搬到別處的舊按鈕，
+        // 於是 Google 重繪面板時會一直疊加——實測出現過「畫面上一顆在正確位置、
+        // 另一顆看不見地疊在『選項』上」，點擊被那顆看不見的攔截。
+        const existing = [...document.querySelectorAll('[data-' + PREFIX + '-btn]')];
+        const alreadyOk = existing.length === 1 &&
+            existing[0].parentElement === optionsBtn.parentElement;
+        if (alreadyOk) return true;
+        if (existing.length) {
+            log('清除既有的注入按鈕', existing.length, '顆後重新注入');
+            existing.forEach(el => el.remove());
+        }
 
         // 複製「選項」按鈕以完整繼承字型、尺寸、hover 效果——
         // Google 的 class 是混淆過的、會隨版本變動，照抄 CSS 一定會壞。
