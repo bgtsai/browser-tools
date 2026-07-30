@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.6.1
+// @version      0.7.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -854,8 +854,10 @@
   grid-template-columns:${ROWH_W_PX}px repeat(var(--${PREFIX}-cols),${PITCH_PX}px)}
 .${PREFIX}-corner{position:sticky;top:0;left:0;z-index:40;background:#fff;height:${HEADER_H_PX}px;
   border-bottom:1px solid #e8eaed;border-right:1px solid #e8eaed}
+/* 只吸附橫向（inline）。此元素縱向是 sticky，若連縱向也吸附，
+   它的吸附區會永遠等於當下捲動位置，瀏覽器就不斷把 Y 軸對回它 → 一 hover 就跳回最上面 */
 .${PREFIX}-h{position:sticky;top:0;z-index:20;background:#fff;height:${HEADER_H_PX}px;
-  border-bottom:1px solid #e8eaed;scroll-snap-align:start}
+  border-bottom:1px solid #e8eaed;scroll-snap-align:none start}
 .${PREFIX}-h::before{content:"";position:absolute;left:0;right:0;top:${TIMELINE_AXIS_Y_PX}px;height:2px;background:#c7d9fb}
 .${PREFIX}-h.${PREFIX}-first::before{left:50%}
 .${PREFIX}-h.${PREFIX}-last::before{right:50%}
@@ -880,7 +882,8 @@
   padding:1px 4px;border-radius:3px;visibility:hidden}
 .${PREFIX}-h.${PREFIX}-hl .${PREFIX}-tl{visibility:visible}
 /* 列標頭：不透明白底＋往左延伸的陰影，避免捲動時內容從左緣露出來 */
-.${PREFIX}-rh{position:sticky;left:0;z-index:10;background:#fff;scroll-snap-align:start;
+/* 只吸附縱向（block）。橫向是 sticky，理由同上 */
+.${PREFIX}-rh{position:sticky;left:0;z-index:10;background:#fff;scroll-snap-align:start none;
   display:flex;align-items:center;
   justify-content:flex-end;padding-right:8px;font-size:12px;white-space:nowrap;
   border-right:1px solid #e8eaed;transition:background .08s;gap:6px;
