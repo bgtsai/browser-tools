@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.7.0
+// @version      0.8.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -110,6 +110,7 @@
         container: null,
         hiddenBlocks: [],
         originalPanelWidth: '',
+        optionsClickHandler: null,
         townCache: null,
     };
 
@@ -961,7 +962,7 @@
         clone.addEventListener('click', ev => {
             ev.preventDefault();
             ev.stopPropagation();
-            toggle();
+            toggle('注入按鈕');
         }, true);
 
         optionsBtn.parentElement.insertBefore(clone, optionsBtn);
@@ -991,12 +992,17 @@
     // 面板切換
     // ════════════════════════════════════════════════════════════════
 
-    function toggle() {
+    function toggle(source) {
+        log('toggle 被呼叫，來源=', source || '未標示', '目前狀態=', state.active ? '開啟' : '關閉');
         if (state.active) { deactivate(); return; }
         activate();
     }
 
     function deactivate() {
+        if (state.optionsClickHandler) {
+            document.removeEventListener('click', state.optionsClickHandler, true);
+            state.optionsClickHandler = null;
+        }
         const btn = document.querySelector('[data-' + PREFIX + '-btn]');
         if (btn) btn.removeAttribute('data-' + PREFIX + '-on');
         state.hiddenBlocks.forEach(({ el, display }) => { el.style.display = display; });
@@ -1062,6 +1068,20 @@
         state.active = true;
         const btn = document.querySelector('[data-' + PREFIX + '-btn]');
         if (btn) btn.setAttribute('data-' + PREFIX + '-on', '1');
+
+        // Google 的「選項」面板就展開在灰線以下，而那整段正是我們啟用時隱藏掉的範圍。
+        // 若不處理，使用者按「選項」會覺得「沒反應／還是我們的表格」——其實面板開了、只是被藏著。
+        // 因此偵測到點擊原本的「選項」時，先把我們的表格收起來，把版面還給它。
+        state.optionsClickHandler = ev => {
+            const target = ev.target;
+            if (!target || !target.closest) return;
+            const btnEl = target.closest('button');
+            if (!btnEl || btnEl.hasAttribute('data-' + PREFIX + '-btn')) return;
+            if (btnEl.textContent.trim() !== SITE_SELECTORS.optionsButtonText) return;
+            log('偵測到點擊原本的「選項」，先收起表格把版面讓出來');
+            deactivate();
+        };
+        document.addEventListener('click', state.optionsClickHandler, true);
 
         run(wrap).catch(err => {
             warn(err);
