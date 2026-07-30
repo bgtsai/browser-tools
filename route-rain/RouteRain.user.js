@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.5.0
+// @version      0.6.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -30,6 +30,7 @@
 
     const PREFIX = 'rr';                       // 自己加到 DOM 上的 class／屬性一律加專案前綴
     const BUTTON_LABEL = '旅途中的雨';         // 注入到面板上的按鈕文字
+    const BUTTON_GAP_PX = 8;                   // 注入按鈕與原「選項」之間的間距
 
     // 節點切分
     const SUBDIVIDE_SEC = 15 * 60;             // 同一鄉鎮停留超過此秒數就多切一個節點
@@ -824,10 +825,12 @@
 [data-${PREFIX}-btn] *::before,[data-${PREFIX}-btn] *::after{content:none !important}
 /* 原按鈕若是絕對定位（例如靠右釘住），複製出來的會落在同一個位置而與原按鈕重疊。
    強制回到一般流排版，並讓寬度隨文字撐開，不要沿用原本的固定寬度。 */
-[data-${PREFIX}-btn]{position:relative !important;inset:auto !important;
-  float:none !important;width:auto !important;min-width:0 !important;
-  max-width:none !important;flex:0 0 auto !important;white-space:nowrap !important;
-  margin-right:4px !important;transform:none !important}
+/* width:auto 在 display:block 的按鈕上等於撐滿整列，會整個蓋住右側原本的「選項」，
+   使用者點「選項」其實點到的是我們這一顆——所以寬度必須改成隨內容收縮。 */
+[data-${PREFIX}-btn]{display:inline-flex !important;align-items:center !important;
+  width:fit-content !important;min-width:0 !important;max-width:none !important;
+  flex:0 0 auto !important;float:none !important;white-space:nowrap !important;
+  transform:none !important}
 [data-${PREFIX}-btn] *{position:static !important;width:auto !important;
   min-width:0 !important;max-width:none !important;white-space:nowrap !important}
 [data-${PREFIX}-btn][data-${PREFIX}-on="1"]{background:#e8f0fe;border-radius:8px}
@@ -871,10 +874,13 @@
 .${PREFIX}-h.${PREFIX}-hl .${PREFIX}-dot{background:#1a73e8;transform:translate(-50%,-50%) scale(1.9)}
 .${PREFIX}-h.${PREFIX}-hl .${PREFIX}-hour{transform:translate(-50%,-50%) scale(1.15);
   box-shadow:0 0 0 2px #fff,0 0 0 5px rgba(26,115,232,.42)}
+/* 用 visibility 而非 display 切換：display 會改變版面，一改就觸發回流，
+   scroll-snap 隨即重新對位——這正是「滑鼠一離開表格就跳回最上面」的來源。
+   visibility 不影響版面，切換時不會回流。 */
 .${PREFIX}-tl{position:absolute;top:${TIMELINE_AXIS_Y_PX + 16}px;left:50%;transform:translateX(-50%);
   font-size:11px;font-weight:700;color:#1a73e8;white-space:nowrap;background:#fff;
-  padding:1px 4px;border-radius:3px;display:none}
-.${PREFIX}-h.${PREFIX}-hl .${PREFIX}-tl{display:block}
+  padding:1px 4px;border-radius:3px;visibility:hidden}
+.${PREFIX}-h.${PREFIX}-hl .${PREFIX}-tl{visibility:visible}
 /* 列標頭：不透明白底＋往左延伸的陰影，避免捲動時內容從左緣露出來 */
 .${PREFIX}-rh{position:sticky;left:0;z-index:10;background:#fff;scroll-snap-align:start;
   display:flex;align-items:center;
@@ -958,7 +964,25 @@
         }, true);
 
         optionsBtn.parentElement.insertBefore(clone, optionsBtn);
-        log('已注入「路雨」按鈕');
+
+        // 擺位：原本的「選項」若是絕對定位（靠右釘住），複製出來的會落在同一個座標上重疊。
+        // 先前改成強制回一般流，結果按鈕跑到整列最左邊、還撐滿整列蓋住「選項」。
+        // 正解是沿用它的定位方式，只把 right 往左推「選項的寬度 + 間距」。
+        const optCS = getComputedStyle(optionsBtn);
+        if (optCS.position === 'absolute' || optCS.position === 'fixed') {
+            const optRect = optionsBtn.getBoundingClientRect();
+            const anchor = optionsBtn.offsetParent || optionsBtn.parentElement;
+            const anchorRect = anchor.getBoundingClientRect();
+            clone.style.setProperty('position', optCS.position, 'important');
+            clone.style.setProperty('top', optCS.top, 'important');
+            clone.style.setProperty('bottom', optCS.bottom, 'important');
+            clone.style.setProperty('left', 'auto', 'important');
+            clone.style.setProperty('right',
+                Math.round(anchorRect.right - optRect.left + BUTTON_GAP_PX) + 'px', 'important');
+        } else {
+            clone.style.setProperty('margin-right', BUTTON_GAP_PX + 'px', 'important');
+        }
+        log('已注入按鈕，原「選項」定位方式=', optCS.position);
         return true;
     }
 
