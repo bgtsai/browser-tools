@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.15.0
+// @version      0.16.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -58,9 +58,11 @@
     // 預報資料
     const CWA_BUCKET_HOURS = 3;                // 降雨機率的時段長度，timeFrom/timeTo 必須對齊此邊界
     const FORECAST_HORIZON_HOURS = 96;         // 「未來3天」資料集實測涵蓋 96 小時
+    const CACHE_TTL_MS = 30 * 60 * 1000;       // 快取有效期：資料齊全且未超過此時間就直接沿用
     // 儲存鍵
     const KEY_GOOGLE = 'googleMapsApiKey';
     const KEY_CWA = 'cwaAuthorization';
+    const KEY_CWA_CACHE = 'cwaForecastCache';
 
     // ────────────────────────────────────────────────────────────────
     // 依賴 Google Maps DOM 結構的選擇器，集中一處
@@ -795,6 +797,80 @@
         return { forecast, failures, callCount: byCounty.size };
     }
 
+    // ── 快取 ──
+    // 規則：
+    //   1. 每次向氣象署取資料都記下時間
+    //   2. 下次先檢查「這次需要的地點與時間範圍」快取裡是否齊全
+    //   3. 有缺 → 整批重新取（不補差額），並更新時間
+    //   4. 沒缺 → 看時間，未超過 CACHE_TTL_MS 就直接沿用
+    // 之所以「有缺就整批重取」而不是只補缺的部分：氣象署的預報會整批更新，
+    // 混用不同時間點取得的資料，同一張表裡各列的基準會不一致。
+
+    function loadCache() {
+        try {
+            const raw = GM_getValue(KEY_CWA_CACHE, '');
+            if (!raw) return null;
+            const obj = JSON.parse(raw);
+            if (!obj || !obj.towns) return null;
+            return obj;
+        } catch (err) {
+            warn('快取讀取失敗，視為沒有快取：', err.message);
+            return null;
+        }
+    }
+
+    function saveCache(forecast, fromMs, toMs) {
+        const towns = {};
+        for (const [name, rows] of forecast) towns[name] = rows;
+        try {
+            GM_setValue(KEY_CWA_CACHE, JSON.stringify({
+                fetchedAt: Date.now(), fromMs, toMs, towns,
+            }));
+        } catch (err) {
+            warn('快取寫入失敗（不影響本次結果）：', err.message);
+        }
+    }
+
+    /** 檢查快取能否滿足這次的需求：地點要齊全，時間範圍也要涵蓋得到 */
+    function cacheShortfall(cache, neededTowns, fromMs, toMs) {
+        if (!cache) return { reason: '沒有快取' };
+        const missing = neededTowns.filter(t => !cache.towns[t] || !cache.towns[t].length);
+        if (missing.length) return { reason: '缺少地點：' + missing.join('、') };
+        // 地點有、但時間範圍不夠一樣算缺——否則表格會出現一片查不到值的空白格
+        if (!(cache.fromMs <= fromMs && cache.toMs >= toMs)) {
+            return { reason: '快取的時間範圍涵蓋不到這次需要的區間' };
+        }
+        return null;
+    }
+
+    async function getForecast(auth, nodes, timeFrom, timeTo) {
+        const neededTowns = [...new Set(nodes.map(n => n.town))];
+        const fromMs = timeFrom.getTime(), toMs = timeTo.getTime();
+        const cache = loadCache();
+        const shortfall = cacheShortfall(cache, neededTowns, fromMs, toMs);
+
+        if (!shortfall) {
+            const age = Date.now() - cache.fetchedAt;
+            if (age <= CACHE_TTL_MS) {
+                const forecast = new Map(Object.entries(cache.towns));
+                log('沿用快取：資料齊全且僅', Math.round(age / 60000), '分鐘前取得');
+                return {
+                    forecast, failures: [], callCount: 0,
+                    fetchedAt: cache.fetchedAt, fromCache: true,
+                };
+            }
+            log('快取資料齊全，但已過', Math.round(age / 60000), '分鐘，重新取得');
+        } else {
+            log('快取不可用（' + shortfall.reason + '），重新取得');
+        }
+
+        const res = await fetchForecast(auth, nodes, timeFrom, timeTo);
+        // 只有全部成功才寫入快取，否則下次會沿用一份本來就不完整的資料
+        if (!res.failures.length) saveCache(res.forecast, fromMs, toMs);
+        else warn('本次有縣市取得失敗，不寫入快取');
+        return { ...res, fetchedAt: Date.now(), fromCache: false };
+    }
+
     function lookupForecast(forecast, town, whenMs) {
         const rows = forecast.get(town);
         if (!rows) return null;
@@ -1219,8 +1295,8 @@
         clearBody(wrap);
         showMessage(wrap, '正在向中央氣象署取得降雨預報…');
         const lastArrive = new Date(departures[departures.length - 1].getTime() + totalSec * 1000);
-        const { forecast, failures, callCount } =
-            await fetchForecast(keys.cwa, nodes, departures[0], lastArrive);
+        const { forecast, failures, callCount, fetchedAt, fromCache } =
+            await getForecast(keys.cwa, nodes, departures[0], lastArrive);
 
         clearBody(wrap);
         render(wrap, {
@@ -1232,6 +1308,8 @@
                 selected,
                 callCount,
                 failures,
+                fetchedAt,
+                fromCache,
                 altCount: routes.length,
             },
         });
@@ -1326,7 +1404,9 @@
             `節點 ${nodes.length} 個`,
             `涵蓋 ${new Set(nodes.map(n => n.county + n.town)).size} 個鄉鎮`,
             `總行程 ${Math.round(totalSec / 60)} 分`,
-            `氣象署呼叫 ${meta.callCount} 次`,
+            meta.fromCache
+                ? `氣象資料：沿用快取（${Math.round((Date.now() - meta.fetchedAt) / 60000)} 分鐘前取得）`
+                : `氣象資料：本次重新取得，呼叫 ${meta.callCount} 次`,
             `交通方式 ${meta.mode.mode}（判斷依據：${meta.mode.via}）`,
             `路線比對：${meta.matchNote}`,
         ];
