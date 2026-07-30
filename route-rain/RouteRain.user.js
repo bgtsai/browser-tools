@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.13.1
+// @version      0.14.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -1002,6 +1002,23 @@
 
         const btn = buildButton(optionsBtn);
         btn.addEventListener('click', ev => {
+            // 這段診斷在 v0.13.0 改寫 injectButton 時被我弄丟了，補回來。
+            // 目前的矛盾：稽核顯示只有一顆注入按鈕、與「選項」也沒有重疊，
+            // 但按「選項」仍會觸發這個只掛在自己身上的 listener。
+            // 事件路徑會直接顯示這個事件是怎麼走到我們身上的。
+            const t = ev.target;
+            const path = (ev.composedPath ? ev.composedPath() : [])
+                .filter(n => n && n.nodeType === 1)
+                .slice(0, 6)
+                .map(n => `${n.tagName.toLowerCase()}${n.hasAttribute && n.hasAttribute('data-' + PREFIX + '-btn') ? '[RR]' : ''}` +
+                    `.${String(n.className || '').trim().split(/\s+/)[0] || '-'}`)
+                .join(' > ');
+            log('點擊：target=', t && t.tagName,
+                'class=', t && String(t.className).slice(0, 30),
+                'text=', JSON.stringify((t && t.textContent || '').trim().slice(0, 10)),
+                '｜currentTarget 是我們的按鈕=', ev.currentTarget === btn,
+                '｜isTrusted=', ev.isTrusted,
+                '｜路徑=', path);
             ev.preventDefault();
             ev.stopPropagation();
             toggle('注入按鈕');
