@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.8.0
+// @version      0.9.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -1191,6 +1191,7 @@
             nodes, departures, forecast, totalSec,
             meta: {
                 matchNote: picked.matchNote,
+                routeDistanceMeters: route.distanceMeters,
                 mode: modeInfo,
                 selected,
                 callCount,
@@ -1204,7 +1205,12 @@
     // 呈現
     // ════════════════════════════════════════════════════════════════
 
-    const DURATION_MISMATCH_RATIO = 0.25;      // 與面板顯示值的相對誤差超過此值就提出警告
+    // 判斷「交通方式是否搞錯」要用距離而不是時間：
+    // 我們沒有指定 routingPreference，拿到的是不含即時路況的時間；
+    // 面板顯示的則是含路況的時間，開車在尖峰時段差 25% 以上很正常，那不是錯誤。
+    // 距離不受路況影響，交通方式若判斷錯（例如把步行算成開車）距離一定也會差很多。
+    const DISTANCE_MISMATCH_RATIO = 0.25;      // 距離相對誤差超過此值 → 判定交通方式可能錯誤
+    const DURATION_MISMATCH_RATIO = 0.25;      // 距離吻合但時間差超過此值 → 提示路況差異，不是錯誤
 
     const pad2 = n => String(n).padStart(2, '0');
     const clockOf = d => pad2(d.getHours()) + ':' + pad2(d.getMinutes());
@@ -1288,15 +1294,26 @@
             `交通方式 ${meta.mode.mode}（判斷依據：${meta.mode.via}）`,
             `路線比對：${meta.matchNote}`,
         ];
-        // 安全網：算出來的行程時間與面板顯示值差太多，通常代表交通方式判斷錯了。
-        // 與其安靜地產出一張錯的表，不如直接把矛盾指出來。
-        const shown = meta.selected && meta.selected.durationSec;
-        if (shown) {
-            const diff = Math.abs(totalSec - shown) / shown;
-            if (diff > DURATION_MISMATCH_RATIO) {
-                lines.push(`<span class="${PREFIX}-warn">⚠ 面板顯示「${meta.selected.durationText}」，` +
-                    `但算出來是 ${Math.round(totalSec / 60)} 分——交通方式可能判斷錯誤，` +
+        // 安全網：先用距離判斷交通方式有沒有搞錯（距離不受路況影響），
+        // 距離吻合才進一步看時間差，而時間差多半只是「含不含即時路況」的差異。
+        const shownDist = meta.selected && meta.selected.distanceMeters;
+        const shownDur = meta.selected && meta.selected.durationSec;
+        let distMismatch = false;
+        if (shownDist && meta.routeDistanceMeters) {
+            const diff = Math.abs(meta.routeDistanceMeters - shownDist) / shownDist;
+            if (diff > DISTANCE_MISMATCH_RATIO) {
+                distMismatch = true;
+                lines.push(`<span class="${PREFIX}-warn">⚠ 面板顯示 ${meta.selected.distanceText}，` +
+                    `但算出來是 ${(meta.routeDistanceMeters / 1000).toFixed(1)} 公里` +
+                    `（差 ${Math.round(diff * 100)}%）——交通方式或路線可能判斷錯誤，` +
                     `這張表的抵達時刻不可信。</span>`);
+            }
+        }
+        if (!distMismatch && shownDur) {
+            const diff = Math.abs(totalSec - shownDur) / shownDur;
+            if (diff > DURATION_MISMATCH_RATIO) {
+                lines.push(`面板時間「${meta.selected.durationText}」含即時路況；` +
+                    `本表以無路況時間 ${Math.round(totalSec / 60)} 分計算，抵達時刻可能偏早。`);
             }
         }
         if (meta.failures && meta.failures.length) {
