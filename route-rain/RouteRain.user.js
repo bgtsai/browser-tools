@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.18.0
+// @version      0.19.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -1147,6 +1147,25 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
      * 因此改成：按鈕掛在 document.body、用 fixed 定位貼齊「選項」左側，
      * 完全不進入 Google 的渲染範圍，它就無從接管。代價是位置要自己維護。
      */
+    /**
+     * 沿祖先鏈往上找第一個「真正不透明」的背景色。
+     * 直接用 getComputedStyle(el).backgroundColor 有個陷阱：多數容器是 rgba(0,0,0,0)，
+     * 那是一個非空字串，`|| '#fff'` 這種保護擋不住——「有值」不等於「不透明」。
+     * 蓋住底下的「選項」需要真正不透明的底色，否則文字會透出來，看起來就像按鈕沒出現。
+     */
+    function resolveOpaqueBackground(el) {
+        for (let n = el; n && n !== document.documentElement; n = n.parentElement) {
+            const bg = getComputedStyle(n).backgroundColor;
+            if (!bg) continue;
+            const m = bg.match(/rgba?\(([^)]+)\)/);
+            if (!m) continue;
+            const parts = m[1].split(',').map(s => parseFloat(s));
+            const alpha = parts.length > 3 ? parts[3] : 1;
+            if (alpha > 0.95) return bg;
+        }
+        return '#fff';
+    }
+
     function positionButton(btn, optionsBtn) {
         const r = optionsBtn.getBoundingClientRect();
         if (r.width === 0 && r.height === 0) { btn.style.display = 'none'; return; }
@@ -1159,11 +1178,13 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             btn.textContent = CLOSE_LABEL;
             btn.style.left = Math.round(r.left) + 'px';
             btn.style.minWidth = Math.round(r.width) + 'px';
-            btn.style.background = state.panelBg || '#fff';
+            btn.style.setProperty('background', state.panelBg || '#fff', 'important');
+            log('關閉按鈕定位：left=', Math.round(r.left), 'top=', Math.round(r.top),
+                'w>=', Math.round(r.width), '底色=', state.panelBg);
         } else {
             btn.textContent = BUTTON_LABEL;
             btn.style.minWidth = '';
-            btn.style.background = 'transparent';
+            btn.style.setProperty('background', 'transparent', 'important');
             btn.style.left = Math.round(r.left - btn.offsetWidth - BUTTON_GAP_PX) + 'px';
         }
     }
@@ -1356,7 +1377,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         panel.appendChild(wrap);
         state.container = wrap;
         state.active = true;
-        state.panelBg = getComputedStyle(panel).backgroundColor || '#fff';
+        state.panelBg = resolveOpaqueBackground(panel);
         const btn = document.querySelector('[data-' + PREFIX + '-btn]');
         if (btn) btn.setAttribute('data-' + PREFIX + '-on', '1');
         ensureButton();
