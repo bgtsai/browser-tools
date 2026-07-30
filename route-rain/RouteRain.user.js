@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.1.0
+// @version      0.2.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -48,6 +48,8 @@
                                                // 格數會上萬；第一版先封頂，確認效能後再放寬
     const TIMELINE_AXIS_Y_PX = 27;             // 時間軸線距標頭頂端的距離
     const HEADER_H_PX = 64;                    // 標頭列高度
+    const HOUR_DOT_PX = 20;                    // 整點圓直徑；加上 2px 外環後為 24px，
+                                               // 剛好等於欄節距，不會溢出到鄰欄被蓋掉
 
     // 預報資料
     const CWA_BUCKET_HOURS = 3;                // 降雨機率的時段長度，timeFrom/timeTo 必須對齊此邊界
@@ -304,17 +306,40 @@
      * 累積足夠樣本後再補成對照表。查不出來時退回 DRIVE 並在畫面上標明。
      */
     function detectTravelMode(urlTravelCode) {
-        const tabs = [...document.querySelectorAll('button[aria-label],div[role="tab"]')];
-        const selected = tabs.find(t =>
-            t.getAttribute('aria-selected') === 'true' || t.getAttribute('aria-checked') === 'true');
-        const label = selected ? (selected.getAttribute('aria-label') || selected.textContent || '') : '';
-        log('交通方式判斷：aria 標籤=', JSON.stringify(label), ' 網址 3e 代碼=', urlTravelCode);
+        // 交通方式頁籤在面板最上方那一排（開車／大眾運輸／步行／單車…）。
+        // 它不一定帶 aria-selected，實測也可能靠 class 或 aria-label 的「已選取」字樣表示，
+        // 所以三種訊號都找，並把所有候選記進 log 以便後續補強判斷條件。
+        const KEYWORDS = [
+            [/步行|走路|walk/i, 'WALK'],
+            [/自行車|單車|腳踏車|bicycl|bike/i, 'BICYCLE'],
+            [/大眾運輸|公共運輸|轉乘|transit/i, 'TRANSIT'],
+            [/開車|駕車|汽車|driv/i, 'DRIVE'],
+        ];
+        const cands = [...document.querySelectorAll('button,[role="tab"],[role="radio"]')]
+            .map(el => ({
+                el,
+                label: (el.getAttribute('aria-label') || el.getAttribute('data-tooltip') || el.textContent || '').trim(),
+                selected: el.getAttribute('aria-selected') === 'true' ||
+                    el.getAttribute('aria-checked') === 'true' ||
+                    el.getAttribute('aria-pressed') === 'true' ||
+                    /selected|active/i.test(String(el.className || '')),
+            }))
+            .filter(x => x.label && KEYWORDS.some(([re]) => re.test(x.label)));
 
-        if (/步行|walk/i.test(label)) return { mode: 'WALK', confident: true };
-        if (/自行車|單車|bicycl/i.test(label)) return { mode: 'BICYCLE', confident: true };
-        if (/大眾運輸|公共運輸|transit/i.test(label)) return { mode: 'TRANSIT', confident: true };
-        if (/開車|駕車|driv/i.test(label)) return { mode: 'DRIVE', confident: true };
-        return { mode: 'DRIVE', confident: false };
+        log('交通方式候選：', cands.map(x => `${x.selected ? '★' : '　'}${x.label}`).join(' | ') || '（無）',
+            '｜網址 3e 代碼=', urlTravelCode);
+
+        const hit = cands.find(x => x.selected);
+        if (hit) {
+            for (const [re, mode] of KEYWORDS) if (re.test(hit.label)) return { mode, confident: true, via: 'aria/class' };
+        }
+        // 退而求其次：只有一個候選符合關鍵字時就採用它
+        if (cands.length === 1) {
+            for (const [re, mode] of KEYWORDS) {
+                if (re.test(cands[0].label)) return { mode, confident: false, via: '唯一候選' };
+            }
+        }
+        return { mode: 'DRIVE', confident: false, via: '預設值' };
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -779,54 +804,63 @@
             });
         }
         const css = `
-.${PREFIX}-wrap{font-family:inherit;padding:8px 10px 14px;overflow:auto;max-height:calc(100vh - 320px)}
+.${PREFIX}-wrap{font-family:inherit;display:flex;flex-direction:column}
+.${PREFIX}-scroll{overflow:auto;max-height:calc(100vh - 360px)}
 .${PREFIX}-msg{padding:14px 12px;font-size:13px;color:#3c4043;line-height:1.7}
 .${PREFIX}-msg b{color:#1a73e8}
-.${PREFIX}-grid{display:grid;grid-auto-rows:${PITCH_PX}px;
+.${PREFIX}-grid{display:grid;grid-auto-rows:${PITCH_PX}px;width:max-content;
   grid-template-columns:${ROWH_W_PX}px repeat(var(--${PREFIX}-cols),${PITCH_PX}px)}
-.${PREFIX}-corner{position:sticky;top:0;left:0;z-index:30;background:#fff;height:${HEADER_H_PX}px;
+.${PREFIX}-corner{position:sticky;top:0;left:0;z-index:40;background:#fff;height:${HEADER_H_PX}px;
   border-bottom:1px solid #e8eaed;border-right:1px solid #e8eaed}
 .${PREFIX}-h{position:sticky;top:0;z-index:20;background:#fff;height:${HEADER_H_PX}px;
-  display:flex;align-items:flex-start;justify-content:center;padding-top:${TIMELINE_AXIS_Y_PX - 13}px;
   border-bottom:1px solid #e8eaed}
 .${PREFIX}-h::before{content:"";position:absolute;left:0;right:0;top:${TIMELINE_AXIS_Y_PX}px;height:2px;background:#c7d9fb}
 .${PREFIX}-h.${PREFIX}-first::before{left:50%}
 .${PREFIX}-h.${PREFIX}-last::before{right:50%}
+/* 整點欄疊在鄰欄之上，否則鄰欄的不透明白底會蓋掉圓圈外環，看起來像被裁切 */
+.${PREFIX}-h.${PREFIX}-oclock{z-index:21}
 .${PREFIX}-dot{position:absolute;top:${TIMELINE_AXIS_Y_PX}px;left:50%;transform:translate(-50%,-50%);
   width:7px;height:7px;border-radius:50%;background:#a9c2e8;box-shadow:0 0 0 3px #fff;
   transition:transform .08s,background .08s}
 .${PREFIX}-hour{position:absolute;top:${TIMELINE_AXIS_Y_PX}px;left:50%;transform:translate(-50%,-50%);
-  width:26px;height:26px;border-radius:50%;background:#1a73e8;color:#fff;font-size:12px;font-weight:700;
-  display:flex;align-items:center;justify-content:center;
-  box-shadow:0 0 0 3px #fff,0 0 0 6px rgba(26,115,232,.16);transition:box-shadow .08s,transform .08s}
-.${PREFIX}-h.${PREFIX}-hl{z-index:22}
+  width:${HOUR_DOT_PX}px;height:${HOUR_DOT_PX}px;border-radius:50%;background:#1a73e8;color:#fff;
+  font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;
+  box-shadow:0 0 0 2px #fff;transition:box-shadow .08s,transform .08s}
+.${PREFIX}-h.${PREFIX}-hl{z-index:30}
 .${PREFIX}-h.${PREFIX}-hl .${PREFIX}-dot{background:#1a73e8;transform:translate(-50%,-50%) scale(1.9)}
-.${PREFIX}-h.${PREFIX}-hl .${PREFIX}-hour{transform:translate(-50%,-50%) scale(1.12);
-  box-shadow:0 0 0 3px #fff,0 0 0 7px rgba(26,115,232,.42)}
-.${PREFIX}-tl{position:absolute;top:${TIMELINE_AXIS_Y_PX + 15}px;left:50%;transform:translateX(-50%);
-  font-size:11px;font-weight:700;color:#1a73e8;white-space:nowrap;background:#fff;padding:0 3px;display:none}
+.${PREFIX}-h.${PREFIX}-hl .${PREFIX}-hour{transform:translate(-50%,-50%) scale(1.15);
+  box-shadow:0 0 0 2px #fff,0 0 0 5px rgba(26,115,232,.42)}
+.${PREFIX}-tl{position:absolute;top:${TIMELINE_AXIS_Y_PX + 14}px;left:50%;transform:translateX(-50%);
+  font-size:11px;font-weight:700;color:#1a73e8;white-space:nowrap;background:#fff;
+  padding:1px 4px;border-radius:3px;display:none}
 .${PREFIX}-h.${PREFIX}-hl .${PREFIX}-tl{display:block}
+/* 列標頭：不透明白底＋往左延伸的陰影，避免捲動時內容從左緣露出來 */
 .${PREFIX}-rh{position:sticky;left:0;z-index:10;background:#fff;display:flex;align-items:center;
   justify-content:flex-end;padding-right:8px;font-size:12px;white-space:nowrap;
-  border-right:1px solid #e8eaed;transition:background .08s;gap:6px}
-.${PREFIX}-rh.${PREFIX}-hl{background:#e8f0fe}
+  border-right:1px solid #e8eaed;transition:background .08s;gap:6px;
+  box-shadow:-20px 0 0 #fff}
+.${PREFIX}-rh.${PREFIX}-hl{background:#e8f0fe;box-shadow:-20px 0 0 #e8f0fe}
 .${PREFIX}-rh .${PREFIX}-t{font-weight:600;color:#202124}
 .${PREFIX}-rh .${PREFIX}-m{color:#80868b;font-size:11px;min-width:40px;text-align:right}
 .${PREFIX}-rh.${PREFIX}-hl .${PREFIX}-m{color:#1a73e8;font-weight:700}
 .${PREFIX}-d{display:flex;align-items:center;justify-content:center}
 .${PREFIX}-c{width:${CELL_PX}px;height:${CELL_PX}px;border-radius:2px;cursor:pointer;display:block}
 .${PREFIX}-c.${PREFIX}-na{background:repeating-linear-gradient(45deg,#f1f3f4 0 4px,#e0e3e6 4px 8px)}
-.${PREFIX}-legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;align-items:center;
-  padding:10px 12px 0;color:#3c4043}
-.${PREFIX}-legend span.${PREFIX}-sw{width:18px;height:18px;border-radius:3px;display:inline-block;margin-right:5px}
+/* 說明區在捲動容器之外，永遠固定，且逐行垂直排列 */
+.${PREFIX}-info{padding:10px 12px 14px;border-top:1px solid #e8eaed}
+.${PREFIX}-legend{display:flex;flex-direction:column;gap:6px;font-size:12px;color:#3c4043}
 .${PREFIX}-legend div{display:flex;align-items:center}
-.${PREFIX}-scale{display:flex;align-items:center;gap:2px;padding:6px 12px 0;font-size:11px;color:#5f6368}
+.${PREFIX}-legend span.${PREFIX}-sw{width:18px;height:18px;border-radius:3px;display:inline-block;
+  margin-right:8px;flex:0 0 auto}
+.${PREFIX}-scale{display:flex;align-items:center;gap:2px;padding-bottom:10px;font-size:11px;color:#5f6368}
 .${PREFIX}-scale i{width:16px;height:14px;display:inline-block}
 .${PREFIX}-tip{position:fixed;z-index:2147483000;pointer-events:none;display:none;background:#202124;
   color:#fff;border-radius:8px;padding:9px 12px;font-size:12px;line-height:1.6;
   box-shadow:0 6px 20px rgba(0,0,0,.25);max-width:280px}
 .${PREFIX}-tip .${PREFIX}-k{color:#9aa0a6;display:inline-block;min-width:60px}
-.${PREFIX}-note{font-size:11.5px;color:#80868b;padding:8px 12px 0;line-height:1.6}
+.${PREFIX}-note{font-size:11.5px;color:#80868b;padding-top:10px;line-height:1.8}
+.${PREFIX}-note div{margin-bottom:2px}
+.${PREFIX}-warn{color:#c5221f;font-weight:600}
 `;
         const el = document.createElement('style');
         el.id = PREFIX + '-style';
@@ -856,22 +890,17 @@
         strip(clone);
         clone.querySelectorAll('*').forEach(strip);
 
-        // 實測的結構是 <div class="BunUDe">「選項」<div class="OyjIsf"></div></div>——
-        // 文字是父層的「直接文字節點」，旁邊還掛著一個空的子元素（負責 ripple 之類的效果）。
-        // 所以不能用 children.length === 0 當條件（會抓不到），也不能直接覆寫 textContent
-        // （那會把子元素一起清掉、失去原本的視覺效果）。正解：找出最深層那個文字剛好相符的
-        // 元素，只替換它的文字節點，保留元素子節點。
+        // 實測「路雨」與原本的「選項」會疊在一起顯示，代表原文字不只出現在一個地方
+        // （可能同時有可見標籤與無障礙用的隱藏標籤，或有絕對定位的重疊層）。
+        // 因此不能只替換「其中一個」文字節點——先把 clone 內所有文字節點清空，
+        // 再把新文字放進原本承載可見文字的那個元素，才不會殘留舊字。
         const holder = [...clone.querySelectorAll('*')].reverse()
-            .find(el => el.textContent.trim() === SITE_SELECTORS.optionsButtonText);
-        const target = holder || clone;
-        let replaced = false;
-        for (const nd of [...target.childNodes]) {
-            if (nd.nodeType === Node.TEXT_NODE && nd.textContent.trim()) {
-                nd.textContent = replaced ? '' : '路雨';
-                replaced = true;
-            }
-        }
-        if (!replaced) target.insertBefore(document.createTextNode('路雨'), target.firstChild);
+            .find(el => el.textContent.trim() === SITE_SELECTORS.optionsButtonText) || clone;
+        const walker = document.createTreeWalker(clone, NodeFilter.SHOW_TEXT);
+        const textNodes = [];
+        while (walker.nextNode()) textNodes.push(walker.currentNode);
+        textNodes.forEach(nd => { nd.textContent = ''; });
+        holder.insertBefore(document.createTextNode('路雨'), holder.firstChild);
         clone.setAttribute('aria-label', '路線降雨預報');
 
         clone.addEventListener('click', ev => {
@@ -1043,11 +1072,17 @@
     // 呈現
     // ════════════════════════════════════════════════════════════════
 
+    const DURATION_MISMATCH_RATIO = 0.25;      // 與面板顯示值的相對誤差超過此值就提出警告
+
     const pad2 = n => String(n).padStart(2, '0');
     const clockOf = d => pad2(d.getHours()) + ':' + pad2(d.getMinutes());
 
     function render(wrap, data) {
         const { nodes, departures, forecast, totalSec, meta } = data;
+
+        // 捲動容器只包格線；色階、圖例、備註放在容器外，才不會跟著資料一起捲走
+        const scroll = document.createElement('div');
+        scroll.className = PREFIX + '-scroll';
 
         const grid = document.createElement('div');
         grid.className = PREFIX + '-grid';
@@ -1057,6 +1092,7 @@
         departures.forEach((d, i) => {
             const isHour = d.getMinutes() === 0;
             const cls = [PREFIX + '-h'];
+            if (isHour) cls.push(PREFIX + '-oclock');
             if (i === 0) cls.push(PREFIX + '-first');
             if (i === departures.length - 1) cls.push(PREFIX + '-last');
             parts.push(
@@ -1076,12 +1112,12 @@
             for (let ci = 0; ci < departures.length; ci++) {
                 const whenMs = departures[ci].getTime() + n.sec * 1000;
                 const row = lookupForecast(forecast, n.town, whenMs);
-                let cls, pop = '', sev = 0;
+                let cls;
                 if (!row || row.pop == null) {
                     cls = `${PREFIX}-c ${PREFIX}-na`;
                 } else {
-                    pop = Math.round(row.pop / 10) * 10;
-                    sev = severityOf(row.weather, row.code);
+                    const pop = Math.round(row.pop / 10) * 10;
+                    const sev = severityOf(row.weather, row.code);
                     cls = `${PREFIX}-c ${PREFIX}-s${sev}-${pop}`;
                 }
                 parts.push(
@@ -1090,15 +1126,18 @@
             }
         });
         grid.innerHTML = parts.join('');
-        wrap.appendChild(grid);
+        scroll.appendChild(grid);
+        wrap.appendChild(scroll);
 
-        // 色階與圖例
+        const info = document.createElement('div');
+        info.className = PREFIX + '-info';
+
         const scale = document.createElement('div');
         scale.className = PREFIX + '-scale';
         scale.innerHTML = '降雨機率 ' +
             Object.keys(PALETTE).map(p => `<i style="background:${PALETTE[p][0]}"></i>`).join('') +
             ' 0→100%';
-        wrap.appendChild(scale);
+        info.appendChild(scale);
 
         const legend = document.createElement('div');
         legend.className = PREFIX + '-legend';
@@ -1106,22 +1145,32 @@
             `<div><span class="${PREFIX}-sw" style="background:${PALETTE[60][0]}"></span>不會下雨的天氣型態</div>` +
             `<div><span class="${PREFIX}-sw" style="background:${PALETTE[60][1]}"></span>有可能（局部／短暫／或）</div>` +
             `<div><span class="${PREFIX}-sw" style="background:${PALETTE[60][2]}"></span>基本上會遇到／雷雨・雪</div>`;
-        wrap.appendChild(legend);
+        info.appendChild(legend);
 
         const note = document.createElement('div');
         note.className = PREFIX + '-note';
-        const bits = [
-            `節點 ${nodes.length} 個／涵蓋 ${new Set(nodes.map(n => n.county + n.town)).size} 個鄉鎮`,
-            `總行程 ${Math.round(totalSec / 60)} 分`,
-            `氣象署呼叫 ${meta.callCount} 次`,
-            `交通方式 ${meta.mode.mode}${meta.mode.confident ? '' : '（自動判斷失敗，預設值）'}`,
-            `路線比對：${meta.matchNote}`,
+        const lines = [
+            `節點 ${nodes.length} 個／涵蓋 ${new Set(nodes.map(n => n.county + n.town)).size} 個鄉鎮　·　` +
+            `總行程 ${Math.round(totalSec / 60)} 分　·　氣象署呼叫 ${meta.callCount} 次`,
+            `交通方式 ${meta.mode.mode}（判斷依據：${meta.mode.via}）　·　路線比對：${meta.matchNote}`,
         ];
-        if (meta.failures && meta.failures.length) {
-            bits.push('取得失敗：' + meta.failures.join('、'));
+        // 安全網：算出來的行程時間與面板顯示值差太多，通常代表交通方式判斷錯了。
+        // 與其安靜地產出一張錯的表，不如直接把矛盾指出來。
+        const shown = meta.selected && meta.selected.durationSec;
+        if (shown) {
+            const diff = Math.abs(totalSec - shown) / shown;
+            if (diff > DURATION_MISMATCH_RATIO) {
+                lines.push(`<span class="${PREFIX}-warn">⚠ 面板顯示「${meta.selected.durationText}」，` +
+                    `但算出來是 ${Math.round(totalSec / 60)} 分——交通方式可能判斷錯誤，` +
+                    `這張表的抵達時刻不可信。</span>`);
+            }
         }
-        note.textContent = bits.join('　·　');
-        wrap.appendChild(note);
+        if (meta.failures && meta.failures.length) {
+            lines.push(`<span class="${PREFIX}-warn">取得失敗：${meta.failures.join('、')}</span>`);
+        }
+        note.innerHTML = lines.map(l => `<div>${l}</div>`).join('');
+        info.appendChild(note);
+        wrap.appendChild(info);
 
         bindInteractions(grid, nodes, departures, forecast);
     }
