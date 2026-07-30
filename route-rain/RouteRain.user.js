@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.12.0
+// @version      0.13.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -249,9 +249,13 @@
     }
 
     function findOptionsButton() {
-        // 用可見文字定位，不依賴混淆過的 class
+        // 用可見文字定位，不依賴混淆過的 class。
+        // 必須排除我們自己注入的按鈕：先前用 cloneNode 時，若文字替換沒套用到，
+        // 就會出現一顆文字仍是「選項」的注入按鈕，於是自己找到自己、無限疊加。
         const btns = [...document.querySelectorAll('button')];
-        return btns.find(b => b.textContent.trim() === SITE_SELECTORS.optionsButtonText) || null;
+        return btns.find(b =>
+            !b.hasAttribute('data-' + PREFIX + '-btn') &&
+            b.textContent.trim() === SITE_SELECTORS.optionsButtonText) || null;
     }
 
     /**
@@ -943,14 +947,43 @@
     // 按鈕注入
     // ════════════════════════════════════════════════════════════════
 
+    // 從「選項」身上抄過來的樣式屬性。只抄視覺相關的，不碰定位與行為。
+    const COPIED_STYLE_PROPS = [
+        'fontFamily', 'fontSize', 'fontWeight', 'letterSpacing', 'lineHeight',
+        'color', 'height', 'paddingTop', 'paddingBottom', 'paddingLeft', 'paddingRight',
+        'borderRadius', 'textTransform', 'whiteSpace',
+    ];
+
+    /**
+     * 建立注入按鈕。
+     *
+     * 這裡刻意「不」用 cloneNode 複製 Google 的按鈕，雖然那樣能自動繼承樣式。
+     * 實測連續三次修不好：複製品會連帶帶走內部結構與行為掛勾，
+     * 而且文字替換一旦沒套用到（例如那次找不到承載文字的元素），
+     * 就會產生一顆「長得像選項、行為卻是我們的」按鈕壓在真正的選項上，
+     * 使用者點下去以為在按選項、其實觸發我們的功能。
+     * 自己建一顆、只抄視覺樣式，結構完全由自己掌握，就沒有這種模稜兩可的狀態。
+     */
+    function buildButton(referenceBtn) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.setAttribute('data-' + PREFIX + '-btn', '1');
+        btn.setAttribute('aria-label', BUTTON_LABEL);
+        btn.textContent = BUTTON_LABEL;
+        const cs = getComputedStyle(referenceBtn);
+        COPIED_STYLE_PROPS.forEach(k => { btn.style[k] = cs[k]; });
+        btn.style.setProperty('background', 'transparent', 'important');
+        btn.style.setProperty('border', '0', 'important');
+        btn.style.setProperty('cursor', 'pointer', 'important');
+        return btn;
+    }
+
     function injectButton() {
         const optionsBtn = findOptionsButton();
         if (!optionsBtn) return false;
 
-        // 全文件只允許存在一顆注入按鈕。
-        // 先前的檢查只看「選項」當下的父層有沒有，看不到被搬到別處的舊按鈕，
-        // 於是 Google 重繪面板時會一直疊加——實測出現過「畫面上一顆在正確位置、
-        // 另一顆看不見地疊在『選項』上」，點擊被那顆看不見的攔截。
+        // 全文件只允許存在一顆注入按鈕。只檢查「選項」當下的父層是不夠的——
+        // 看不到被搬到別處的舊按鈕，Google 重繪面板時就會一直疊加。
         const existing = [...document.querySelectorAll('[data-' + PREFIX + '-btn]')];
         const alreadyOk = existing.length === 1 &&
             existing[0].parentElement === optionsBtn.parentElement;
@@ -960,94 +993,43 @@
             existing.forEach(el => el.remove());
         }
 
-        // 複製「選項」按鈕以完整繼承字型、尺寸、hover 效果——
-        // Google 的 class 是混淆過的、會隨版本變動，照抄 CSS 一定會壞。
-        const clone = optionsBtn.cloneNode(true);
-        clone.setAttribute('data-' + PREFIX + '-btn', '1');
-
-        // 清掉 Google 自己的行為掛勾，否則按下去會連帶觸發原本的「選項」面板
-        const strip = el => {
-            ['jsaction', 'jslog', 'jsname', 'data-value', 'aria-controls', 'aria-expanded', 'id']
-                .forEach(a => el.removeAttribute(a));
-        };
-        strip(clone);
-        clone.querySelectorAll('*').forEach(strip);
-
-        // 實測「路雨」與原本的「選項」會疊在一起顯示，代表原文字不只出現在一個地方
-        // （可能同時有可見標籤與無障礙用的隱藏標籤，或有絕對定位的重疊層）。
-        // 因此不能只替換「其中一個」文字節點——先把 clone 內所有文字節點清空，
-        // 再把新文字放進原本承載可見文字的那個元素，才不會殘留舊字。
-        const holder = [...clone.querySelectorAll('*')].reverse()
-            .find(el => el.textContent.trim() === SITE_SELECTORS.optionsButtonText) || clone;
-        const walker = document.createTreeWalker(clone, NodeFilter.SHOW_TEXT);
-        const textNodes = [];
-        while (walker.nextNode()) textNodes.push(walker.currentNode);
-        textNodes.forEach(nd => { nd.textContent = ''; });
-        holder.insertBefore(document.createTextNode(BUTTON_LABEL), holder.firstChild);
-        clone.setAttribute('aria-label', '路線降雨預報');
-
-        clone.addEventListener('click', ev => {
-            // 診斷用：元素堆疊顯示「選項」上方沒有我們的元素，但實測按「選項」卻觸發這裡。
-            // 兩者矛盾，最可能是量測與點擊發生在不同的版面狀態下（那一列的結構會變動）。
-            // 因此在點擊當下把現場記錄下來：實際被點到的是誰、兩顆按鈕當時各在哪裡。
-            const t = ev.target;
-            const myRect = clone.getBoundingClientRect();
-            const optNow = [...document.querySelectorAll('button')]
-                .find(b => b.textContent.trim() === SITE_SELECTORS.optionsButtonText);
-            const optRect = optNow ? optNow.getBoundingClientRect() : null;
-            const overlap = optRect &&
-                !(myRect.right <= optRect.left || myRect.left >= optRect.right ||
-                    myRect.bottom <= optRect.top || myRect.top >= optRect.bottom);
-            log('點擊事件：被點到的元素=', t && t.tagName,
-                'class=', t && String(t.className).slice(0, 40),
-                'text=', JSON.stringify((t && t.textContent || '').trim().slice(0, 12)),
-                '｜我們的按鈕 rect=', Math.round(myRect.x), Math.round(myRect.y),
-                Math.round(myRect.width) + 'x' + Math.round(myRect.height),
-                '｜選項 rect=', optRect ? `${Math.round(optRect.x)},${Math.round(optRect.y)} ` +
-                    `${Math.round(optRect.width)}x${Math.round(optRect.height)}` : '找不到',
-                '｜兩者重疊=', overlap ? '是' : '否');
-            if (overlap) warn('我們的按鈕與「選項」在點擊當下重疊，這就是選項被攔截的原因');
-
+        const btn = buildButton(optionsBtn);
+        btn.addEventListener('click', ev => {
             ev.preventDefault();
             ev.stopPropagation();
             toggle('注入按鈕');
         }, true);
+        optionsBtn.parentElement.insertBefore(btn, optionsBtn);
 
-        optionsBtn.parentElement.insertBefore(clone, optionsBtn);
-
-        // 擺位：原本的「選項」若是絕對定位（靠右釘住），複製出來的會落在同一個座標上重疊。
-        // 先前改成強制回一般流，結果按鈕跑到整列最左邊、還撐滿整列蓋住「選項」。
-        // 正解是沿用它的定位方式，只把 right 往左推「選項的寬度 + 間距」。
+        // 擺位：「選項」若是絕對定位（靠右釘住），我們沿用同一種定位方式，
+        // 只把 right 往左推「選項的寬度 + 間距」，否則會落在同一個座標上。
         const optCS = getComputedStyle(optionsBtn);
         if (optCS.position === 'absolute' || optCS.position === 'fixed') {
             const optRect = optionsBtn.getBoundingClientRect();
             const anchor = optionsBtn.offsetParent || optionsBtn.parentElement;
             const anchorRect = anchor.getBoundingClientRect();
-            clone.style.setProperty('position', optCS.position, 'important');
-            clone.style.setProperty('top', optCS.top, 'important');
-            clone.style.setProperty('bottom', optCS.bottom, 'important');
-            clone.style.setProperty('left', 'auto', 'important');
-            clone.style.setProperty('right',
+            btn.style.setProperty('position', optCS.position, 'important');
+            btn.style.setProperty('top', optCS.top, 'important');
+            btn.style.setProperty('bottom', optCS.bottom, 'important');
+            btn.style.setProperty('left', 'auto', 'important');
+            btn.style.setProperty('right',
                 Math.round(anchorRect.right - optRect.left + BUTTON_GAP_PX) + 'px', 'important');
         } else {
-            clone.style.setProperty('margin-right', BUTTON_GAP_PX + 'px', 'important');
+            btn.style.setProperty('margin-right', BUTTON_GAP_PX + 'px', 'important');
         }
-        // 擺好之後立刻驗證有沒有壓到「選項」。用算出來的座標定位有個風險：
-        // 那一列的結構會隨狀態變動（實測看過多出一層 wrapper），一變就可能飄到「選項」上面。
-        // 與其等使用者踩到，不如當場量、發現重疊就退回一般流排版。
-        const verifyRect = clone.getBoundingClientRect();
-        const optRect2 = optionsBtn.getBoundingClientRect();
-        const overlapping =
-            !(verifyRect.right <= optRect2.left || verifyRect.left >= optRect2.right ||
-                verifyRect.bottom <= optRect2.top || verifyRect.top >= optRect2.bottom);
-        if (overlapping) {
-            warn('注入按鈕與「選項」重疊，改用一般流排版');
-            ['position', 'top', 'bottom', 'left', 'right'].forEach(k => clone.style.removeProperty(k));
-            clone.style.setProperty('position', 'relative', 'important');
-            clone.style.setProperty('margin-right', BUTTON_GAP_PX + 'px', 'important');
-        }
-        log('已注入按鈕，原「選項」定位方式=', optCS.position,
-            '｜擺位後與選項重疊=', overlapping ? '是（已退回一般流）' : '否');
+
+        // 稽核：把目前文件裡所有注入按鈕的文字與座標印出來。
+        // 只要出現第二顆、或有哪一顆的文字不是預期值，一眼就看得到，不必再從症狀反推。
+        const audit = [...document.querySelectorAll('[data-' + PREFIX + '-btn]')].map(el => {
+            const r = el.getBoundingClientRect();
+            return `「${el.textContent.trim()}」@${Math.round(r.x)},${Math.round(r.y)} ` +
+                `${Math.round(r.width)}x${Math.round(r.height)}`;
+        });
+        const optRectNow = optionsBtn.getBoundingClientRect();
+        log('注入完成｜注入按鈕共', audit.length, '顆：', audit.join(' ／ '),
+            '｜選項 @' + Math.round(optRectNow.x) + ',' + Math.round(optRectNow.y),
+            Math.round(optRectNow.width) + 'x' + Math.round(optRectNow.height),
+            '｜選項定位=', optCS.position);
         return true;
     }
 
