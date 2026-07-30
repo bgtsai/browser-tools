@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.3.0
+// @version      0.4.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -29,6 +29,7 @@
     // ────────────────────────────────────────────────────────────────
 
     const PREFIX = 'rr';                       // 自己加到 DOM 上的 class／屬性一律加專案前綴
+    const BUTTON_LABEL = '旅途中的雨';         // 注入到面板上的按鈕文字
 
     // 節點切分
     const SUBDIVIDE_SEC = 15 * 60;             // 同一鄉鎮停留超過此秒數就多切一個節點
@@ -42,6 +43,7 @@
     const PITCH_PX = CELL_PX + GAP_PX;         // 每欄節距
     const ROWH_W_PX = 126;                     // 左側地點欄寬度
     const PANEL_WIDE_PX = 900;                 // 啟用時面板加寬到此寬度
+    const MAP_FOCUS_ZOOM = 15;                 // 點擊節點時地圖縮放層級
     const DEPART_STEP_MIN = 15;                // 出發時間欄距（分鐘）
     const DEPART_COLUMNS_MAX = 96;             // 欄數上限（96 欄 × 15 分 = 24 小時）
                                                // 預報涵蓋 96 小時、可排到約 370 欄，但步行模式節點多，
@@ -66,10 +68,6 @@
     // ────────────────────────────────────────────────────────────────
     const SITE_SELECTORS = {
         panelCandidate: 'div.m6QErb.WNBkOb.XiKgde',   // 路線面板外層（量到寬 408、高 >400）
-        optionsRowClassHint: 'MlqQ3d',                 // 「選項」按鈕所在的那一列
-        sendCopyRowClassHint: 'O7gcad',                // 將路線傳送至／複製連結
-        routeListClassHint: 'm6QErb XiKgde',           // 三條路線的容器
-        elevationClassHint: 'KqEFYb',                  // 高度剖面圖
         optionsButtonText: '選項',                     // 用可見文字定位，不依賴 class
         routeRowClassHint: 'UgZKXd',                   // 單一條路線那一列
         durationClassHint: 'Fk3sm',                     // 「8 小時 44 分」
@@ -820,11 +818,25 @@
             });
         }
         const css = `
+/* 清空文字節點後仍會與原文疊字，代表原本的字可能來自虛擬元素的 content，
+   這裡一併壓掉；另外標示啟用狀態 */
+[data-${PREFIX}-btn]::before,[data-${PREFIX}-btn]::after,
+[data-${PREFIX}-btn] *::before,[data-${PREFIX}-btn] *::after{content:none !important}
+[data-${PREFIX}-btn][data-${PREFIX}-on="1"]{background:#e8f0fe;border-radius:8px}
 .${PREFIX}-wrap{font-family:inherit;display:flex;flex-direction:column}
+.${PREFIX}-bar{display:flex;align-items:center;justify-content:space-between;
+  padding:8px 12px;border-bottom:1px solid #e8eaed;position:sticky;top:0;background:#fff;z-index:5}
+.${PREFIX}-bar b{font-size:13px;color:#202124}
+.${PREFIX}-close{border:0;background:#f1f3f4;border-radius:16px;padding:5px 12px;
+  font-size:12px;color:#3c4043;cursor:pointer;font-family:inherit}
+.${PREFIX}-close:hover{background:#e8eaed}
 /* scroll-padding-top 讓吸附時把黏在頂端的標頭高度算進去，
    否則列會被標頭切掉一半（就是「不完整的色塊」） */
+/* scroll-padding 把「黏在頂端／左側」的標頭尺寸算進去，否則吸附後仍會被標頭切掉半格。
+   橫向只保證左側切齊（右側視畫面寬度自然截斷，這是刻意取捨） */
 .${PREFIX}-scroll{overflow:auto;max-height:calc(100vh - 300px);
-  scroll-snap-type:y proximity;scroll-padding-top:${HEADER_H_PX}px}
+  scroll-snap-type:both proximity;
+  scroll-padding-top:${HEADER_H_PX}px;scroll-padding-left:${ROWH_W_PX}px}
 .${PREFIX}-msg{padding:14px 12px;font-size:13px;color:#3c4043;line-height:1.7}
 .${PREFIX}-msg b{color:#1a73e8}
 .${PREFIX}-grid{display:grid;grid-auto-rows:${PITCH_PX}px;width:max-content;
@@ -832,7 +844,7 @@
 .${PREFIX}-corner{position:sticky;top:0;left:0;z-index:40;background:#fff;height:${HEADER_H_PX}px;
   border-bottom:1px solid #e8eaed;border-right:1px solid #e8eaed}
 .${PREFIX}-h{position:sticky;top:0;z-index:20;background:#fff;height:${HEADER_H_PX}px;
-  border-bottom:1px solid #e8eaed}
+  border-bottom:1px solid #e8eaed;scroll-snap-align:start}
 .${PREFIX}-h::before{content:"";position:absolute;left:0;right:0;top:${TIMELINE_AXIS_Y_PX}px;height:2px;background:#c7d9fb}
 .${PREFIX}-h.${PREFIX}-first::before{left:50%}
 .${PREFIX}-h.${PREFIX}-last::before{right:50%}
@@ -922,7 +934,7 @@
         const textNodes = [];
         while (walker.nextNode()) textNodes.push(walker.currentNode);
         textNodes.forEach(nd => { nd.textContent = ''; });
-        holder.insertBefore(document.createTextNode('路雨'), holder.firstChild);
+        holder.insertBefore(document.createTextNode(BUTTON_LABEL), holder.firstChild);
         clone.setAttribute('aria-label', '路線降雨預報');
 
         clone.addEventListener('click', ev => {
@@ -946,6 +958,8 @@
     }
 
     function deactivate() {
+        const btn = document.querySelector('[data-' + PREFIX + '-btn]');
+        if (btn) btn.removeAttribute('data-' + PREFIX + '-on');
         state.hiddenBlocks.forEach(({ el, display }) => { el.style.display = display; });
         state.hiddenBlocks = [];
         if (state.container) { state.container.remove(); state.container = null; }
@@ -962,20 +976,26 @@
         const panel = findPanel();
         if (!panel) { alert('找不到路線面板，請先在 Google Maps 規劃好路線。'); return; }
 
-        // 隱藏灰線以下三塊：傳送/複製連結、路線列表、高度剖面圖
-        const hints = [
-            SITE_SELECTORS.sendCopyRowClassHint,
-            SITE_SELECTORS.routeListClassHint,
-            SITE_SELECTORS.elevationClassHint,
-        ];
+        // 隱藏「灰線以下」的所有區塊。
+        // 原本是逐一比對 class（傳送/複製連結、路線列表、高度剖面圖），但那樣有兩個問題：
+        //   1. class 是混淆過的，改版就失效
+        //   2. 漏掉沒列到的區塊（例如「探索附近的地點」那一整排圖示）
+        // 改成用結構判斷：找出「選項」按鈕所在那一列的位置，把它之後的兄弟節點全部隱藏。
+        // 這樣不管 Google 之後再加什麼區塊，都會一併被蓋掉。
+        const optionsBtn = findOptionsButton();
+        const optionsRow = optionsBtn
+            ? [...panel.children].find(ch => ch.contains(optionsBtn))
+            : null;
+        const kids = [...panel.children];
+        const startIdx = optionsRow ? kids.indexOf(optionsRow) + 1 : -1;
         state.hiddenBlocks = [];
-        for (const child of [...panel.children]) {
-            const cn = String(child.className || '');
-            const hit = hints.some(h => h.split(' ').every(tok => cn.includes(tok)));
-            if (hit) {
-                state.hiddenBlocks.push({ el: child, display: child.style.display });
-                child.style.display = 'none';
+        if (startIdx > 0) {
+            for (let i = startIdx; i < kids.length; i++) {
+                state.hiddenBlocks.push({ el: kids[i], display: kids[i].style.display });
+                kids[i].style.display = 'none';
             }
+        } else {
+            warn('找不到「選項」那一列，無法判斷要隱藏哪些區塊');
         }
         state.originalPanelWidth = panel.style.width;
         panel.style.width = PANEL_WIDE_PX + 'px';
@@ -983,14 +1003,38 @@
         const wrap = document.createElement('div');
         wrap.className = PREFIX + '-wrap';
         wrap.id = PREFIX + '-wrap';
+
+        // 離開表格的出口。按鈕本身雖然也能再按一次關掉，但使用者捲到下面時
+        // 看不到那顆按鈕，所以表格上方固定放一條列。
+        const bar = document.createElement('div');
+        bar.className = PREFIX + '-bar';
+        const title = document.createElement('b');
+        title.textContent = BUTTON_LABEL;
+        const closeBtn = document.createElement('button');
+        closeBtn.className = PREFIX + '-close';
+        closeBtn.textContent = '關閉，回到路線';
+        closeBtn.addEventListener('click', ev => { ev.preventDefault(); ev.stopPropagation(); deactivate(); });
+        bar.appendChild(title);
+        bar.appendChild(closeBtn);
+        wrap.appendChild(bar);
+
         panel.appendChild(wrap);
         state.container = wrap;
         state.active = true;
+        const btn = document.querySelector('[data-' + PREFIX + '-btn]');
+        if (btn) btn.setAttribute('data-' + PREFIX + '-on', '1');
 
         run(wrap).catch(err => {
             warn(err);
-            wrap.innerHTML = '';
+            clearBody(wrap);
             showMessage(wrap, '出錯了：' + err.message);
+        });
+    }
+
+    /** 只清掉內容，保留最上方的關閉列 */
+    function clearBody(wrap) {
+        [...wrap.children].forEach(ch => {
+            if (!ch.classList.contains(PREFIX + '-bar')) ch.remove();
         });
     }
 
@@ -1020,7 +1064,7 @@
         showMessage(wrap, '正在解析路線…');
         const parsed = parseRouteFromUrl(location.href);
         if (!parsed || parsed.points.length < 2) {
-            wrap.innerHTML = '';
+            clearBody(wrap);
             showMessage(wrap, '從網址讀不到路線。請確認已經規劃好路線（網址裡要有 <code>/data=</code> 那一段）。');
             return;
         }
@@ -1029,26 +1073,26 @@
         const modeInfo = detectTravelMode(parsed.urlTravelCode);
         log('網址解析：停靠站/控制點共', parsed.points.length, '個；選中路線', selected);
         if (modeInfo.mode === null) {
-            wrap.innerHTML = '';
+            clearBody(wrap);
             showMessage(wrap, `目前選的交通方式（<b>${modeInfo.label || '未知'}</b>）` +
                 'Routes API 不支援，無法計算沿途座標與時間。<br><br>' +
                 '可用的有：開車、機車、單車、步行、大眾運輸。');
             return;
         }
 
-        wrap.innerHTML = '';
+        clearBody(wrap);
         showMessage(wrap, '正在向 Google 取得路徑…');
         const routes = await computeRoutes(keys.google, parsed, modeInfo.mode);
         const picked = pickMatchingRoute(routes, selected);
         const route = picked.route;
 
-        wrap.innerHTML = '';
+        clearBody(wrap);
         showMessage(wrap, '正在判斷沿途行政區…');
         const { timeline, steps, totalSec } = buildTimeline(route);
         if (!timeline.length) throw new Error('Routes API 回傳的路徑沒有可用的座標');
         const nodes = buildNodes(timeline, totalSec);
         if (!nodes.length) {
-            wrap.innerHTML = '';
+            clearBody(wrap);
             showMessage(wrap, '這條路線沒有落在台灣任何鄉鎮界線內，目前只支援台灣本島與外島的路線。');
             return;
         }
@@ -1071,19 +1115,19 @@
             if (departures.length >= DEPART_COLUMNS_MAX) break;
         }
         if (!departures.length) {
-            wrap.innerHTML = '';
+            clearBody(wrap);
             showMessage(wrap, '這條路線的行程時間超過預報可涵蓋的範圍（' +
                 FORECAST_HORIZON_HOURS + ' 小時），無法產生表格。');
             return;
         }
 
-        wrap.innerHTML = '';
+        clearBody(wrap);
         showMessage(wrap, '正在向中央氣象署取得降雨預報…');
         const lastArrive = new Date(departures[departures.length - 1].getTime() + totalSec * 1000);
         const { forecast, failures, callCount } =
             await fetchForecast(keys.cwa, nodes, departures[0], lastArrive);
 
-        wrap.innerHTML = '';
+        clearBody(wrap);
         render(wrap, {
             nodes, departures, forecast, totalSec,
             meta: {
@@ -1293,12 +1337,31 @@
     }
 
     /**
-     * 點擊節點時把地圖 focus 到該座標。
-     * 待補：使用者指定要在「原分頁內」切換視野，而不是開新分頁；
-     * 具體做法（改網址讓 SPA 自己處理、或操作地圖物件）尚未討論，先留接口。
+     * 點擊節點時把地圖視野移到該座標，且不離開目前分頁、不重新載入。
+     *
+     * 尚未有把握的部分：Google Maps 沒有對外開放的頁內 API，我找不到權威做法。
+     * 這裡用的是「改寫網址的 /@lat,lng,zoom 段 → pushState → 補一個 popstate」，
+     * 賭它的前端路由有監聽 popstate。可行與否需要實測，因此每次都會記 log；
+     * 若地圖沒有反應，log 會留下當時的網址供比對，再換別的做法。
      */
     function onNodeClick(node) {
-        log('點擊節點（原分頁 focus 尚未實作）：', node.county + node.town, node.lat, node.lon);
+        const zoom = MAP_FOCUS_ZOOM;
+        const target = `${node.lat.toFixed(7)},${node.lon.toFixed(7)},${zoom}z`;
+        const before = location.href;
+        const next = /\/@[^/]+/.test(before)
+            ? before.replace(/\/@[^/]+/, '/@' + target)
+            : before.replace('/maps/', '/maps/@' + target + '/');
+        if (next === before) {
+            log('點擊節點：網址沒有變化，略過', node.county + node.town);
+            return;
+        }
+        try {
+            history.pushState(history.state, '', next);
+            window.dispatchEvent(new PopStateEvent('popstate', { state: history.state }));
+            log('點擊節點：已改寫網址並送出 popstate', node.county + node.town, target);
+        } catch (err) {
+            warn('改寫網址失敗：', err.message);
+        }
     }
 
     // ════════════════════════════════════════════════════════════════
