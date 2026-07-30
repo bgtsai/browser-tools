@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.9.0
+// @version      0.10.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -306,7 +306,22 @@
      * 因此改以「面板上被選中的交通方式頁籤」為主要判斷，並把網址代碼記進 log，
      * 累積足夠樣本後再補成對照表。查不出來時退回 DRIVE 並在畫面上標明。
      */
+    // 網址 !3e{n} → Routes API travelMode。
+    // 這張表只放「實測確認過」的對應，不是照抄常見說法：
+    //   0 = 開車（2026-07-30 於面板顯示★開車時實測）
+    // 其餘代碼還沒有樣本，留空讓它退回 DOM 判斷；每次執行都會把代碼記進 log，
+    // 累積到樣本就補進來。DOM 那條路本身不乾淨（候選裡「大眾運輸」「單車」各出現兩次、
+    // 還有「沒有航班」這種不是交通方式的項目），所以有網址代碼時優先用它。
+    const URL_TRAVEL_CODE_MODE = {
+        '0': 'DRIVE',
+    };
+
     function detectTravelMode(urlTravelCode) {
+        const byUrl = URL_TRAVEL_CODE_MODE[urlTravelCode];
+        if (byUrl) {
+            log('交通方式：由網址代碼 3e' + urlTravelCode + ' 判定為', byUrl);
+            return { mode: byUrl, confident: true, via: '網址代碼 3e' + urlTravelCode, label: '' };
+        }
         // 交通方式頁籤在面板最上方那一排（開車／大眾運輸／步行／單車…）。
         // 它不一定帶 aria-selected，實測也可能靠 class 或 aria-label 的「已選取」字樣表示，
         // 所以三種訊號都找，並把所有候選記進 log 以便後續補強判斷條件。
