@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.6.0
+// @version      0.6.1
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -831,8 +831,6 @@
   width:fit-content !important;min-width:0 !important;max-width:none !important;
   flex:0 0 auto !important;float:none !important;white-space:nowrap !important;
   transform:none !important}
-[data-${PREFIX}-btn] *{position:static !important;width:auto !important;
-  min-width:0 !important;max-width:none !important;white-space:nowrap !important}
 [data-${PREFIX}-btn][data-${PREFIX}-on="1"]{background:#e8f0fe;border-radius:8px}
 .${PREFIX}-wrap{font-family:inherit;display:flex;flex-direction:column}
 .${PREFIX}-bar{display:flex;align-items:center;justify-content:space-between;
