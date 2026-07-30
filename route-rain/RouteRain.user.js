@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.14.0
+// @version      0.15.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -955,105 +955,72 @@
     ];
 
     /**
-     * 建立注入按鈕。
+     * 放置按鈕。
      *
-     * 這裡刻意「不」用 cloneNode 複製 Google 的按鈕，雖然那樣能自動繼承樣式。
-     * 實測連續三次修不好：複製品會連帶帶走內部結構與行為掛勾，
-     * 而且文字替換一旦沒套用到（例如那次找不到承載文字的元素），
-     * 就會產生一顆「長得像選項、行為卻是我們的」按鈕壓在真正的選項上，
-     * 使用者點下去以為在按選項、其實觸發我們的功能。
-     * 自己建一顆、只抄視覺樣式，結構完全由自己掌握，就沒有這種模稜兩可的狀態。
+     * 關鍵限制：不能把按鈕插進 Google 自己管理的容器裡。
+     * 診斷證據——按「選項」時，事件路徑是
+     *   div.BunUDe > button.OcYctc > div.MlqQ3d > …
+     * 路徑裡完全沒有我們的按鈕，但 currentTarget 卻等於我們的按鈕。
+     * 兩者同時成立只有一種解釋：<b>我們插進去的那個 &lt;button&gt; 被 Google 的渲染器接管了</b>。
+     * 它重繪那一列時看到多出來的子節點，不是移除，而是「就地重用」——
+     * 把 class、屬性、內容全部改寫成它預期的「選項」按鈕，
+     * 但 DOM 節點本身沒換，所以我們掛上去的事件監聽器還留著。
+     * 於是那顆按鈕外觀與行為都變成「選項」，點下去卻執行我們的 toggle；
+     * 我們的 data-rr-btn 屬性也被一併抹掉，難怪先前怎麼查都查不到重疊或重複。
+     *
+     * 因此改成：按鈕掛在 document.body、用 fixed 定位貼齊「選項」左側，
+     * 完全不進入 Google 的渲染範圍，它就無從接管。代價是位置要自己維護。
      */
-    function buildButton(referenceBtn) {
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.setAttribute('data-' + PREFIX + '-btn', '1');
-        btn.setAttribute('aria-label', BUTTON_LABEL);
-        btn.textContent = BUTTON_LABEL;
-        // 顏色與字重掛在承載文字的內層元素上，不在 <button> 本身——
-        // 從 button 抄會拿到繼承來的預設值，字就變成深色粗體、跟旁邊的藍字不一樣。
-        const textHolder = [...referenceBtn.querySelectorAll('*')].reverse()
-            .find(el => el.textContent.trim() === referenceBtn.textContent.trim()) || referenceBtn;
-        const csBtn = getComputedStyle(referenceBtn);
-        const csText = getComputedStyle(textHolder);
-        COPIED_STYLE_PROPS.forEach(k => { btn.style[k] = csBtn[k]; });
-        ['color', 'fontFamily', 'fontSize', 'fontWeight', 'letterSpacing', 'lineHeight']
-            .forEach(k => { btn.style[k] = csText[k]; });
-        btn.style.setProperty('background', 'transparent', 'important');
-        btn.style.setProperty('border', '0', 'important');
-        btn.style.setProperty('cursor', 'pointer', 'important');
-        return btn;
+    function positionButton(btn, optionsBtn) {
+        const r = optionsBtn.getBoundingClientRect();
+        if (r.width === 0 && r.height === 0) { btn.style.display = 'none'; return; }
+        btn.style.display = '';
+        btn.style.top = Math.round(r.top) + 'px';
+        btn.style.left = Math.round(r.left - btn.offsetWidth - BUTTON_GAP_PX) + 'px';
+        btn.style.height = Math.round(r.height) + 'px';
     }
 
-    function injectButton() {
+    function ensureButton() {
         const optionsBtn = findOptionsButton();
-        if (!optionsBtn) return false;
+        let btn = document.querySelector('[data-' + PREFIX + '-btn]');
 
-        // 全文件只允許存在一顆注入按鈕。只檢查「選項」當下的父層是不夠的——
-        // 看不到被搬到別處的舊按鈕，Google 重繪面板時就會一直疊加。
-        const existing = [...document.querySelectorAll('[data-' + PREFIX + '-btn]')];
-        const alreadyOk = existing.length === 1 &&
-            existing[0].parentElement === optionsBtn.parentElement;
-        if (alreadyOk) return true;
-        if (existing.length) {
-            log('清除既有的注入按鈕', existing.length, '顆後重新注入');
-            existing.forEach(el => el.remove());
+        if (!optionsBtn) {
+            if (btn) btn.style.display = 'none';
+            return false;
         }
+        if (!btn) {
+            btn = document.createElement('button');
+            btn.type = 'button';
+            btn.setAttribute('data-' + PREFIX + '-btn', '1');
+            btn.setAttribute('aria-label', BUTTON_LABEL);
+            btn.textContent = BUTTON_LABEL;
 
-        const btn = buildButton(optionsBtn);
-        btn.addEventListener('click', ev => {
-            // 這段診斷在 v0.13.0 改寫 injectButton 時被我弄丟了，補回來。
-            // 目前的矛盾：稽核顯示只有一顆注入按鈕、與「選項」也沒有重疊，
-            // 但按「選項」仍會觸發這個只掛在自己身上的 listener。
-            // 事件路徑會直接顯示這個事件是怎麼走到我們身上的。
-            const t = ev.target;
-            const path = (ev.composedPath ? ev.composedPath() : [])
-                .filter(n => n && n.nodeType === 1)
-                .slice(0, 6)
-                .map(n => `${n.tagName.toLowerCase()}${n.hasAttribute && n.hasAttribute('data-' + PREFIX + '-btn') ? '[RR]' : ''}` +
-                    `.${String(n.className || '').trim().split(/\s+/)[0] || '-'}`)
-                .join(' > ');
-            log('點擊：target=', t && t.tagName,
-                'class=', t && String(t.className).slice(0, 30),
-                'text=', JSON.stringify((t && t.textContent || '').trim().slice(0, 10)),
-                '｜currentTarget 是我們的按鈕=', ev.currentTarget === btn,
-                '｜isTrusted=', ev.isTrusted,
-                '｜路徑=', path);
-            ev.preventDefault();
-            ev.stopPropagation();
-            toggle('注入按鈕');
-        }, true);
-        optionsBtn.parentElement.insertBefore(btn, optionsBtn);
+            // 顏色與字重掛在承載文字的內層元素上，不在 <button> 本身；
+            // 從 button 抄會拿到繼承來的預設值，字會變成深色粗體。
+            const textHolder = [...optionsBtn.querySelectorAll('*')].reverse()
+                .find(el => el.textContent.trim() === optionsBtn.textContent.trim()) || optionsBtn;
+            const csBtn = getComputedStyle(optionsBtn);
+            const csText = getComputedStyle(textHolder);
+            COPIED_STYLE_PROPS.forEach(k => { btn.style[k] = csBtn[k]; });
+            ['color', 'fontFamily', 'fontSize', 'fontWeight', 'letterSpacing', 'lineHeight']
+                .forEach(k => { btn.style[k] = csText[k]; });
+            btn.style.position = 'fixed';
+            btn.style.zIndex = '2147483000';
+            btn.style.background = 'transparent';
+            btn.style.border = '0';
+            btn.style.cursor = 'pointer';
+            btn.style.padding = '0 10px';
 
-        // 擺位：「選項」若是絕對定位（靠右釘住），我們沿用同一種定位方式，
-        // 只把 right 往左推「選項的寬度 + 間距」，否則會落在同一個座標上。
-        const optCS = getComputedStyle(optionsBtn);
-        if (optCS.position === 'absolute' || optCS.position === 'fixed') {
-            const optRect = optionsBtn.getBoundingClientRect();
-            const anchor = optionsBtn.offsetParent || optionsBtn.parentElement;
-            const anchorRect = anchor.getBoundingClientRect();
-            btn.style.setProperty('position', optCS.position, 'important');
-            btn.style.setProperty('top', optCS.top, 'important');
-            btn.style.setProperty('bottom', optCS.bottom, 'important');
-            btn.style.setProperty('left', 'auto', 'important');
-            btn.style.setProperty('right',
-                Math.round(anchorRect.right - optRect.left + BUTTON_GAP_PX) + 'px', 'important');
-        } else {
-            btn.style.setProperty('margin-right', BUTTON_GAP_PX + 'px', 'important');
+            btn.addEventListener('click', ev => {
+                ev.preventDefault();
+                ev.stopPropagation();
+                toggle('注入按鈕');
+            }, true);
+
+            document.body.appendChild(btn);
+            log('按鈕已建立並掛在 document.body（fixed 定位），避開 Google 的渲染範圍');
         }
-
-        // 稽核：把目前文件裡所有注入按鈕的文字與座標印出來。
-        // 只要出現第二顆、或有哪一顆的文字不是預期值，一眼就看得到，不必再從症狀反推。
-        const audit = [...document.querySelectorAll('[data-' + PREFIX + '-btn]')].map(el => {
-            const r = el.getBoundingClientRect();
-            return `「${el.textContent.trim()}」@${Math.round(r.x)},${Math.round(r.y)} ` +
-                `${Math.round(r.width)}x${Math.round(r.height)}`;
-        });
-        const optRectNow = optionsBtn.getBoundingClientRect();
-        log('注入完成｜注入按鈕共', audit.length, '顆：', audit.join(' ／ '),
-            '｜選項 @' + Math.round(optRectNow.x) + ',' + Math.round(optRectNow.y),
-            Math.round(optRectNow.width) + 'x' + Math.round(optRectNow.height),
-            '｜選項定位=', optCS.position);
+        positionButton(btn, optionsBtn);
         return true;
     }
 
@@ -1516,14 +1483,19 @@
     // ════════════════════════════════════════════════════════════════
 
     function boot() {
-        injectButton();
-        const observer = new MutationObserver(() => {
-            if (!document.querySelector('[data-' + PREFIX + '-btn]')) {
-                if (state.active) deactivate();     // 面板被重繪，我們的內容也失效了
-                injectButton();
-            }
-        });
-        observer.observe(document.body, { childList: true, subtree: true });
+        ensureButton();
+
+        // 按鈕不在 Google 的渲染範圍內，所以不會再被它接管；
+        // 但因為改用 fixed 定位，位置要自己跟著版面變動更新。
+        let pending = false;
+        const schedule = () => {
+            if (pending) return;
+            pending = true;
+            requestAnimationFrame(() => { pending = false; ensureButton(); });
+        };
+        new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
+        window.addEventListener('resize', schedule);
+        window.addEventListener('scroll', schedule, true);
         log('啟動完成');
     }
 
