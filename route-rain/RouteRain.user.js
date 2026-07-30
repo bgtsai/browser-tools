@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.20.0
+// @version      0.21.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -1161,22 +1161,26 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
 
     function positionButton(btn, optionsBtn) {
         const r = optionsBtn.getBoundingClientRect();
-        if (r.width === 0 && r.height === 0) { btn.style.display = 'none'; return; }
-        btn.style.display = '';
-        btn.style.top = Math.round(r.top) + 'px';
-        btn.style.height = Math.round(r.height) + 'px';
+        if (r.width === 0 && r.height === 0) {
+            btn.style.setProperty('display', 'none', 'important');
+            return;
+        }
+        btn.style.setProperty('display', 'inline-flex', 'important');
+        btn.style.setProperty('top', Math.round(r.top) + 'px', 'important');
+        btn.style.setProperty('height', Math.round(r.height) + 'px', 'important');
         if (state.active) {
             // 開啟後沒有其他選項可按，按鈕改成「關閉」並移到「選項」的位置蓋住它，
             // 行為與 Google 自己的面板一致（按下去展開、原位變成關閉）
-            btn.style.left = Math.round(r.left) + 'px';
-            btn.style.minWidth = Math.round(r.width) + 'px';
+            btn.style.setProperty('left', Math.round(r.left) + 'px', 'important');
+            btn.style.setProperty('min-width', Math.round(r.width) + 'px', 'important');
             btn.style.setProperty('background', state.panelBg || '#fff', 'important');
             log('關閉按鈕定位：left=', Math.round(r.left), 'top=', Math.round(r.top),
                 'w>=', Math.round(r.width), '底色=', state.panelBg);
         } else {
-            btn.style.minWidth = '';
+            btn.style.removeProperty('min-width');
             btn.style.setProperty('background', 'transparent', 'important');
-            btn.style.left = Math.round(r.left - btn.offsetWidth - BUTTON_GAP_PX) + 'px';
+            btn.style.setProperty('left',
+                Math.round(r.left - btn.offsetWidth - BUTTON_GAP_PX) + 'px', 'important');
         }
     }
 
@@ -1220,14 +1224,22 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         let btn = document.querySelector('[data-' + PREFIX + '-btn]');
 
         if (!optionsBtn) {
-            if (btn) btn.style.display = 'none';
+            if (btn) btn.style.setProperty('display', 'none', 'important');
             return false;
         }
         if (!btn) {
             btn = buildFromTemplate(optionsBtn, BUTTON_LABEL);
             btn.setAttribute('data-' + PREFIX + '-btn', '1');
-            btn.style.position = 'fixed';
-            btn.style.zIndex = '2147483000';
+            // 沿用了對方的 class，就可能連帶吃到它帶 !important 的定位或顯示規則。
+            // 行內樣式若不加 !important 會輸給那些規則，按鈕就跑到看不見的地方。
+            // 這幾項是「按鈕能不能被看到」的關鍵，一律用 important 鎖死。
+            [
+                ['position', 'fixed'], ['z-index', '2147483000'],
+                ['display', 'inline-flex'], ['align-items', 'center'],
+                ['visibility', 'visible'], ['opacity', '1'],
+                ['margin', '0'], ['transform', 'none'], ['float', 'none'],
+                ['inset', 'auto'], ['pointer-events', 'auto'],
+            ].forEach(([k, v]) => btn.style.setProperty(k, v, 'important'));
 
             btn.addEventListener('click', ev => {
                 ev.preventDefault();
@@ -1241,6 +1253,15 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         // 文字要更新時，改的是承載文字的那一層，不是整顆按鈕的 textContent
         setButtonLabel(btn, state.active ? CLOSE_LABEL : BUTTON_LABEL);
         positionButton(btn, optionsBtn);
+        const br = btn.getBoundingClientRect();
+        const cs = getComputedStyle(btn);
+        log('按鈕狀態：文字=', JSON.stringify(btn.textContent.trim()),
+            '｜rect=', Math.round(br.x) + ',' + Math.round(br.y),
+            Math.round(br.width) + 'x' + Math.round(br.height),
+            '｜position=', cs.position, 'display=', cs.display,
+            'visibility=', cs.visibility, 'opacity=', cs.opacity,
+            '｜在 body 底下=', btn.parentElement === document.body,
+            '｜視窗=', innerWidth + 'x' + innerHeight);
         return true;
     }
 
