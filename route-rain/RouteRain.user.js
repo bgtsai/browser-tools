@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.17.0
+// @version      0.18.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -1032,9 +1032,9 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
 .${PREFIX}-bar{display:flex;align-items:center;justify-content:space-between;
   padding:8px 12px;border-bottom:1px solid #e8eaed;position:sticky;top:0;background:#fff;z-index:5}
 .${PREFIX}-bar b{font-size:13px;color:#202124}
-.${PREFIX}-close{border:0;background:#f1f3f4;border-radius:16px;padding:5px 12px;
+.${PREFIX}-close{border:0;background:#f1f3f4;border-radius:16px;padding:5px 12px;transition:background .12s,color .12s;
   font-size:12px;color:#3c4043;cursor:pointer;font-family:inherit}
-.${PREFIX}-close:hover{background:#e8eaed}
+.${PREFIX}-close:hover{background:#d2e3fc;color:#174ea6}
 /* scroll-padding-top 讓吸附時把黏在頂端的標頭高度算進去，
    否則列會被標頭切掉一半（就是「不完整的色塊」） */
 /* scroll-padding 把「黏在頂端／左側」的標頭尺寸算進去，否則吸附後仍會被標頭切掉半格。
@@ -1175,21 +1175,38 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
      * 真的找不到才退回近似值，並記 log 說明用的是哪一種。
      */
     function readHoverStyle(referenceBtn) {
+        // 實測發現：:hover 的宣告不一定掛在 <button> 上，也可能掛在承載文字的內層 div。
+        // 只比對 button 本身會漏掉，所以連同其後代一起比對。
+        const targets = [referenceBtn, ...referenceBtn.querySelectorAll('*')];
         const found = [];
         for (const sheet of document.styleSheets) {
             let rules;
-            try { rules = sheet.cssRules; } catch (err) { continue; }
+            try { rules = sheet.cssRules; } catch (err) { continue; }   // 跨網域樣式表讀不到
             if (!rules) continue;
             for (const rule of rules) {
                 if (!rule.selectorText || rule.selectorText.indexOf(':hover') < 0) continue;
-                const base = rule.selectorText.replace(/:hover/g, '');
-                let hit = false;
-                try { hit = base.split(',').some(s => s.trim() && referenceBtn.matches(s.trim())); }
-                catch (err) { continue; }
-                if (hit) found.push(rule.style.cssText);
+                for (const sel of rule.selectorText.split(',')) {
+                    const base = sel.replace(/:hover/g, '').trim();
+                    if (!base) continue;
+                    let hit = false;
+                    try { hit = targets.some(t => t.matches(base)); } catch (err) { continue; }
+                    if (hit) { found.push(rule.style.cssText); break; }
+                }
             }
         }
         return found;
+    }
+
+    /** 取按鈕本身與內層元素中最大的圓角——藥丸形的圓角常設在內層，只看 button 會拿到 0 */
+    function readBorderRadius(referenceBtn) {
+        const targets = [referenceBtn, ...referenceBtn.querySelectorAll('*')];
+        let best = 0, bestText = '0px';
+        for (const t of targets) {
+            const v = getComputedStyle(t).borderRadius;
+            const num = parseFloat(v);
+            if (!isNaN(num) && num > best) { best = num; bestText = v; }
+        }
+        return bestText;
     }
 
     function ensureButton() {
@@ -1221,15 +1238,28 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             btn.style.background = 'transparent';
             btn.style.border = '0';
             btn.style.cursor = 'pointer';
-            btn.style.padding = '0 10px';
+            btn.style.padding = '0 12px';
+            // 藥丸形的圓角常設在內層元素上，從 button 抄會拿到 0
+            btn.style.borderRadius = readBorderRadius(optionsBtn);
 
             const hoverDecls = readHoverStyle(optionsBtn);
             const styleEl = document.createElement('style');
             styleEl.id = PREFIX + '-btn-style';
+            // 每一條宣告都補上 !important。
+            // 原因：面板啟用時按鈕會用行內樣式設背景（要蓋住底下的「選項」），
+            // 而從網站抄來的 hover 宣告沒有 !important，行內樣式會贏 → hover 完全看不出變化。
+            const important = decls => decls
+                .split(';')
+                .map(d => d.trim())
+                .filter(Boolean)
+                .map(d => d.includes('!important') ? d : d + ' !important')
+                .join(';');
+            const radius = readBorderRadius(optionsBtn);
             styleEl.textContent = hoverDecls.length
-                ? `[data-${PREFIX}-btn]:hover{${hoverDecls.join(';')}}`
-                // 讀不到就用近似值：以文字顏色做低透明度底色，這在多數設計系統裡都是通用做法
-                : `[data-${PREFIX}-btn]:hover{background:color-mix(in srgb, currentColor 10%, transparent) !important;border-radius:8px}`;
+                ? `[data-${PREFIX}-btn]:hover{${important(hoverDecls.join(';'))};border-radius:${radius} !important}`
+                // 讀不到就用近似值：以文字顏色做低透明度底色，這在多數設計系統裡是通用做法
+                : `[data-${PREFIX}-btn]:hover{background:color-mix(in srgb, currentColor 12%, transparent) !important;` +
+                  `border-radius:${radius} !important}`;
             document.getElementById(PREFIX + '-btn-style')?.remove();
             document.head.appendChild(styleEl);
             log('按鈕 hover 樣式來源：', hoverDecls.length ? '取自網站樣式表' : '近似值（樣式表裡找不到對應規則）');
