@@ -1,12 +1,11 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.27.0
+// @version      0.30.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
-// @icon         https://www.google.com/s2/favicons?sz=64&domain=google.com
-// @connect      routes.googleapis.com
+// @icon         https://www.google.com/maps/about/images/icons/maps_512dp.png
 // @connect      opendata.cwa.gov.tw
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
@@ -16,7 +15,7 @@
 // @resource     twTowns https://raw.githubusercontent.com/bgtsai/browser-tools/main/route-rain/tw_town_boundaries_encoded.json
 // @downloadURL  https://raw.githubusercontent.com/bgtsai/browser-tools/main/route-rain/RouteRain.user.js
 // @updateURL    https://raw.githubusercontent.com/bgtsai/browser-tools/main/route-rain/RouteRain.user.js
-// @run-at       document-idle
+// @run-at       document-start
 // ==/UserScript==
 
 /* eslint-disable no-unused-vars */
@@ -31,7 +30,7 @@
     const PREFIX = 'rr';                       // 自己加到 DOM 上的 class／屬性一律加專案前綴
     const BUTTON_LABEL = '旅途中的雨';         // 注入到面板上的按鈕文字
     const BUTTON_GAP_PX = 8;                   // 注入按鈕與原「選項」之間的間距
-    const CLOSE_LABEL = '關閉回到路線';        // 面板開啟時，按鈕改成這個文字並移到「選項」的位置
+    const CLOSE_LABEL = '關閉·回到路線';       // 面板開啟時，按鈕改成這個文字並移到「選項」的位置
 
     // 節點切分
     const SUBDIVIDE_SEC = 15 * 60;             // 同一鄉鎮停留超過此秒數就多切一個節點
@@ -61,15 +60,9 @@
     const CWA_BUCKET_HOURS = 3;                // 降雨機率的時段長度，timeFrom/timeTo 必須對齊此邊界
     const FORECAST_HORIZON_HOURS = 96;         // 「未來3天」資料集實測涵蓋 96 小時
     const CACHE_TTL_MS = 30 * 60 * 1000;       // 氣象快取有效期：資料齊全且未超過此時間就直接沿用
-    // 路徑快取可以放很久：我們沒有指定 routingPreference，拿到的是不含即時路況的結果，
-    // 同一條路線算幾次都一樣。而 Routes API 有每日配額，重算一次就少一次額度。
-    const ROUTES_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-    const ROUTES_CACHE_MAX = 8;                // 保留幾筆路徑快取（polyline 佔空間，不宜無限成長）
     // 儲存鍵
-    const KEY_GOOGLE = 'googleMapsApiKey';
     const KEY_CWA = 'cwaAuthorization';
     const KEY_CWA_CACHE = 'cwaForecastCache';
-    const KEY_ROUTES_CACHE = 'routesCache';
 
     // ────────────────────────────────────────────────────────────────
     // 依賴 Google Maps DOM 結構的選擇器，集中一處
@@ -120,6 +113,7 @@
         hiddenBlocks: [],
         originalPanelWidth: '',
         lastRouteKey: '',
+        capturedDirections: null,   // 攔截到的 /maps/preview/directions 回應
         rerunTimer: null,
         panelBg: '',
         optionsClickHandler: null,
@@ -398,17 +392,6 @@
                 timeout: 20000,
                 onload: res => {
                     if (res.status >= 200 && res.status < 300) { resolve(res.responseText); return; }
-                    if (res.status === 429) {
-                        // 配額用盡丟原始英文訊息沒有幫助，直接說明狀況與可行的處理方式
-                        reject(new Error(
-                            'API 配額已用完（HTTP 429）。\n\n' +
-                            'Google Maps 的 Demo Key 有每日上限，本工具每重算一次路徑就消耗一次。\n' +
-                            '可以做的事：\n' +
-                            '　· 等配額重設後再試（重設時間可在 Google Cloud Console 的配額頁面確認）\n' +
-                            '　· 改用自己的正式金鑰（需在 Cloud Console 啟用計費）\n\n' +
-                            '已加入路徑快取，同一條路線＋同一種交通方式不會重複消耗配額。'));
-                        return;
-                    }
                     reject(new Error(`HTTP ${res.status}：${String(res.responseText).slice(0, 300)}`));
                 },
                 onerror: () => reject(new Error('網路錯誤')),
@@ -417,122 +400,138 @@
         });
     }
 
-    const ROUTES_FIELD_MASK = [
-        'routes.duration',
-        'routes.distanceMeters',
-        'routes.legs.duration',
-        'routes.legs.distanceMeters',
-        'routes.legs.steps.staticDuration',
-        'routes.legs.steps.distanceMeters',
-        'routes.legs.steps.polyline.encodedPolyline',
-        'routes.legs.steps.navigationInstruction',
-    ].join(',');
 
-    async function computeRoutes(apiKey, parsed, travelMode) {
-        const pts = parsed.points;
-        if (pts.length < 2) throw new Error('網址裡解析不到起點與終點');
-        const toLatLng = p => ({ location: { latLng: { latitude: p.lat, longitude: p.lon } } });
-        const body = {
-            origin: toLatLng(pts[0]),
-            destination: toLatLng(pts[pts.length - 1]),
-            travelMode: travelMode,
-            languageCode: 'zh-TW',
-            regionCode: 'TW',
-            computeAlternativeRoutes: true,
+    // ════════════════════════════════════════════════════════════════
+    // 攔截 Google Maps 自己算好的路線資料
+    //
+    // 為什麼不用 Routes API 重算：畫面上既然已經把路線畫出來，資料就在頁面裡。
+    // 重算一次不但消耗每日配額，算出來的還不保證跟畫面上完全一致
+    //（先前實測出現過「面板顯示 1 小時 16 分、算出來 46 分」的落差）。
+    //
+    // 攔截器必須在 document-start 就架好：實測「直接開啟已規劃好的網址」時，
+    // 那個請求在頁面載入的最初期就發出（0.00s），等到 document-idle 才架就已經錯過。
+    // ════════════════════════════════════════════════════════════════
+
+    const DIRECTIONS_URL_RE = /\/maps\/preview\/directions\?/;
+
+    function keepIfDirections(url, text) {
+        if (!url || !DIRECTIONS_URL_RE.test(String(url))) return;
+        if (!text || text.length < 1000) return;
+        state.capturedDirections = { text, at: Date.now(), url: String(url) };
+        log('已攔截路線資料', (text.length / 1024).toFixed(1) + 'KB');
+    }
+
+    function armInterceptors() {
+        const origOpen = XMLHttpRequest.prototype.open;
+        const origSend = XMLHttpRequest.prototype.send;
+        XMLHttpRequest.prototype.open = function (method, url) {
+            this.__rrUrl = url;
+            return origOpen.apply(this, arguments);
         };
-        // 大眾運輸不接受中途點，帶了會被 API 拒絕；先剔除並記錄，
-        // 這代表手動拖曳過的路徑在此模式下無法重現
-        const mids = travelMode === 'TRANSIT' ? [] : pts.slice(1, -1);
-        if (travelMode === 'TRANSIT' && pts.length > 2) {
-            warn('大眾運輸模式不支援中途點，已忽略', pts.length - 2, '個途經點');
+        XMLHttpRequest.prototype.send = function () {
+            this.addEventListener('load', () => {
+                try { keepIfDirections(this.__rrUrl, this.responseText); } catch (err) { /* 非文字回應 */ }
+            });
+            return origSend.apply(this, arguments);
+        };
+
+        const origFetch = window.fetch;
+        window.fetch = function (...args) {
+            return origFetch.apply(this, args).then(res => {
+                // 一定要 clone：把 body 讀掉會讓網站自己拿不到資料
+                res.clone().text()
+                    .then(t => keepIfDirections((args[0] && args[0].url) || args[0], t))
+                    .catch(() => {});
+                return res;
+            });
+        };
+        log('攔截器已架設（XHR + fetch）');
+    }
+
+    // ── 解析 ──
+    // 結構（實測驗證過，數字路徑固定）：
+    //   [0][1][r]                     第 r 條替代路線的摘要
+    //     [0][2] = [公尺, "35.9 公里", 0]
+    //     [0][3] = [秒,   "1 小時 13 分"]
+    //     [1][0][1]                   legs 陣列，每個 leg 的 [1] 是 steps
+    //       step[0][2] = [公尺, 文字, 0]
+    //       step[0][3] = [秒, 文字]
+    //       step[0][14]                結構化指示 token，型別碼 2 且帶旗標 1 者為路名
+    //   [0][7][r]                     第 r 條路線的座標（與 [0][1] 索引對齊）
+    //     [0] 緯度、[1] 經度：第一個元素是絕對值 ×1e7，其餘為差量，累加還原
+    //     [4] 海拔差量（未使用）
+
+    function accumulate(deltas) {
+        let sum = 0;
+        const out = new Array(deltas.length);
+        for (let i = 0; i < deltas.length; i++) { sum += deltas[i]; out[i] = sum; }
+        return out;
+    }
+
+    function roadNamesOf(step) {
+        const tokens = (step[0] && step[0][14]) || [];
+        const names = [];
+        for (const t of tokens) {
+            // 型別碼 2 = 文字/道路，14 = 轉彎方向；第二個元素帶旗標 1 表示這是專有名稱
+            if (Array.isArray(t) && t[0] === 2 && Array.isArray(t[1]) && t[1][1] === 1) {
+                names.push(t[1][0]);
+            }
         }
-        if (mids.length) {
-            body.intermediates = mids.map(p => {
-                const item = toLatLng(p);
-                // 手動拖曳出來的控制點不是停靠站：via=true 才不會被算進停留時間、也不會拆 legs
-                if (p.kind === 'via') item.via = true;
-                return item;
+        return names;
+    }
+
+    function parseDirections(text) {
+        const body = text.replace(/^\)\]\}'\n?/, '');   // Google 慣用的防劫持前綴
+        const root = JSON.parse(body);
+        const alts = root[0] && root[0][1];
+        const geos = root[0] && root[0][7];
+        if (!Array.isArray(alts) || !Array.isArray(geos)) {
+            throw new Error('路線資料的結構與預期不符，可能是 Google 改版了');
+        }
+        const out = [];
+        for (let r = 0; r < Math.min(alts.length, geos.length); r++) {
+            const summary = alts[r][0];
+            const legs = (alts[r][1] && alts[r][1][0] && alts[r][1][0][1]) || [];
+            const steps = [];
+            for (const leg of legs) {
+                for (const st of (leg[1] || [])) {
+                    steps.push({
+                        meters: (st[0] && st[0][2] && st[0][2][0]) || 0,
+                        sec: (st[0] && st[0][3] && st[0][3][0]) || 0,
+                        roads: roadNamesOf(st),
+                    });
+                }
+            }
+            const lat = accumulate(geos[r][0]);
+            const lon = accumulate(geos[r][1]);
+            const points = new Array(lat.length);
+            for (let i = 0; i < lat.length; i++) points[i] = [lat[i] / 1e7, lon[i] / 1e7];
+            out.push({
+                points, steps,
+                totalMeters: (summary[2] && summary[2][0]) || 0,
+                totalSec: (summary[3] && summary[3][0]) || 0,
+                distanceText: (summary[2] && summary[2][1]) || '',
+                durationText: (summary[3] && summary[3][1]) || '',
             });
         }
-        // 有中途點時 Google 不提供替代路線，先關掉以免請求被拒
-        if (body.intermediates) body.computeAlternativeRoutes = false;
-
-        const text = await gmRequest({
-            method: 'POST',
-            url: 'https://routes.googleapis.com/directions/v2:computeRoutes',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-Goog-Api-Key': apiKey,
-                'X-Goog-FieldMask': ROUTES_FIELD_MASK,
-            },
-            data: JSON.stringify(body),
-        });
-        const json = JSON.parse(text);
-        if (json.error) throw new Error('Routes API：' + json.error.message);
-        if (!json.routes || !json.routes.length) throw new Error('Routes API 沒有回傳路線');
-        return json.routes;
+        return out;
     }
 
-    // ── 路徑快取 ──
-    // 沒有這一層的話，每次重跑（切換交通方式、改路線、重開面板）都會打一次 Routes API。
-    // 實測就是這樣把 Demo Key 的每日配額用完的：氣象署那邊做了快取，這邊卻沒有。
-
-    function loadRoutesCache() {
-        try {
-            const raw = GM_getValue(KEY_ROUTES_CACHE, '');
-            const obj = raw ? JSON.parse(raw) : {};
-            return (obj && typeof obj === 'object') ? obj : {};
-        } catch (err) {
-            warn('路徑快取讀取失敗：', err.message);
-            return {};
-        }
-    }
-
-    function saveRoutesCache(key, routes) {
-        const cache = loadRoutesCache();
-        cache[key] = { at: Date.now(), routes };
-        // 超量時丟掉最舊的，避免 polyline 累積把儲存空間吃光
-        const keys = Object.keys(cache).sort((a, b) => cache[a].at - cache[b].at);
-        while (keys.length > ROUTES_CACHE_MAX) delete cache[keys.shift()];
-        try {
-            GM_setValue(KEY_ROUTES_CACHE, JSON.stringify(cache));
-        } catch (err) {
-            warn('路徑快取寫入失敗（不影響本次結果）：', err.message);
-        }
-    }
-
-    async function getRoutes(apiKey, parsed, travelMode, onFetchStart) {
-        // 同一條路線＋同一種交通方式，算出來的結果不會變，可以直接沿用
-        const key = routeKeyOf(location.href) + '|' + travelMode;
-        const cache = loadRoutesCache();
-        const hit = cache[key];
-        if (hit && Date.now() - hit.at <= ROUTES_CACHE_TTL_MS && hit.routes && hit.routes.length) {
-            log('沿用路徑快取（', Math.round((Date.now() - hit.at) / 60000), '分鐘前取得），未呼叫 Routes API');
-            return { routes: hit.routes, fromCache: true };
-        }
-        if (onFetchStart) onFetchStart();
-        const routes = await computeRoutes(apiKey, parsed, travelMode);
-        saveRoutesCache(key, routes);
-        return { routes, fromCache: false };
-    }
-
-    /** 從多條替代路線中，挑距離與時間最接近面板顯示值的那一條 */
-    function pickMatchingRoute(routes, selected) {
-        if (routes.length === 1 || !selected || selected.durationSec == null) {
-            return { route: routes[0], matchNote: routes.length === 1 ? '只有一條' : '無法比對，取第一條' };
+    /** 從替代路線中挑出面板上選中的那一條：用面板顯示的距離與時間比對 */
+    function pickAlternative(alts, selected) {
+        if (alts.length === 1) return { alt: alts[0], matchNote: '只有一條' };
+        if (!selected || selected.distanceMeters == null) {
+            return { alt: alts[0], matchNote: '面板讀不到數值，取第一條' };
         }
         let best = null;
-        for (const r of routes) {
-            const dur = parseFloat(String(r.duration).replace('s', ''));
-            const dist = r.distanceMeters;
-            const score = Math.abs(dur - selected.durationSec) / Math.max(selected.durationSec, 1) +
-                Math.abs(dist - selected.distanceMeters) / Math.max(selected.distanceMeters, 1);
-            if (!best || score < best.score) best = { route: r, score, dur, dist };
+        for (const a of alts) {
+            const score = Math.abs(a.totalMeters - selected.distanceMeters) /
+                Math.max(selected.distanceMeters, 1);
+            if (!best || score < best.score) best = { alt: a, score };
         }
-        const pct = (best.score * 100).toFixed(1);
         return {
-            route: best.route,
-            matchNote: `比對面板值（${selected.durationText}／${selected.distanceText}）誤差 ${pct}%`,
+            alt: best.alt,
+            matchNote: `比對面板值（${selected.distanceText}）誤差 ${(best.score * 100).toFixed(1)}%`,
         };
     }
 
@@ -540,37 +539,51 @@
     // 時間軸與節點切分
     // ════════════════════════════════════════════════════════════════
 
-    /** 用每個 step 的 staticDuration，在該 step 的 polyline 內按距離比例內插出時間軸 */
-    function buildTimeline(route) {
-        const timeline = [];
-        const steps = [];
-        let t = 0;
-        for (const leg of route.legs || []) {
-            for (const st of leg.steps || []) {
-                const pts = decodePolyline(st.polyline.encodedPolyline, 5);
-                const dur = parseFloat(String(st.staticDuration || '0s').replace('s', ''));
-                const segs = [];
-                let total = 0;
-                for (let i = 0; i + 1 < pts.length; i++) {
-                    const d = haversine(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1]);
-                    segs.push(d); total += d;
-                }
-                if (total <= 0) total = 1;
-                if (pts.length) timeline.push({ sec: t, lat: pts[0][0], lon: pts[0][1] });
-                let acc = 0;
-                for (let i = 0; i < segs.length; i++) {
-                    acc += segs[i];
-                    timeline.push({ sec: t + dur * acc / total, lat: pts[i + 1][0], lon: pts[i + 1][1] });
-                }
-                steps.push({
-                    t0: t,
-                    t1: t + dur,
-                    instruction: (st.navigationInstruction && st.navigationInstruction.instructions) || '',
-                });
-                t += dur;
-            }
+    /**
+     * 把座標點與 step 資料組成時間軸。
+     *
+     * 資料裡沒有「第幾步對應到第幾個座標點」的索引（整包掃過確認沒有），
+     * 因此改用累積距離對應：先算出每個點的累積距離，再依各 step 宣告的公尺數
+     * 切出邊界，落在哪一段就用那一段的秒數線性內插。
+     * 實測座標累加距離與宣告總距離誤差僅 0.01%，這個對應足夠準確。
+     */
+    function buildTimeline(alt) {
+        const pts = alt.points;
+        const cum = new Array(pts.length);
+        cum[0] = 0;
+        for (let i = 1; i < pts.length; i++) {
+            cum[i] = cum[i - 1] + haversine(pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1]);
         }
-        return { timeline, steps, totalSec: t };
+        const geoTotal = cum[cum.length - 1] || 1;
+        const declared = alt.steps.reduce((s, st) => s + st.meters, 0) || geoTotal;
+        const scale = geoTotal / declared;   // 消化兩者間的微小差異
+
+        // step 的累積邊界（已換算成「座標尺度」的公尺）
+        const bounds = [0];
+        const stepTimes = [0];
+        for (const st of alt.steps) {
+            bounds.push(bounds[bounds.length - 1] + st.meters * scale);
+            stepTimes.push(stepTimes[stepTimes.length - 1] + st.sec);
+        }
+
+        const timeline = new Array(pts.length);
+        let si = 0;
+        for (let i = 0; i < pts.length; i++) {
+            while (si < alt.steps.length - 1 && cum[i] >= bounds[si + 1]) si++;
+            const segLen = bounds[si + 1] - bounds[si];
+            const frac = segLen > 0 ? (cum[i] - bounds[si]) / segLen : 0;
+            const sec = stepTimes[si] + Math.max(0, Math.min(1, frac)) * alt.steps[si].sec;
+            timeline[i] = { sec, lat: pts[i][0], lon: pts[i][1] };
+        }
+        // 時間軸必須單調遞增，否則後面的二分搜尋會出錯
+        for (let i = 1; i < timeline.length; i++) {
+            if (timeline[i].sec < timeline[i - 1].sec) timeline[i].sec = timeline[i - 1].sec;
+        }
+
+        const steps = alt.steps.map((st, k) => ({
+            t0: stepTimes[k], t1: stepTimes[k + 1], roads: st.roads,
+        }));
+        return { timeline, steps, totalSec: alt.totalSec || stepTimes[stepTimes.length - 1] };
     }
 
     /** 在時間軸上精確內插出某個累積秒數對應的座標（不吸附到最近頂點——吸附會破壞等分性質） */
@@ -689,65 +702,28 @@
     // 路名抽取
     // ════════════════════════════════════════════════════════════════
 
-    const ROAD_SUFFIX_RE = /(?:高架道路|快速道路|聯絡道|交流道|公路|大道|[路街道巷弄線橋段圈])$/;
-    const ROAD_NUMBERED_RES = [
-        /^國道\d+號$/, /^國道[一二三四五六七八九十]+$/,
-        /^台\d+[甲乙丙丁]?線$/, /^臺\d+[甲乙丙丁]?線$/,
-        /^\d+[甲乙丙丁]?縣道$/, /^[縣市區鄉鎮]道\d+[甲乙丙丁]?$/,
-    ];
-
-    function looksLikeRoad(s) {
-        if (!s || s.length > 24) return false;
-        if (ROAD_NUMBERED_RES.some(re => re.test(s))) return true;
-        return ROAD_SUFFIX_RE.test(s);
-    }
-
-    // 由具體到一般依序嘗試；抽出的候選還要通過 looksLikeRoad 才採用。
-    // 刻意不抓「朝X前進」——那是目標路名，不是當下所在的路，誤抓會給出錯誤位置。
-    const ROAD_PATTERNS = [
-        /進入([^\s，,。]+?)(?:$|，|,)/,
-        /(?:以)?繼續行駛([^\s，,。]+?)(?:$|，|,)/,
-        /接著走([^\s，,。]+?)(?:$|，|,)/,
-        /繼續直行走([^\s，,。]+?)(?:$|，|,)/,
-        /繼續走([^\s，,。]+?)(?:$|，|,)/,
-        /上匝道後走([^\s，,。]+?)(?:$|，|,)/,
-        /匝道上([^\s，,。]+?)往/,
-        /上([^\s，,。]+?)匝道/,
-        /[，,]走([^\s，,。]+?)(?:$|[，,])/,
-        /^走([^\s，,。]+?)(?:$|，|,)/,
-        /^往[東南西北]+走([^\s，,。]+?)朝/,
-        /^於([^\s，,。]+?)(?:\(|（|靠)/,
-    ];
-
-    function extractRoadName(instruction) {
-        if (!instruction) return null;
-        const head = instruction.split('\n')[0].trim();
-        for (const re of ROAD_PATTERNS) {
-            const m = head.match(re);
-            if (!m) continue;
-            const parts = m[1].split('/').map(s => s.trim()).filter(Boolean);
-            const good = parts.find(looksLikeRoad);
-            if (good) return good;
-        }
-        return null;
-    }
-
-    /** 節點所在 step 沒有路名時，前後雙向找時間差最小的；相同時優先取「前」 */
+    /**
+     * 節點所在 step 若沒有路名，前後雙向找時間差最小的；相同時優先取「前」。
+     *
+     * 路名不再靠解析中文句子。Google 自己的資料就把指示拆成結構化 token，
+     * 型別碼 2 且帶旗標者即為道路專有名稱（見 roadNamesOf）。
+     * 先前用 12 條正則去比對「進入X」「繼續走X」這類句型，遇到「繼續直行」
+     * 這種沒有路名的指示就抓不到，還得再寫一層驗證去過濾誤抓；現在都不需要了。
+     */
     function resolveRoadName(steps, sec) {
-        const named = steps.map(s => ({ ...s, name: extractRoadName(s.instruction) }));
-        let idx = named.findIndex(s => s.t0 <= sec && sec < s.t1);
-        if (idx < 0) idx = named.length - 1;
-        if (idx >= 0 && named[idx] && named[idx].name) {
-            return { name: named[idx].name, borrowed: false };
+        let idx = steps.findIndex(s => s.t0 <= sec && sec < s.t1);
+        if (idx < 0) idx = steps.length - 1;
+        if (idx >= 0 && steps[idx] && steps[idx].roads.length) {
+            return { name: steps[idx].roads[0], borrowed: false };
         }
         let best = null;
-        for (let j = 0; j < named.length; j++) {
-            if (!named[j].name || j === idx) continue;
-            const gap = j < idx ? Math.max(0, sec - named[j].t1) : Math.max(0, named[j].t0 - sec);
+        for (let j = 0; j < steps.length; j++) {
+            if (j === idx || !steps[j].roads.length) continue;
+            const gap = j < idx ? Math.max(0, sec - steps[j].t1) : Math.max(0, steps[j].t0 - sec);
             if (gap > ROAD_NAME_MAX_GAP_SEC) continue;
             const dir = j < idx ? 'before' : 'after';
             if (!best || gap < best.gap || (gap === best.gap && dir === 'before')) {
-                best = { name: named[j].name, gap, dir };
+                best = { name: steps[j].roads[0], gap, dir };
             }
         }
         return best ? { name: best.name, borrowed: true } : { name: null, borrowed: false };
@@ -966,10 +942,8 @@
     // ════════════════════════════════════════════════════════════════
 
     function getKeys() {
-        return {
-            google: GM_getValue(KEY_GOOGLE, ''),
-            cwa: GM_getValue(KEY_CWA, ''),
-        };
+        // 只剩氣象署一組。路線資料改為攔截頁面自己的請求，不再需要 Google 金鑰。
+        return { cwa: GM_getValue(KEY_CWA, '') };
     }
 
     /**
@@ -1013,8 +987,7 @@
 
         box.innerHTML = `
 <div class="${PREFIX}-mtitle">API 金鑰設定</div>
-<div class="${PREFIX}-mdesc">兩組金鑰都只存在你自己的瀏覽器，不會上傳，也不在腳本原始碼中。</div>
-${field('Google Maps API 金鑰', 'Routes API；開發階段可用免綁卡的 Maps Demo Key', cur.google, 'google')}
+<div class="${PREFIX}-mdesc">授權碼只存在你自己的瀏覽器，不會上傳，也不在腳本原始碼中。</div>
 ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取得，格式為 CWA-…', cur.cwa, 'cwa')}
 <div class="${PREFIX}-mact">
   <button type="button" class="${PREFIX}-mbtn" data-${PREFIX}-cancel>取消</button>
@@ -1038,7 +1011,6 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             if (ev.target.closest('[data-' + PREFIX + '-cancel]')) { back.remove(); return; }
             if (ev.target.closest('[data-' + PREFIX + '-save]')) {
                 const get = n => box.querySelector(`input[name="${n}"]`).value.trim();
-                GM_setValue(KEY_GOOGLE, get('google'));
                 GM_setValue(KEY_CWA, get('cwa'));
                 back.remove();
                 log('金鑰已儲存');
@@ -1513,12 +1485,12 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
 
     async function run(wrap) {
         const keys = getKeys();
-        if (!keys.google || !keys.cwa) {
+        if (!keys.cwa) {
             showMessage(wrap,
-                '還沒設定 API 金鑰。<br><br>需要兩組：<br>' +
-                '① <b>Google Maps API 金鑰</b>（Routes API，開發階段可用免綁卡的 Demo Key）<br>' +
-                '② <b>中央氣象署授權碼</b>（opendata.cwa.gov.tw 免費註冊即可取得）<br><br>' +
-                '兩組金鑰只會存在你自己的瀏覽器裡，不會出現在腳本原始碼中。<br><br>' +
+                '還沒設定中央氣象署授權碼。<br><br>' +
+                '到 opendata.cwa.gov.tw 免費註冊即可取得，格式為 <b>CWA-…</b><br>' +
+                '路線資料直接取自頁面，不需要 Google 金鑰。<br><br>' +
+                '授權碼只會存在你自己的瀏覽器裡，不會出現在腳本原始碼中。<br><br>' +
                 '請從 Tampermonkey 選單的「設定 API 金鑰」填入，或按下方按鈕。');
             const openBtn = document.createElement('button');
             openBtn.className = PREFIX + '-mbtn ' + PREFIX + '-primary';
@@ -1552,15 +1524,20 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
 
         clearBody(wrap);
         showMessage(wrap, '處理中…');
-        const routesResult = await getRoutes(keys.google, parsed, modeInfo.mode,
-            () => { clearBody(wrap); showMessage(wrap, '正在向 Google 取得路徑…'); });
-        const routes = routesResult.routes;
-        const picked = pickMatchingRoute(routes, selected);
-        const route = picked.route;
+        if (!state.capturedDirections) {
+            clearBody(wrap);
+            showMessage(wrap,
+                '還沒攔截到這個頁面的路線資料。\n\n' +
+                '本工具直接讀取 Google Maps 自己算好的路線，不另外呼叫 API，' +
+                '因此必須在頁面載入時就在場。\n\n' +
+                '請重新整理頁面後再按一次；若剛安裝或更新腳本，也需要重新整理。');
+            return;
+        }
+        const alts = parseDirections(state.capturedDirections.text);
+        const picked = pickAlternative(alts, selected);
+        const alt = picked.alt;
 
-        clearBody(wrap);
-        showMessage(wrap, '處理中…');
-        const { timeline, steps, totalSec } = buildTimeline(route);
+        const { timeline, steps, totalSec } = buildTimeline(alt);
         if (!timeline.length) throw new Error('Routes API 回傳的路徑沒有可用的座標');
         const nodes = buildNodes(timeline, totalSec);
         if (!nodes.length) {
@@ -1604,15 +1581,15 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             nodes, departures, forecast, totalSec,
             meta: {
                 matchNote: picked.matchNote,
-                routeDistanceMeters: route.distanceMeters,
-                routesFromCache: routesResult.fromCache,
+                routeDistanceMeters: alt.totalMeters,
+                capturedAt: state.capturedDirections.at,
                 mode: modeInfo,
                 selected,
                 callCount,
                 failures,
                 fetchedAt,
                 fromCache,
-                altCount: routes.length,
+                altCount: alts.length,
             },
         });
     }
@@ -1706,9 +1683,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             `節點 ${nodes.length} 個`,
             `涵蓋 ${new Set(nodes.map(n => n.county + n.town)).size} 個鄉鎮`,
             `總行程 ${Math.round(totalSec / 60)} 分`,
-            meta.routesFromCache
-                ? '路徑資料：沿用快取，未呼叫 Routes API'
-                : '路徑資料：本次向 Google 取得（消耗 1 次配額）',
+            `路徑資料：取自頁面本身（${Math.round((Date.now() - meta.capturedAt) / 1000)} 秒前攔截），未呼叫任何 API`,
             meta.fromCache
                 ? `氣象資料：沿用快取（${Math.round((Date.now() - meta.fetchedAt) / 60000)} 分鐘前取得）`
                 : `氣象資料：本次重新取得，呼叫 ${meta.callCount} 次`,
@@ -1910,6 +1885,11 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         log('啟動完成');
     }
 
+    // 攔截器必須最先架好——實測「直接開啟已規劃好的網址」時，
+    // directions 請求在頁面載入的最初期（0.00s）就發出，晚一步就錯過。
+    armInterceptors();
+
+    // UI 則要等 DOM 有東西可以掛才啟動
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', boot);
     } else {
