@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.26.0
+// @version      0.27.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -60,11 +60,16 @@
     // 預報資料
     const CWA_BUCKET_HOURS = 3;                // 降雨機率的時段長度，timeFrom/timeTo 必須對齊此邊界
     const FORECAST_HORIZON_HOURS = 96;         // 「未來3天」資料集實測涵蓋 96 小時
-    const CACHE_TTL_MS = 30 * 60 * 1000;       // 快取有效期：資料齊全且未超過此時間就直接沿用
+    const CACHE_TTL_MS = 30 * 60 * 1000;       // 氣象快取有效期：資料齊全且未超過此時間就直接沿用
+    // 路徑快取可以放很久：我們沒有指定 routingPreference，拿到的是不含即時路況的結果，
+    // 同一條路線算幾次都一樣。而 Routes API 有每日配額，重算一次就少一次額度。
+    const ROUTES_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+    const ROUTES_CACHE_MAX = 8;                // 保留幾筆路徑快取（polyline 佔空間，不宜無限成長）
     // 儲存鍵
     const KEY_GOOGLE = 'googleMapsApiKey';
     const KEY_CWA = 'cwaAuthorization';
     const KEY_CWA_CACHE = 'cwaForecastCache';
+    const KEY_ROUTES_CACHE = 'routesCache';
 
     // ────────────────────────────────────────────────────────────────
     // 依賴 Google Maps DOM 結構的選擇器，集中一處
@@ -392,8 +397,19 @@
                 data: opts.data,
                 timeout: 20000,
                 onload: res => {
-                    if (res.status >= 200 && res.status < 300) resolve(res.responseText);
-                    else reject(new Error(`HTTP ${res.status}：${String(res.responseText).slice(0, 300)}`));
+                    if (res.status >= 200 && res.status < 300) { resolve(res.responseText); return; }
+                    if (res.status === 429) {
+                        // 配額用盡丟原始英文訊息沒有幫助，直接說明狀況與可行的處理方式
+                        reject(new Error(
+                            'API 配額已用完（HTTP 429）。\n\n' +
+                            'Google Maps 的 Demo Key 有每日上限，本工具每重算一次路徑就消耗一次。\n' +
+                            '可以做的事：\n' +
+                            '　· 等配額重設後再試（重設時間可在 Google Cloud Console 的配額頁面確認）\n' +
+                            '　· 改用自己的正式金鑰（需在 Cloud Console 啟用計費）\n\n' +
+                            '已加入路徑快取，同一條路線＋同一種交通方式不會重複消耗配額。'));
+                        return;
+                    }
+                    reject(new Error(`HTTP ${res.status}：${String(res.responseText).slice(0, 300)}`));
                 },
                 onerror: () => reject(new Error('網路錯誤')),
                 ontimeout: () => reject(new Error('請求逾時')),
@@ -455,6 +471,49 @@
         if (json.error) throw new Error('Routes API：' + json.error.message);
         if (!json.routes || !json.routes.length) throw new Error('Routes API 沒有回傳路線');
         return json.routes;
+    }
+
+    // ── 路徑快取 ──
+    // 沒有這一層的話，每次重跑（切換交通方式、改路線、重開面板）都會打一次 Routes API。
+    // 實測就是這樣把 Demo Key 的每日配額用完的：氣象署那邊做了快取，這邊卻沒有。
+
+    function loadRoutesCache() {
+        try {
+            const raw = GM_getValue(KEY_ROUTES_CACHE, '');
+            const obj = raw ? JSON.parse(raw) : {};
+            return (obj && typeof obj === 'object') ? obj : {};
+        } catch (err) {
+            warn('路徑快取讀取失敗：', err.message);
+            return {};
+        }
+    }
+
+    function saveRoutesCache(key, routes) {
+        const cache = loadRoutesCache();
+        cache[key] = { at: Date.now(), routes };
+        // 超量時丟掉最舊的，避免 polyline 累積把儲存空間吃光
+        const keys = Object.keys(cache).sort((a, b) => cache[a].at - cache[b].at);
+        while (keys.length > ROUTES_CACHE_MAX) delete cache[keys.shift()];
+        try {
+            GM_setValue(KEY_ROUTES_CACHE, JSON.stringify(cache));
+        } catch (err) {
+            warn('路徑快取寫入失敗（不影響本次結果）：', err.message);
+        }
+    }
+
+    async function getRoutes(apiKey, parsed, travelMode, onFetchStart) {
+        // 同一條路線＋同一種交通方式，算出來的結果不會變，可以直接沿用
+        const key = routeKeyOf(location.href) + '|' + travelMode;
+        const cache = loadRoutesCache();
+        const hit = cache[key];
+        if (hit && Date.now() - hit.at <= ROUTES_CACHE_TTL_MS && hit.routes && hit.routes.length) {
+            log('沿用路徑快取（', Math.round((Date.now() - hit.at) / 60000), '分鐘前取得），未呼叫 Routes API');
+            return { routes: hit.routes, fromCache: true };
+        }
+        if (onFetchStart) onFetchStart();
+        const routes = await computeRoutes(apiKey, parsed, travelMode);
+        saveRoutesCache(key, routes);
+        return { routes, fromCache: false };
     }
 
     /** 從多條替代路線中，挑距離與時間最接近面板顯示值的那一條 */
@@ -1062,7 +1121,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
 .${PREFIX}-scroll{overflow:auto;max-height:calc(100vh - 300px);overflow-anchor:none;
   scroll-snap-type:both proximity;
   scroll-padding-top:${HEADER_H_PX}px;scroll-padding-left:${ROWH_W_PX}px}
-.${PREFIX}-msg{padding:14px 12px;font-size:13px;color:#3c4043;line-height:1.7}
+.${PREFIX}-msg{padding:14px 12px;font-size:13px;color:#3c4043;line-height:1.7;white-space:pre-wrap}
 .${PREFIX}-msg b{color:#1a73e8}
 .${PREFIX}-grid{display:grid;grid-auto-rows:${PITCH_PX}px;width:max-content;
   grid-template-columns:${ROWH_W_PX}px repeat(var(--${PREFIX}-cols),${PITCH_PX}px)}
@@ -1493,7 +1552,9 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
 
         clearBody(wrap);
         showMessage(wrap, '處理中…');
-        const routes = await computeRoutes(keys.google, parsed, modeInfo.mode);
+        const routesResult = await getRoutes(keys.google, parsed, modeInfo.mode,
+            () => { clearBody(wrap); showMessage(wrap, '正在向 Google 取得路徑…'); });
+        const routes = routesResult.routes;
         const picked = pickMatchingRoute(routes, selected);
         const route = picked.route;
 
@@ -1544,6 +1605,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             meta: {
                 matchNote: picked.matchNote,
                 routeDistanceMeters: route.distanceMeters,
+                routesFromCache: routesResult.fromCache,
                 mode: modeInfo,
                 selected,
                 callCount,
@@ -1644,6 +1706,9 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             `節點 ${nodes.length} 個`,
             `涵蓋 ${new Set(nodes.map(n => n.county + n.town)).size} 個鄉鎮`,
             `總行程 ${Math.round(totalSec / 60)} 分`,
+            meta.routesFromCache
+                ? '路徑資料：沿用快取，未呼叫 Routes API'
+                : '路徑資料：本次向 Google 取得（消耗 1 次配額）',
             meta.fromCache
                 ? `氣象資料：沿用快取（${Math.round((Date.now() - meta.fetchedAt) / 60000)} 分鐘前取得）`
                 : `氣象資料：本次重新取得，呼叫 ${meta.callCount} 次`,
