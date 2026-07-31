@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.25.0
+// @version      0.26.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -806,44 +806,63 @@
     // 規則：
     //   1. 每次向氣象署取資料都記下時間
     //   2. 下次先檢查「這次需要的地點與時間範圍」快取裡是否齊全
-    //   3. 有缺 → 整批重新取（不補差額），並更新時間
+    //   3. 有缺 → 把這次需要的地點整批重新取（不補差額），並更新時間
     //   4. 沒缺 → 看時間，未超過 CACHE_TTL_MS 就直接沿用
-    // 之所以「有缺就整批重取」而不是只補缺的部分：氣象署的預報會整批更新，
-    // 混用不同時間點取得的資料，同一張表裡各列的基準會不一致。
+    //
+    // 之所以「有缺就整批重取」而不是只補缺的那幾個：氣象署的預報會整批更新，
+    // 同一張表裡若混用不同時間點取得的資料，各列的基準會不一致。
+    //
+    // 但「整批重取」不等於「丟掉其他路線的資料」。舊版把整個 towns 物件覆蓋掉，
+    // 結果在兩條路線之間來回切換時，每次都會把上一條的資料洗掉、每次都重打 API。
+    // 因此改成逐鄉鎮各自記錄時間戳與涵蓋範圍，寫入時合併。
+    // 這樣同一張表用到的鄉鎮仍然來自同一次請求（因為它們是一起重取的），
+    // 不會有基準不一致的問題，但別條路線的資料得以保留。
 
     function loadCache() {
         try {
             const raw = GM_getValue(KEY_CWA_CACHE, '');
-            if (!raw) return null;
+            if (!raw) return {};
             const obj = JSON.parse(raw);
-            if (!obj || !obj.towns) return null;
-            return obj;
+            if (!obj || typeof obj !== 'object') return {};
+            return obj.towns && obj.fetchedAt ? {} : obj;   // 舊格式直接丟棄，重新建立
         } catch (err) {
             warn('快取讀取失敗，視為沒有快取：', err.message);
-            return null;
+            return {};
         }
     }
 
+    /** 把本次取得的資料合併進快取，不動其他鄉鎮 */
     function saveCache(forecast, fromMs, toMs) {
-        const towns = {};
-        for (const [name, rows] of forecast) towns[name] = rows;
+        const cache = loadCache();
+        const at = Date.now();
+        for (const [name, rows] of forecast) {
+            cache[name] = { at, fromMs, toMs, rows };
+        }
         try {
-            GM_setValue(KEY_CWA_CACHE, JSON.stringify({
-                fetchedAt: Date.now(), fromMs, toMs, towns,
-            }));
+            GM_setValue(KEY_CWA_CACHE, JSON.stringify(cache));
         } catch (err) {
             warn('快取寫入失敗（不影響本次結果）：', err.message);
         }
     }
 
-    /** 檢查快取能否滿足這次的需求：地點要齊全，時間範圍也要涵蓋得到 */
+    /**
+     * 檢查快取能否滿足這次的需求。三個條件缺一不可：
+     * 地點要有、時間範圍要涵蓋得到、而且還沒過期。
+     */
     function cacheShortfall(cache, neededTowns, fromMs, toMs) {
-        if (!cache) return { reason: '沒有快取' };
-        const missing = neededTowns.filter(t => !cache.towns[t] || !cache.towns[t].length);
+        const now = Date.now();
+        const missing = [], outOfRange = [], stale = [];
+        for (const t of neededTowns) {
+            const e = cache[t];
+            if (!e || !e.rows || !e.rows.length) { missing.push(t); continue; }
+            if (!(e.fromMs <= fromMs && e.toMs >= toMs)) { outOfRange.push(t); continue; }
+            if (now - e.at > CACHE_TTL_MS) { stale.push(t); }
+        }
         if (missing.length) return { reason: '缺少地點：' + missing.join('、') };
-        // 地點有、但時間範圍不夠一樣算缺——否則表格會出現一片查不到值的空白格
-        if (!(cache.fromMs <= fromMs && cache.toMs >= toMs)) {
-            return { reason: '快取的時間範圍涵蓋不到這次需要的區間' };
+        if (outOfRange.length) return { reason: '時間範圍涵蓋不到：' + outOfRange.join('、') };
+        if (stale.length) {
+            const age = Math.round((now - Math.min(...stale.map(t => cache[t].at))) / 60000);
+            return { reason: `資料已過 ${age} 分鐘（上限 ${CACHE_TTL_MS / 60000} 分鐘）` };
         }
         return null;
     }
@@ -855,19 +874,16 @@
         const shortfall = cacheShortfall(cache, neededTowns, fromMs, toMs);
 
         if (!shortfall) {
-            const age = Date.now() - cache.fetchedAt;
-            if (age <= CACHE_TTL_MS) {
-                const forecast = new Map(Object.entries(cache.towns));
-                log('沿用快取：資料齊全且僅', Math.round(age / 60000), '分鐘前取得');
-                return {
-                    forecast, failures: [], callCount: 0,
-                    fetchedAt: cache.fetchedAt, fromCache: true,
-                };
-            }
-            log('快取資料齊全，但已過', Math.round(age / 60000), '分鐘，重新取得');
-        } else {
-            log('快取不可用（' + shortfall.reason + '），重新取得');
+            const forecast = new Map(neededTowns.map(t => [t, cache[t].rows]));
+            const oldest = Math.min(...neededTowns.map(t => cache[t].at));
+            log('沿用快取：', neededTowns.length, '個鄉鎮齊全，最舊一筆為',
+                Math.round((Date.now() - oldest) / 60000), '分鐘前取得');
+            return {
+                forecast, failures: [], callCount: 0,
+                fetchedAt: oldest, fromCache: true,
+            };
         }
+        log('快取不可用（' + shortfall.reason + '），重新取得');
 
         if (onFetchStart) onFetchStart();   // 只有確定要發請求時才通知畫面
         const res = await fetchForecast(auth, nodes, timeFrom, timeTo);
