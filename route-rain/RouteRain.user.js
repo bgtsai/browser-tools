@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.38.0
+// @version      0.39.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -55,6 +55,8 @@
     const DRAG_DWELL_MS = 140;                 // 放開前先靜止這麼久，消除慣性滑動
     const VIEW_POLL_MS = 80;                   // 輪詢網址視野變化的間隔
     const VIEW_WAIT_MS = 1500;                 // 等視野更新的逾時
+    const ZOOM_CHUNK = 2;                      // 每次最多放大幾級，之間插入一次平移校正
+                                               // 一口氣放大多級會累積偏移，細調得拉很多次才拉得回來
     const MIN_WORK_ZOOM = 5;                   // 為了拖曳而縮小時的下限，再小就整個台灣都看不清了
     const ROUTE_CHANGE_DEBOUNCE_MS = 600;      // 路線改變後等它安定再重算（ms）
     const DEPART_STEP_MIN = 15;                // 出發時間欄距（分鐘）
@@ -2009,15 +2011,24 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         return { iter, dist };
     }
 
-    async function zoomBySteps(steps) {
-        if (!steps) return;
-        const btn = findZoomButton(steps > 0);
-        if (!btn) { writeDiag({ step: 'zoom-skip', reason: '找不到縮放按鈕' }); return; }
-        for (let i = 0; i < Math.abs(steps); i++) {
+    /**
+     * 縮放到指定層級，並確認真的到位。
+     * 只按固定次數是不夠的：網址更新是非同步的，等待逾時就會被跳過，
+     * 實測出現過「目標 16 級卻停在 15 級」。改成以「目前層級」為準反覆補足。
+     */
+    async function zoomToLevel(targetZoom, maxAttempts) {
+        for (let attempt = 0; attempt < (maxAttempts || 10); attempt++) {
+            const vp = readViewport();
+            if (!vp) return;
+            const diff = Math.round(targetZoom - vp.zoom);
+            if (diff === 0) return;
+            const btn = findZoomButton(diff > 0);
+            if (!btn) { writeDiag({ step: 'zoom-skip', reason: '找不到縮放按鈕' }); return; }
             const before = viewportKey();
             btn.click();
-            await waitForViewportChange(before);   // 網址是非同步更新的，要等它真的變
+            await waitForViewportChange(before);
         }
+        writeDiag({ step: 'zoom-incomplete', want: targetZoom, got: (readViewport() || {}).zoom });
     }
 
     /**
@@ -2048,18 +2059,25 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         let workZoom = vp0.zoom;
         while (dragsAt(workZoom) > MAX_DRAGS_PER_MOVE && workZoom > MIN_WORK_ZOOM) workZoom--;
         const zoomOutSteps = Math.round(vp0.zoom - workZoom);
-        await zoomBySteps(-zoomOutSteps);
+        if (zoomOutSteps > 0) await zoomToLevel(workZoom);
 
         // ② 粗調平移
         const coarse = await panTo(canvas, lat, lon, maxX, maxY, 'coarse');
 
-        // ③ 拉近到目標層級
-        const afterPan = readViewport();
-        const zoomInSteps = Math.round(MAP_FOCUS_ZOOM - (afterPan ? afterPan.zoom : workZoom));
-        await zoomBySteps(zoomInSteps);
-
-        // ④ 細調平移，校正縮放造成的偏移
-        const fine = await panTo(canvas, lat, lon, maxX, maxY, 'fine');
+        // ③ 分段放大，每段之間校正一次——一口氣放大多級會累積偏移
+        let zoomRounds = 0;
+        let fine = { iter: 0, dist: Infinity };
+        for (let guard = 0; guard < 10; guard++) {
+            const vp = readViewport();
+            if (!vp || Math.round(MAP_FOCUS_ZOOM - vp.zoom) === 0) break;
+            const next = vp.zoom + Math.max(-ZOOM_CHUNK,
+                Math.min(ZOOM_CHUNK, Math.round(MAP_FOCUS_ZOOM - vp.zoom)));
+            await zoomToLevel(next);
+            fine = await panTo(canvas, lat, lon, maxX, maxY, 'fine' + guard);
+            zoomRounds++;
+        }
+        // 若一開始就已經在目標層級，仍要做一次校正
+        if (zoomRounds === 0) fine = await panTo(canvas, lat, lon, maxX, maxY, 'fine');
 
         const vpEnd = readViewport();
         const errKm = vpEnd
@@ -2068,7 +2086,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         writeDiag({
             step: 'done', target: [+lat.toFixed(5), +lon.toFixed(5)],
             zoomOut: zoomOutSteps, coarseIter: coarse.iter,
-            zoomIn: zoomInSteps, fineIter: fine.iter,
+            zoomRounds, fineIter: fine.iter,
             finalDistPx: Math.round(fine.dist),
             errorKm: errKm === null ? null : +errKm.toFixed(3),
             viewport: vpEnd,
