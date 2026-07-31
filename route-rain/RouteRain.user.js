@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.35.0
+// @version      0.36.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -1874,11 +1874,13 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
     // 也找不到可呼叫的地圖物件（window 上沒有任何具備 panTo/setCenter 的東西，
     // google.maps 也不存在）。可行的是對畫布送出滑鼠事件模擬拖曳，實測有效。
 
+    /** 回傳最大的那張地圖畫布「元素」——呼叫端會直接對它取尺寸與派送事件 */
     function findMapCanvas() {
-        return [...document.querySelectorAll('canvas')]
+        const best = [...document.querySelectorAll('canvas')]
             .map(el => ({ el, r: el.getBoundingClientRect() }))
             .filter(o => o.r.width > 200 && o.r.height > 200)
-            .sort((a, b) => b.r.width * b.r.height - a.r.width * a.r.height)[0] || null;
+            .sort((a, b) => b.r.width * b.r.height - a.r.width * a.r.height)[0];
+        return best ? best.el : null;
     }
 
     /** 從網址讀出目前視野。Google 會把視野寫進網址，所以這是可靠的來源 */
@@ -2038,7 +2040,10 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             env: w === window ? 'sandbox' : 'unsafeWindow',
             hasUnsafeWindow: typeof unsafeWindow !== 'undefined',
             viewport: vp,
-            canvas: canvas ? Math.round(canvas.r.width) + 'x' + Math.round(canvas.r.height) : null,
+            canvas: canvas
+                ? Math.round(canvas.getBoundingClientRect().width) + 'x' +
+                  Math.round(canvas.getBoundingClientRect().height)
+                : null,
             hasPointerEvent: !!(w && w.PointerEvent),
         });
         log('點擊節點', node.county + node.town);
