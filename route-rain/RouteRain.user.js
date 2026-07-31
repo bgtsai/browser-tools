@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.37.0
+// @version      0.37.1
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -49,7 +49,6 @@
     const DRAG_STEPS = 12;                     // 一次拖曳分幾步送出（模擬連續移動）
     const DRAG_STEP_MS = 16;                   // 每步間隔（ms），約等於一個影格
     const DRAG_MAX_RATIO = 0.4;                // 單次拖曳最多用掉畫布的幾成，超過就分多次
-    const ZOOM_CLICK_GAP_MS = 260;             // 連續按縮放鈕的間隔（ms），太快會被忽略
     const MAX_DRAGS_PER_MOVE = 2;              // 平移最多幾次拖曳；超過就先縮小再拖，比較快也比較穩
     const PAN_TOLERANCE_PX = 30;               // 距離目標小於此像素就算到位
     const PAN_MAX_ITERATIONS = 6;              // 閉環修正的次數上限，避免無限迴圈
