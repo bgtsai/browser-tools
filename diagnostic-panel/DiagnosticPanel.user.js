@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         通用診斷面板骨架
 // @namespace    browser-tools
-// @version      1.3
+// @version      1.4
 // @description  可複用的診斷面板骨架（方案 C）：面板 UI + 相對時間戳 + 開始/停止 + 一鍵複製，任務專屬邏輯只需替換「探針區塊」
 // @match        *://*/*
 // @grant        none
@@ -249,70 +249,135 @@
     let _bdpObservers = [];
     let _rrRestore = [];
 
-    // ── 目前任務：route-rain 點擊格子後，地圖沒有反應，追出卡在哪一環 ──
-    // 三個環節依序檢查：
-    //   ① 點擊格子有沒有真的產生 click 事件（表格那端）
-    //   ② route-rain 有沒有把 pointer/mouse 事件派送到地圖畫布（腳本那端）
-    //   ③ 事件送到了、地圖有沒有反應（Google 那端）——看網址的視野段有無變化
-    // 本腳本是 @grant none，跑在網頁環境；若 route-rain 從沙箱派送的事件
-    // 在這裡「看不到」，就直接證明沙箱隔離是原因。
+    // ── 目前任務：找出 Google Maps 的「相機層」，並同時驗證滾輪縮放是否可行 ──
+    //
+    // 一次執行回答四件事：
+    //   ① window 上有沒有具備地圖控制方法的物件
+    //   ② 從 canvas 及其祖先的自有屬性反查，有沒有內部控制器
+    //   ③ 用「數值特徵」找相機狀態物件——方法名稱會被混淆，但存著的
+    //      經緯度騙不了人：找出屬性值剛好等於目前地圖中心的物件
+    //   ④ 備案驗證：合成的 wheel 事件能不能縮放地圖
+    //
+    // 本腳本是 @grant none，跑在網頁環境；先前在沙箱裡掃描的結果不可信。
 
-    const RR_WATCH = ['pointerdown', 'pointermove', 'pointerup', 'mousedown', 'mousemove', 'mouseup'];
-    let _rrCanvasEvents = {};
-    let _rrLastView = '';
-    let _rrViewTimer = null;
+    const CAM_METHODS = ['panTo', 'panBy', 'setCenter', 'getCenter', 'setZoom', 'getZoom',
+        'moveCamera', 'setCameraParams', 'flyTo', 'setView', 'fitBounds'];
+    const SCAN_MAX_NODES = 30000;
+    const SCAN_MAX_DEPTH = 4;
+    const LATLNG_TOLERANCE = 0.02;
 
-    function rrViewOf() {
-        return (location.href.match(/\/@([^/]+)/) || [])[1] || '(無)';
+    function rrViewport() {
+        const m = location.href.match(/\/@(-?[\d.]+),(-?[\d.]+),([\d.]+)z/);
+        return m ? { lat: +m[1], lon: +m[2], zoom: +m[3] } : null;
     }
 
-    function rrIsCanvas(el) {
-        return el && el.tagName === 'CANVAS';
+    function rrScan(roots, vp) {
+        const seen = new WeakSet();
+        const methodHits = [];
+        const valueHits = [];
+        let nodes = 0;
+
+        const visit = (obj, path, depth) => {
+            if (!obj || depth > SCAN_MAX_DEPTH || nodes > SCAN_MAX_NODES) return;
+            const t = typeof obj;
+            if (t !== 'object' && t !== 'function') return;
+            if (seen.has(obj)) return;
+            seen.add(obj);
+            nodes++;
+
+            let keys;
+            try { keys = Object.getOwnPropertyNames(obj); } catch (err) { return; }
+
+            // ① 方法名稱比對
+            const found = CAM_METHODS.filter(m => {
+                try { return typeof obj[m] === 'function'; } catch (err) { return false; }
+            });
+            if (found.length >= 2) methodHits.push(`${path}  →  ${found.join(', ')}`);
+
+            // ③ 數值特徵：同一個物件裡同時有接近中心緯度與經度的數字
+            if (vp && keys.length <= 60) {
+                const nums = [];
+                for (const k of keys) {
+                    let v;
+                    try { v = obj[k]; } catch (err) { continue; }
+                    if (typeof v === 'number' && isFinite(v)) nums.push([k, v]);
+                }
+                const nearLat = nums.filter(([, v]) => Math.abs(v - vp.lat) < LATLNG_TOLERANCE);
+                const nearLon = nums.filter(([, v]) => Math.abs(v - vp.lon) < LATLNG_TOLERANCE);
+                if (nearLat.length && nearLon.length) {
+                    valueHits.push(`${path}  {${nearLat[0][0]}:${nearLat[0][1].toFixed(5)}, ` +
+                        `${nearLon[0][0]}:${nearLon[0][1].toFixed(5)}}  共 ${keys.length} 個屬性`);
+                }
+            }
+
+            if (depth >= SCAN_MAX_DEPTH) return;
+            for (const k of keys) {
+                if (/^(window|self|top|parent|frames|document|location|history)$/.test(k)) continue;
+                let v;
+                try { v = obj[k]; } catch (err) { continue; }
+                if (v && (typeof v === 'object' || typeof v === 'function')) {
+                    visit(v, path + '.' + k, depth + 1);
+                }
+            }
+        };
+
+        roots.forEach(([obj, name]) => visit(obj, name, 0));
+        return { methodHits, valueHits, nodes };
     }
 
     function PROBE_SETUP() {
-        log('START', '請在 route-rain 的表格上點一格，觀察下方三個環節。');
-        _rrCanvasEvents = {};
-        _rrLastView = rrViewOf();
-        log('視野', '目前 ' + _rrLastView);
+        const vp = rrViewport();
+        log('START', `目前視野：${vp ? `${vp.lat}, ${vp.lon} @ ${vp.zoom}z` : '(讀不到)'}`);
 
-        // ① 表格的點擊
-        const onCellClick = (ev) => {
-            const cell = ev.target && ev.target.closest && ev.target.closest('[class*="rr-c"]');
-            if (!cell) return;
-            log('①表格', `偵測到點擊格子　isTrusted=${ev.isTrusted}　class="${String(cell.className).slice(0, 40)}"`);
-            _rrCanvasEvents = {};   // 每次點擊重新計數，方便對應
-        };
-        document.addEventListener('click', onCellClick, true);
-        _rrRestore.push(() => document.removeEventListener('click', onCellClick, true));
+        const canvas = [...document.querySelectorAll('canvas')]
+            .map(el => ({ el, r: el.getBoundingClientRect() }))
+            .filter(o => o.r.width > 200 && o.r.height > 200)
+            .sort((a, b) => b.r.width * b.r.height - a.r.width * a.r.height)[0];
+        if (!canvas) { log('錯誤', '找不到地圖畫布，後續測試無法進行'); return; }
+        log('畫布', `${Math.round(canvas.r.width)}x${Math.round(canvas.r.height)}`);
 
-        // ② 派送到畫布的事件
-        const onAny = (ev) => {
-            if (!rrIsCanvas(ev.target)) return;
-            const k = ev.type + (ev.isTrusted ? '(真)' : '(合成)');
-            _rrCanvasEvents[k] = (_rrCanvasEvents[k] || 0) + 1;
-        };
-        RR_WATCH.forEach(t => {
-            document.addEventListener(t, onAny, true);
-            _rrRestore.push(() => document.removeEventListener(t, onAny, true));
-        });
+        // 從多個根出發：window、畫布本身、以及畫布往上四層的祖先
+        const roots = [[window, 'window'], [canvas.el, 'canvas']];
+        let anc = canvas.el.parentElement;
+        for (let i = 0; i < 4 && anc; i++, anc = anc.parentElement) {
+            roots.push([anc, `祖先[${i}]`]);
+        }
 
-        // 每 800ms 回報一次累積結果與視野變化
-        _rrViewTimer = setInterval(() => {
-            const keys = Object.keys(_rrCanvasEvents);
-            if (keys.length) {
-                log('②畫布', keys.map(k => `${k}×${_rrCanvasEvents[k]}`).join('　'));
-                _rrCanvasEvents = {};
+        const t0 = performance.now();
+        const { methodHits, valueHits, nodes } = rrScan(roots, vp);
+        log('掃描', `走訪 ${nodes} 個物件，耗時 ${Math.round(performance.now() - t0)} ms`);
+
+        log('①②方法比對', methodHits.length
+            ? methodHits.slice(0, 10).join('\n      ')
+            : '找不到具備兩個以上地圖控制方法的物件');
+
+        log('③數值特徵', valueHits.length
+            ? valueHits.slice(0, 12).join('\n      ')
+            : '找不到屬性值等於目前地圖中心的物件');
+
+        // ④ 滾輪縮放測試（備案方案的可行性）
+        const cx = canvas.r.left + canvas.r.width / 2;
+        const cy = canvas.r.top + canvas.r.height / 2;
+        const before = (location.href.match(/\/@[^/]+/) || ['(無)'])[0];
+        log('④滾輪', `開始測試，於畫布中心送出 5 次 wheel（縮放前 ${before}）`);
+        let n = 0;
+        const timer = setInterval(() => {
+            n++;
+            canvas.el.dispatchEvent(new WheelEvent('wheel', {
+                bubbles: true, cancelable: true, composed: true, view: window,
+                clientX: cx, clientY: cy, deltaY: -120, deltaMode: 0,
+            }));
+            if (n >= 5) {
+                clearInterval(timer);
+                setTimeout(() => {
+                    const after = (location.href.match(/\/@[^/]+/) || ['(無)'])[0];
+                    log('④滾輪', `縮放後 ${after}\n      結果：` +
+                        (after !== before ? '視野已改變 → 合成 wheel 可行' : '沒有變化 → 合成 wheel 無效'));
+                    log('DONE', '四項檢查完成，請按「停止監控」後複製。');
+                }, 1500);
             }
-            const v = rrViewOf();
-            if (v !== _rrLastView) {
-                log('③地圖', `視野已改變　${_rrLastView} → ${v}`);
-                _rrLastView = v;
-            }
-        }, 800);
-        _rrRestore.push(() => clearInterval(_rrViewTimer));
-
-        log('READY', '監聽就緒：①表格點擊　②畫布收到的事件（會標示真實或合成）　③視野變化');
+        }, 120);
+        _rrRestore.push(() => clearInterval(timer));
     }
 
     function PROBE_TEARDOWN() {
