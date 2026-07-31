@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.22.0
+// @version      0.23.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -31,7 +31,7 @@
     const PREFIX = 'rr';                       // 自己加到 DOM 上的 class／屬性一律加專案前綴
     const BUTTON_LABEL = '旅途中的雨';         // 注入到面板上的按鈕文字
     const BUTTON_GAP_PX = 8;                   // 注入按鈕與原「選項」之間的間距
-    const CLOSE_LABEL = '關閉';                // 面板開啟時，按鈕改成這個文字並移到「選項」的位置
+    const CLOSE_LABEL = '關閉回到路線';        // 面板開啟時，按鈕改成這個文字並移到「選項」的位置
 
     // 節點切分
     const SUBDIVIDE_SEC = 15 * 60;             // 同一鄉鎮停留超過此秒數就多切一個節點
@@ -1008,7 +1008,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
   flex:0 0 auto !important;float:none !important;white-space:nowrap !important;
   transform:none !important}
 [data-${PREFIX}-btn][data-${PREFIX}-on="1"]{background:#e8f0fe;border-radius:8px}
-.${PREFIX}-wrap{font-family:inherit;display:flex;flex-direction:column}
+.${PREFIX}-wrap{font-family:inherit;display:flex;flex-direction:column;padding-top:8px}
 .${PREFIX}-modal-back{position:fixed;inset:0;background:rgba(32,33,36,.45);z-index:2147483100;
   display:flex;align-items:center;justify-content:center}
 .${PREFIX}-modal{background:#fff;border-radius:12px;padding:22px 24px;width:420px;max-width:92vw;
@@ -1033,11 +1033,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
 .${PREFIX}-mbtn:hover{background:#f1f3f4}
 .${PREFIX}-mbtn.${PREFIX}-primary{background:#1a73e8;color:#fff}
 .${PREFIX}-mbtn.${PREFIX}-primary:hover{background:#1765cc}
-.${PREFIX}-bar{display:flex;align-items:center;justify-content:space-between;
-  padding:8px 12px;border-bottom:1px solid #e8eaed;position:sticky;top:0;background:#fff;z-index:5}
-.${PREFIX}-bar b{font-size:13px;color:#202124}
-/* 外觀由範本沿用「選項」的 class 提供，這裡只留游標與過場，不覆寫顏色與圓角 */
-.${PREFIX}-close{cursor:pointer;transition:background .12s,color .12s}
+/* 標題列與分隔線都拿掉了，只留一點上方留白讓表格不要貼著上緣 */
 /* scroll-padding-top 讓吸附時把黏在頂端的標頭高度算進去，
    否則列會被標頭切掉一半（就是「不完整的色塊」） */
 /* scroll-padding 把「黏在頂端／左側」的標頭尺寸算進去，否則吸附後仍會被標頭切掉半格。
@@ -1175,8 +1171,11 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         if (state.active) {
             // 開啟後沒有其他選項可按，按鈕改成「關閉」並移到「選項」的位置蓋住它，
             // 行為與 Google 自己的面板一致（按下去展開、原位變成關閉）
-            btn.style.setProperty('left', Math.round(r.left) + 'px', 'important');
+            // 文字比「選項」長，若沿用它的左緣會往右溢出面板；
+            // 改成對齊右緣、往左延伸，剛好把「選項」整個蓋住
             btn.style.setProperty('min-width', Math.round(r.width) + 'px', 'important');
+            btn.style.setProperty('left',
+                Math.round(r.right - Math.max(btn.offsetWidth, r.width)) + 'px', 'important');
             btn.style.setProperty('background', state.panelBg || '#fff', 'important');
             log('關閉按鈕定位：left=', Math.round(r.left), 'top=', Math.round(r.top),
                 'w>=', Math.round(r.width), '底色=', state.panelBg);
@@ -1348,23 +1347,6 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         wrap.className = PREFIX + '-wrap';
         wrap.id = PREFIX + '-wrap';
 
-        // 離開表格的出口。按鈕本身雖然也能再按一次關掉，但使用者捲到下面時
-        // 看不到那顆按鈕，所以表格上方固定放一條列。
-        const bar = document.createElement('div');
-        bar.className = PREFIX + '-bar';
-        const title = document.createElement('b');
-        title.textContent = BUTTON_LABEL;
-        // 用同一個範本，樣式與另外兩顆一致
-        const refBtn = findOptionsButton();
-        const closeBtn = refBtn
-            ? buildFromTemplate(refBtn, '關閉，回到路線')
-            : Object.assign(document.createElement('button'), { textContent: '關閉，回到路線' });
-        closeBtn.classList.add(PREFIX + '-close');
-        closeBtn.addEventListener('click', ev => { ev.preventDefault(); ev.stopPropagation(); deactivate(); });
-        bar.appendChild(title);
-        bar.appendChild(closeBtn);
-        wrap.appendChild(bar);
-
         panel.appendChild(wrap);
         state.container = wrap;
         state.active = true;
@@ -1394,11 +1376,8 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         });
     }
 
-    /** 只清掉內容，保留最上方的關閉列 */
     function clearBody(wrap) {
-        [...wrap.children].forEach(ch => {
-            if (!ch.classList.contains(PREFIX + '-bar')) ch.remove();
-        });
+        wrap.innerHTML = '';
     }
 
     function showMessage(wrap, html) {
