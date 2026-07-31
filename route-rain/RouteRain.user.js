@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.31.0
+// @version      0.32.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -415,11 +415,33 @@
 
     const DIRECTIONS_URL_RE = /\/maps\/preview\/directions\?/;
 
+    /**
+     * 攔到疑似路線資料時，先確認「解析得出可用路線」才收下。
+     *
+     * 這個端點不只回傳一種東西：點擊格子會改寫網址、觸發 Google 重新請求，
+     * 而它可能回傳局部更新或另一種形態的回應。若無條件覆蓋，
+     * 原本好好的那份就會被蓋掉，下次解析直接失敗。
+     * 因此改成「驗證後才存」，並且永遠保留最後一份可用的。
+     */
     function keepIfDirections(url, text) {
         if (!url || !DIRECTIONS_URL_RE.test(String(url))) return;
         if (!text || text.length < 1000) return;
-        state.capturedDirections = { text, at: Date.now(), url: String(url) };
-        log('已攔截路線資料', (text.length / 1024).toFixed(1) + 'KB');
+        let alts;
+        try {
+            alts = parseDirections(text);
+        } catch (err) {
+            log('攔到 directions 回應但解析不了，保留原本那份｜', err.message,
+                '｜大小', (text.length / 1024).toFixed(1) + 'KB');
+            return;
+        }
+        const usable = alts.filter(a => a.points.length > 1 && a.steps.length > 0);
+        if (!usable.length) {
+            log('攔到 directions 回應但沒有可用路線，保留原本那份｜大小',
+                (text.length / 1024).toFixed(1) + 'KB');
+            return;
+        }
+        state.capturedDirections = { text, at: Date.now(), url: String(url), altCount: usable.length };
+        log('已收下路線資料', (text.length / 1024).toFixed(1) + 'KB｜可用路線', usable.length, '條');
     }
 
     function armInterceptors() {
@@ -503,7 +525,10 @@
         const alts = root[0] && root[0][1];
         const geos = root[0] && root[0][7];
         if (!Array.isArray(alts) || !Array.isArray(geos)) {
-            throw new Error('路線資料的結構與預期不符，可能是 Google 改版了');
+            const shape = `頂層=${Array.isArray(root) ? 'Array(' + root.length + ')' : typeof root}` +
+                `，[0][1]=${Array.isArray(alts) ? 'Array(' + alts.length + ')' : typeof alts}` +
+                `，[0][7]=${Array.isArray(geos) ? 'Array(' + geos.length + ')' : typeof geos}`;
+            throw new Error('路線資料的結構與預期不符（' + shape + '）');
         }
         const out = [];
         for (let r = 0; r < Math.min(alts.length, geos.length); r++) {
@@ -1550,7 +1575,13 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
                 '請重新整理頁面後再按一次；若剛安裝或更新腳本，也需要重新整理。');
             return;
         }
-        const alts = parseDirections(state.capturedDirections.text);
+        const alts = parseDirections(state.capturedDirections.text)
+            .filter(a => a.points.length > 1 && a.steps.length > 0);
+        if (!alts.length) {
+            clearBody(wrap);
+            showMessage(wrap, '攔截到的路線資料裡沒有可用的路線，請重新整理頁面後再試。');
+            return;
+        }
         const picked = pickAlternative(alts, selected);
         const alt = picked.alt;
 
