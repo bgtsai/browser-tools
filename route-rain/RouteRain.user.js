@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.32.0
+// @version      0.33.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -45,7 +45,13 @@
     const PITCH_PX = CELL_PX + GAP_PX;         // 每欄節距
     const ROWH_W_PX = 126;                     // 左側地點欄寬度
     const INFO_MAX_W_PX = 860;                 // 資訊區的最大寬度（面板本身不再加寬）
-    const MAP_FOCUS_ZOOM = 15;                 // 點擊節點時地圖縮放層級
+    const MAP_FOCUS_ZOOM = 16;                 // 點擊節點時要拉近到的縮放層級
+    const DRAG_STEPS = 12;                     // 一次拖曳分幾步送出（模擬連續移動）
+    const DRAG_STEP_MS = 16;                   // 每步間隔（ms），約等於一個影格
+    const DRAG_MAX_RATIO = 0.4;                // 單次拖曳最多用掉畫布的幾成，超過就分多次
+    const ZOOM_CLICK_GAP_MS = 260;             // 連續按縮放鈕的間隔（ms），太快會被忽略
+    const MAX_DRAGS_PER_MOVE = 2;              // 平移最多幾次拖曳；超過就先縮小再拖，比較快也比較穩
+    const MIN_WORK_ZOOM = 5;                   // 為了拖曳而縮小時的下限，再小就整個台灣都看不清了
     const ROUTE_CHANGE_DEBOUNCE_MS = 600;      // 路線改變後等它安定再重算（ms）
     const DEPART_STEP_MIN = 15;                // 出發時間欄距（分鐘）
     const DEPART_COLUMNS_MAX = 96;             // 欄數上限（96 欄 × 15 分 = 24 小時）
@@ -1856,32 +1862,145 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         });
     }
 
+    // ── 把地圖視野移到指定座標 ──
+    //
+    // 為什麼不用改網址：實測發現 Google 是「把內部狀態寫進網址」，不是從網址讀視野。
+    // 我們改了網址，它的路由發現與內部狀態不一致，隨即改回去——網址是結果不是輸入。
+    // 也找不到可呼叫的地圖物件（window 上沒有任何具備 panTo/setCenter 的東西，
+    // google.maps 也不存在）。可行的是對畫布送出滑鼠事件模擬拖曳，實測有效。
+
+    function findMapCanvas() {
+        return [...document.querySelectorAll('canvas')]
+            .map(el => ({ el, r: el.getBoundingClientRect() }))
+            .filter(o => o.r.width > 200 && o.r.height > 200)
+            .sort((a, b) => b.r.width * b.r.height - a.r.width * a.r.height)[0] || null;
+    }
+
+    /** 從網址讀出目前視野。Google 會把視野寫進網址，所以這是可靠的來源 */
+    function readViewport() {
+        const m = location.href.match(/\/@(-?[\d.]+),(-?[\d.]+),([\d.]+)z/);
+        if (!m) return null;
+        return { lat: +m[1], lon: +m[2], zoom: +m[3] };
+    }
+
+    /** Web Mercator：經緯度 → 世界像素座標 */
+    function projectToPixel(lat, lon, zoom) {
+        const world = 256 * Math.pow(2, zoom);
+        const x = (lon + 180) / 360 * world;
+        const s = Math.sin(lat * Math.PI / 180);
+        const y = (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * world;
+        return { x, y };
+    }
+
+    function dispatchPointer(target, type, x, y, buttons) {
+        const init = {
+            bubbles: true, cancelable: true, composed: true, view: window,
+            clientX: x, clientY: y, screenX: x, screenY: y,
+            button: 0, buttons: buttons,
+            pointerId: 1, pointerType: 'mouse', isPrimary: true,
+        };
+        // pointer 與 mouse 兩套都送：不同實作監聽的種類不同
+        target.dispatchEvent(new PointerEvent(type, init));
+        target.dispatchEvent(new MouseEvent(type.replace('pointer', 'mouse'), init));
+    }
+
+    function simulateDrag(canvas, dx, dy) {
+        return new Promise(resolve => {
+            const r = canvas.getBoundingClientRect();
+            const cx = r.left + r.width / 2;
+            const cy = r.top + r.height / 2;
+            dispatchPointer(canvas, 'pointerdown', cx, cy, 1);
+            let step = 0;
+            const timer = setInterval(() => {
+                step++;
+                dispatchPointer(canvas, 'pointermove',
+                    cx + dx * step / DRAG_STEPS, cy + dy * step / DRAG_STEPS, 1);
+                if (step >= DRAG_STEPS) {
+                    clearInterval(timer);
+                    dispatchPointer(canvas, 'pointerup', cx + dx, cy + dy, 0);
+                    setTimeout(resolve, 260);   // 等地圖的慣性與網址更新安定
+                }
+            }, DRAG_STEP_MS);
+        });
+    }
+
+    /** 找地圖右下角的縮放鈕。用可見標籤定位，不依賴混淆過的 class */
+    function findZoomButton(zoomIn) {
+        const want = zoomIn ? /放大|zoom in/i : /縮小|zoom out/i;
+        return [...document.querySelectorAll('button')]
+            .find(b => want.test(b.getAttribute('aria-label') || b.title || '')) || null;
+    }
+
+    const wait = ms => new Promise(r => setTimeout(r, ms));
+
     /**
-     * 點擊節點時把地圖視野移到該座標，且不離開目前分頁、不重新載入。
-     *
-     * 尚未有把握的部分：Google Maps 沒有對外開放的頁內 API，我找不到權威做法。
-     * 這裡用的是「改寫網址的 /@lat,lng,zoom 段 → pushState → 補一個 popstate」，
-     * 賭它的前端路由有監聽 popstate。可行與否需要實測，因此每次都會記 log；
-     * 若地圖沒有反應，log 會留下當時的網址供比對，再換別的做法。
+     * 先平移、再縮放。順序不能顛倒：
+     * 縮放以畫面中心為基準，先把目標拖到中心再放大，目標就會留在中心；
+     * 反過來先放大的話，每放大一級目標離中心的像素距離就加倍，很快超出單次拖曳範圍。
+     * 縮放用右下角的按鈕而不是滾輪——滾輪以游標位置為中心，按鈕以畫面中心為中心。
      */
-    function onNodeClick(node) {
-        const zoom = MAP_FOCUS_ZOOM;
-        const target = `${node.lat.toFixed(7)},${node.lon.toFixed(7)},${zoom}z`;
-        const before = location.href;
-        const next = /\/@[^/]+/.test(before)
-            ? before.replace(/\/@[^/]+/, '/@' + target)
-            : before.replace('/maps/', '/maps/@' + target + '/');
-        if (next === before) {
-            log('點擊節點：網址沒有變化，略過', node.county + node.town);
+    async function focusMapOn(lat, lon) {
+        const vp = readViewport();
+        const canvas = findMapCanvas();
+        if (!vp || !canvas) {
+            warn('找不到視野資訊或地圖畫布，略過定位');
             return;
         }
-        try {
-            history.pushState(history.state, '', next);
-            window.dispatchEvent(new PopStateEvent('popstate', { state: history.state }));
-            log('點擊節點：已改寫網址並送出 popstate', node.county + node.town, target);
-        } catch (err) {
-            warn('改寫網址失敗：', err.message);
+        const r = canvas.getBoundingClientRect();
+        const maxX = r.width * DRAG_MAX_RATIO;
+        const maxY = r.height * DRAG_MAX_RATIO;
+
+        // 需要幾次拖曳才夠。像素距離每縮小一級就減半，所以先算出「要縮到哪一級才拖得完」。
+        // 不先縮小的話，在已經拉近的狀態下點遠處節點會拖不到（實測 zoom 16 需位移四萬多像素）。
+        const dragsAt = (zoom) => {
+            const c0 = projectToPixel(vp.lat, vp.lon, zoom);
+            const t0 = projectToPixel(lat, lon, zoom);
+            return Math.max(Math.abs(c0.x - t0.x) / maxX, Math.abs(c0.y - t0.y) / maxY);
+        };
+        let workZoom = vp.zoom;
+        while (dragsAt(workZoom) > MAX_DRAGS_PER_MOVE && workZoom > MIN_WORK_ZOOM) workZoom--;
+
+        const zoomOutSteps = Math.round(vp.zoom - workZoom);
+        if (zoomOutSteps > 0) {
+            const btn = findZoomButton(false);
+            if (btn) {
+                for (let i = 0; i < zoomOutSteps; i++) { btn.click(); await wait(ZOOM_CLICK_GAP_MS); }
+            }
         }
+
+        // 平移（在縮小後的層級進行，像素距離小得多）
+        const nowVp = readViewport() || { lat: vp.lat, lon: vp.lon, zoom: workZoom };
+        const c = projectToPixel(nowVp.lat, nowVp.lon, nowVp.zoom);
+        const t = projectToPixel(lat, lon, nowVp.zoom);
+        let dx = c.x - t.x;
+        let dy = c.y - t.y;
+        let drags = 0;
+        while ((Math.abs(dx) > 2 || Math.abs(dy) > 2) && drags < MAX_DRAGS_PER_MOVE + 2) {
+            drags++;
+            const stepX = Math.max(-maxX, Math.min(maxX, dx));
+            const stepY = Math.max(-maxY, Math.min(maxY, dy));
+            await simulateDrag(canvas, stepX, stepY);
+            dx -= stepX;
+            dy -= stepY;
+        }
+
+        // 拉近到設定的層級（以畫面中心為基準，目標會留在中心）
+        const afterPan = readViewport();
+        const zoomInSteps = Math.round(MAP_FOCUS_ZOOM - (afterPan ? afterPan.zoom : workZoom));
+        if (zoomInSteps !== 0) {
+            const btn = findZoomButton(zoomInSteps > 0);
+            if (btn) {
+                for (let i = 0; i < Math.abs(zoomInSteps); i++) { btn.click(); await wait(ZOOM_CLICK_GAP_MS); }
+            } else {
+                log('找不到縮放按鈕，只做了平移');
+            }
+        }
+        log('已定位到', lat.toFixed(5), lon.toFixed(5),
+            '｜先縮小', zoomOutSteps, '級｜拖曳', drags, '次｜再放大', zoomInSteps, '級');
+    }
+
+    function onNodeClick(node) {
+        focusMapOn(node.lat, node.lon).catch(err => warn('定位失敗：', err.message));
     }
 
     // ════════════════════════════════════════════════════════════════
