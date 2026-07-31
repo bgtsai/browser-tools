@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.21.0
+// @version      0.22.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -44,7 +44,7 @@
     const GAP_PX = 4;                          // 色塊間隔
     const PITCH_PX = CELL_PX + GAP_PX;         // 每欄節距
     const ROWH_W_PX = 126;                     // 左側地點欄寬度
-    const PANEL_WIDE_PX = 900;                 // 啟用時面板加寬到此寬度
+    const INFO_MAX_W_PX = 860;                 // 資訊區的最大寬度（面板本身不再加寬）
     const MAP_FOCUS_ZOOM = 15;                 // 點擊節點時地圖縮放層級
     const DEPART_STEP_MIN = 15;                // 出發時間欄距（分鐘）
     const DEPART_COLUMNS_MAX = 96;             // 欄數上限（96 欄 × 15 分 = 24 小時）
@@ -901,6 +901,10 @@
      * 金鑰只存在 GM 儲存空間（使用者自己的瀏覽器），不會出現在腳本原始碼或 repo 裡。
      */
     function openSettings() {
+        // 面板完全靠 CSS class 撐版面。從 Tampermonkey 選單呼叫時，
+        // 樣式可能還沒注入過（那是在 activate 才做的），漏掉這一步的話
+        // 面板會變成沒有樣式的 div 貼在 body 最上面——看不見、卻佔著版面又可以點。
+        injectStyle();
         document.getElementById(PREFIX + '-modal')?.remove();
         const cur = getKeys();
 
@@ -1096,7 +1100,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
 .${PREFIX}-c.${PREFIX}-na{background:repeating-linear-gradient(45deg,#f1f3f4 0 4px,#e0e3e6 4px 8px)}
 /* 說明區接在格線正下方、同一個捲動流（不另外開捲軸）；
    sticky left 讓它橫向捲動時始終貼齊左側地點欄，不會被推出畫面 */
-.${PREFIX}-info{position:sticky;left:0;width:max-content;max-width:${PANEL_WIDE_PX - 40}px;
+.${PREFIX}-info{position:sticky;left:0;width:max-content;max-width:${INFO_MAX_W_PX}px;
   padding:12px 12px 16px;border-top:1px solid #e8eaed;background:#fff}
 .${PREFIX}-legend{display:flex;flex-direction:column;gap:6px;font-size:12px;color:#3c4043}
 .${PREFIX}-legend div{display:flex;align-items:center}
@@ -1299,7 +1303,9 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         state.hiddenBlocks = [];
         if (state.container) { state.container.remove(); state.container = null; }
         const panel = findPanel();
-        if (panel) panel.style.width = state.originalPanelWidth;
+        if (panel && state.originalPanelWidth !== undefined) {
+            panel.style.width = state.originalPanelWidth;
+        }
         const tip = document.getElementById(PREFIX + '-tip');
         if (tip) tip.remove();
         state.active = false;
@@ -1333,8 +1339,10 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         } else {
             warn('找不到「選項」那一列，無法判斷要隱藏哪些區塊');
         }
+        // 先前會把面板加寬到固定寬度，但實測加寬只影響某一層容器、
+        // 表格顯示寬度沒有跟著變，反而把靠右對齊的「選項」推到畫面中央，
+        // 連帶讓貼著它定位的關閉按鈕也跑掉。第一版先不動寬度，用橫向捲動即可。
         state.originalPanelWidth = panel.style.width;
-        panel.style.width = PANEL_WIDE_PX + 'px';
 
         const wrap = document.createElement('div');
         wrap.className = PREFIX + '-wrap';
