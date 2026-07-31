@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.23.0
+// @version      0.24.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -1291,6 +1291,36 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         activate();
     }
 
+    /**
+     * 隱藏「灰線以下」的所有區塊。
+     * 用結構判斷而非比對 class：找出「選項」那一列，把它之後的兄弟節點全部隱藏，
+     * 這樣不管 Google 之後再加什麼區塊都會一併蓋掉（例如「探索附近的地點」）。
+     *
+     * 必須可重複呼叫：點擊格子會改寫網址並送出 popstate，Google 的路由收到後
+     * 會重新渲染整個面板、建立<strong>新的</strong>元素——我們當初設在舊元素上的
+     * display:none 對新元素無效，被隱藏的區塊就會重新冒出來把表格往下擠。
+     * 因此面板每次變動都要重新套用一次。
+     */
+    function applyHiding(panel) {
+        const optionsBtn = findOptionsButton();
+        const optionsRow = optionsBtn
+            ? [...panel.children].find(ch => ch.contains(optionsBtn))
+            : null;
+        if (!optionsRow) { warn('找不到「選項」那一列，無法判斷要隱藏哪些區塊'); return; }
+        const kids = [...panel.children];
+        const startIdx = kids.indexOf(optionsRow) + 1;
+        for (let i = startIdx; i < kids.length; i++) {
+            const el = kids[i];
+            if (el === state.container) continue;                 // 我們自己的內容不能藏
+            if (state.hiddenBlocks.some(h => h.el === el)) {       // 已記錄過就只補上隱藏
+                el.style.display = 'none';
+                continue;
+            }
+            state.hiddenBlocks.push({ el, display: el.style.display });
+            el.style.display = 'none';
+        }
+    }
+
     function deactivate() {
         if (state.optionsClickHandler) {
             document.removeEventListener('click', state.optionsClickHandler, true);
@@ -1317,27 +1347,8 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         const panel = findPanel();
         if (!panel) { alert('找不到路線面板，請先在 Google Maps 規劃好路線。'); return; }
 
-        // 隱藏「灰線以下」的所有區塊。
-        // 原本是逐一比對 class（傳送/複製連結、路線列表、高度剖面圖），但那樣有兩個問題：
-        //   1. class 是混淆過的，改版就失效
-        //   2. 漏掉沒列到的區塊（例如「探索附近的地點」那一整排圖示）
-        // 改成用結構判斷：找出「選項」按鈕所在那一列的位置，把它之後的兄弟節點全部隱藏。
-        // 這樣不管 Google 之後再加什麼區塊，都會一併被蓋掉。
-        const optionsBtn = findOptionsButton();
-        const optionsRow = optionsBtn
-            ? [...panel.children].find(ch => ch.contains(optionsBtn))
-            : null;
-        const kids = [...panel.children];
-        const startIdx = optionsRow ? kids.indexOf(optionsRow) + 1 : -1;
         state.hiddenBlocks = [];
-        if (startIdx > 0) {
-            for (let i = startIdx; i < kids.length; i++) {
-                state.hiddenBlocks.push({ el: kids[i], display: kids[i].style.display });
-                kids[i].style.display = 'none';
-            }
-        } else {
-            warn('找不到「選項」那一列，無法判斷要隱藏哪些區塊');
-        }
+        applyHiding(panel);
         // 先前會把面板加寬到固定寬度，但實測加寬只影響某一層容器、
         // 表格顯示寬度沒有跟著變，反而把靠右對齊的「選項」推到畫面中央，
         // 連帶讓貼著它定位的關閉按鈕也跑掉。第一版先不動寬度，用橫向捲動即可。
@@ -1748,7 +1759,18 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         const schedule = () => {
             if (pending) return;
             pending = true;
-            requestAnimationFrame(() => { pending = false; ensureButton(); });
+            requestAnimationFrame(() => {
+                pending = false;
+                ensureButton();
+                if (!state.active) return;
+                const panel = findPanel();
+                if (!panel) return;
+                // 重繪會產生新的區塊，要重新隱藏；我們的內容若被移除也要放回去
+                if (state.container && state.container.parentElement !== panel) {
+                    panel.appendChild(state.container);
+                }
+                applyHiding(panel);
+            });
         };
         new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
         window.addEventListener('resize', schedule);
