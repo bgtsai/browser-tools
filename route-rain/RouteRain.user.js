@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.30.0
+// @version      0.31.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -12,6 +12,7 @@
 // @grant        GM_getValue
 // @grant        GM_registerMenuCommand
 // @grant        GM_getResourceText
+// @grant        unsafeWindow
 // @resource     twTowns https://raw.githubusercontent.com/bgtsai/browser-tools/main/route-rain/tw_town_boundaries_encoded.json
 // @downloadURL  https://raw.githubusercontent.com/bgtsai/browser-tools/main/route-rain/RouteRain.user.js
 // @updateURL    https://raw.githubusercontent.com/bgtsai/browser-tools/main/route-rain/RouteRain.user.js
@@ -422,30 +423,46 @@
     }
 
     function armInterceptors() {
-        const origOpen = XMLHttpRequest.prototype.open;
-        const origSend = XMLHttpRequest.prototype.send;
-        XMLHttpRequest.prototype.open = function (method, url) {
-            this.__rrUrl = url;
-            return origOpen.apply(this, arguments);
-        };
-        XMLHttpRequest.prototype.send = function () {
-            this.addEventListener('load', () => {
-                try { keepIfDirections(this.__rrUrl, this.responseText); } catch (err) { /* 非文字回應 */ }
-            });
-            return origSend.apply(this, arguments);
-        };
+        // 一旦用了任何 GM_* 授權，Tampermonkey 就會把腳本放進沙箱執行，
+        // 此處的 window 是包裝過的代理物件——改它的 fetch / XMLHttpRequest
+        // 只會動到沙箱自己那份副本，網頁實際使用的那份完全沒被攔到。
+        // 必須改 unsafeWindow（真正的網頁 window）才有效。
+        // （先前用 @grant none 的診斷腳本攔得到，是因為它本來就跑在網頁環境裡；
+        //   拿那個結果推論有 grant 的腳本也會成立，是錯的。）
+        const w = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
+        if (w === window) {
+            warn('取不到 unsafeWindow，將在沙箱內攔截——很可能攔不到網頁自己的請求');
+        }
 
-        const origFetch = window.fetch;
-        window.fetch = function (...args) {
-            return origFetch.apply(this, args).then(res => {
-                // 一定要 clone：把 body 讀掉會讓網站自己拿不到資料
-                res.clone().text()
-                    .then(t => keepIfDirections((args[0] && args[0].url) || args[0], t))
-                    .catch(() => {});
-                return res;
-            });
-        };
-        log('攔截器已架設（XHR + fetch）');
+        const XHR = w.XMLHttpRequest;
+        if (XHR && XHR.prototype) {
+            const origOpen = XHR.prototype.open;
+            const origSend = XHR.prototype.send;
+            XHR.prototype.open = function (method, url) {
+                this.__rrUrl = url;
+                return origOpen.apply(this, arguments);
+            };
+            XHR.prototype.send = function () {
+                this.addEventListener('load', () => {
+                    try { keepIfDirections(this.__rrUrl, this.responseText); } catch (err) { /* 非文字回應 */ }
+                });
+                return origSend.apply(this, arguments);
+            };
+        }
+
+        const origFetch = w.fetch;
+        if (typeof origFetch === 'function') {
+            w.fetch = function (...args) {
+                return origFetch.apply(this, args).then(res => {
+                    // 一定要 clone：把 body 讀掉會讓網站自己拿不到資料
+                    res.clone().text()
+                        .then(t => keepIfDirections((args[0] && args[0].url) || args[0], t))
+                        .catch(() => {});
+                    return res;
+                });
+            };
+        }
+        log('攔截器已架設（XHR + fetch）｜環境=', w === window ? '沙箱（可能無效）' : 'unsafeWindow');
     }
 
     // ── 解析 ──
