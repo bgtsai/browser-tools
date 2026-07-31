@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.36.0
+// @version      0.37.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -51,6 +51,11 @@
     const DRAG_MAX_RATIO = 0.4;                // 單次拖曳最多用掉畫布的幾成，超過就分多次
     const ZOOM_CLICK_GAP_MS = 260;             // 連續按縮放鈕的間隔（ms），太快會被忽略
     const MAX_DRAGS_PER_MOVE = 2;              // 平移最多幾次拖曳；超過就先縮小再拖，比較快也比較穩
+    const PAN_TOLERANCE_PX = 30;               // 距離目標小於此像素就算到位
+    const PAN_MAX_ITERATIONS = 6;              // 閉環修正的次數上限，避免無限迴圈
+    const DRAG_DWELL_MS = 140;                 // 放開前先靜止這麼久，消除慣性滑動
+    const VIEW_POLL_MS = 80;                   // 輪詢網址視野變化的間隔
+    const VIEW_WAIT_MS = 1500;                 // 等視野更新的逾時
     const MIN_WORK_ZOOM = 5;                   // 為了拖曳而縮小時的下限，再小就整個台灣都看不清了
     const ROUTE_CHANGE_DEBOUNCE_MS = 600;      // 路線改變後等它安定再重算（ms）
     const DEPART_STEP_MIN = 15;                // 出發時間欄距（分鐘）
@@ -1931,10 +1936,15 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
                     cx + dx * step / DRAG_STEPS, cy + dy * step / DRAG_STEPS, 1);
                 if (step >= DRAG_STEPS) {
                     clearInterval(timer);
-                    dispatchPointer(canvas, 'pointerup', cx + dx, cy + dy, 0);
-                    writeDiag({ step: 'drag-end', dx: Math.round(dx), dy: Math.round(dy),
-                        dispatched: DRAG_STEPS * 2 + 4 });
-                    setTimeout(resolve, 260);   // 等地圖的慣性與網址更新安定
+                    // 放開前先在原地靜止一段時間再補送一次 move：
+                    // 快速拖完就放開會被地圖判定為「甩動」而套用慣性滑行，
+                    // 實際移動距離遠大於要求的位移量，是先前跑到海上的主因。
+                    setTimeout(() => {
+                        dispatchPointer(canvas, 'pointermove', cx + dx, cy + dy, 1);
+                        dispatchPointer(canvas, 'pointerup', cx + dx, cy + dy, 0);
+                        writeDiag({ step: 'drag-end', dx: Math.round(dx), dy: Math.round(dy) });
+                        setTimeout(resolve, 300);
+                    }, DRAG_DWELL_MS);
                 }
             }, DRAG_STEP_MS);
         });
@@ -1950,70 +1960,103 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
     const wait = ms => new Promise(r => setTimeout(r, ms));
 
     /**
+     * 等網址的視野段真的變了才往下走。
+     * 拖曳與縮放後網址是非同步更新的，立刻讀會拿到舊值——
+     * 縮放層級只要差一級，像素距離就差一倍，換算出來的位移會完全錯掉。
+     */
+    async function waitForViewportChange(prevKey) {
+        const t0 = Date.now();
+        while (Date.now() - t0 < VIEW_WAIT_MS) {
+            const m = location.href.match(/\/@[^/]+/);
+            if (m && m[0] !== prevKey) return m[0];
+            await wait(VIEW_POLL_MS);
+        }
+        return (location.href.match(/\/@[^/]+/) || [''])[0];
+    }
+
+    const viewportKey = () => (location.href.match(/\/@[^/]+/) || [''])[0];
+
+    /**
      * 先平移、再縮放。順序不能顛倒：
      * 縮放以畫面中心為基準，先把目標拖到中心再放大，目標就會留在中心；
      * 反過來先放大的話，每放大一級目標離中心的像素距離就加倍，很快超出單次拖曳範圍。
      * 縮放用右下角的按鈕而不是滾輪——滾輪以游標位置為中心，按鈕以畫面中心為中心。
      */
+    /**
+     * 把地圖視野移到指定座標並拉近。
+     *
+     * 採閉環控制：每一輪都重新讀取「實際的視野」再算剩餘距離，
+     * 而不是假設每次拖曳都精準移動了要求的位移量。
+     * 開環做法只要第一次因慣性偏掉，後面就全部建立在錯的基準上，愈拖愈遠。
+     */
     async function focusMapOn(lat, lon) {
-        const vp = readViewport();
         const canvas = findMapCanvas();
-        if (!vp || !canvas) {
-            writeDiag({ step: 'abort', reason: !vp ? '讀不到視野' : '找不到畫布' });
-            warn('找不到視野資訊或地圖畫布，略過定位');
+        if (!canvas || !readViewport()) {
+            writeDiag({ step: 'abort', reason: !canvas ? '找不到畫布' : '讀不到視野' });
             return;
         }
         const r = canvas.getBoundingClientRect();
         const maxX = r.width * DRAG_MAX_RATIO;
         const maxY = r.height * DRAG_MAX_RATIO;
 
-        // 需要幾次拖曳才夠。像素距離每縮小一級就減半，所以先算出「要縮到哪一級才拖得完」。
-        // 不先縮小的話，在已經拉近的狀態下點遠處節點會拖不到（實測 zoom 16 需位移四萬多像素）。
+        // ── 若距離太遠，先縮小再平移（像素距離每縮一級減半）──
+        const vp0 = readViewport();
         const dragsAt = (zoom) => {
-            const c0 = projectToPixel(vp.lat, vp.lon, zoom);
+            const c0 = projectToPixel(vp0.lat, vp0.lon, zoom);
             const t0 = projectToPixel(lat, lon, zoom);
             return Math.max(Math.abs(c0.x - t0.x) / maxX, Math.abs(c0.y - t0.y) / maxY);
         };
-        let workZoom = vp.zoom;
+        let workZoom = vp0.zoom;
         while (dragsAt(workZoom) > MAX_DRAGS_PER_MOVE && workZoom > MIN_WORK_ZOOM) workZoom--;
-
-        const zoomOutSteps = Math.round(vp.zoom - workZoom);
+        const zoomOutSteps = Math.round(vp0.zoom - workZoom);
         if (zoomOutSteps > 0) {
             const btn = findZoomButton(false);
             if (btn) {
-                for (let i = 0; i < zoomOutSteps; i++) { btn.click(); await wait(ZOOM_CLICK_GAP_MS); }
+                for (let i = 0; i < zoomOutSteps; i++) {
+                    const before = viewportKey();
+                    btn.click();
+                    await waitForViewportChange(before);   // 等網址真的更新再按下一次
+                }
             }
         }
 
-        // 平移（在縮小後的層級進行，像素距離小得多）
-        const nowVp = readViewport() || { lat: vp.lat, lon: vp.lon, zoom: workZoom };
-        const c = projectToPixel(nowVp.lat, nowVp.lon, nowVp.zoom);
-        const t = projectToPixel(lat, lon, nowVp.zoom);
-        let dx = c.x - t.x;
-        let dy = c.y - t.y;
-        let drags = 0;
-        while ((Math.abs(dx) > 2 || Math.abs(dy) > 2) && drags < MAX_DRAGS_PER_MOVE + 2) {
-            drags++;
-            const stepX = Math.max(-maxX, Math.min(maxX, dx));
-            const stepY = Math.max(-maxY, Math.min(maxY, dy));
-            await simulateDrag(canvas, stepX, stepY);
-            dx -= stepX;
-            dy -= stepY;
+        // ── 閉環平移 ──
+        let iter = 0;
+        let dist = Infinity;
+        while (iter < PAN_MAX_ITERATIONS) {
+            const vp = readViewport();
+            if (!vp) break;
+            const c = projectToPixel(vp.lat, vp.lon, vp.zoom);
+            const t = projectToPixel(lat, lon, vp.zoom);
+            const dx = c.x - t.x;
+            const dy = c.y - t.y;
+            dist = Math.hypot(dx, dy);
+            writeDiag({ step: 'pan', iter, zoom: vp.zoom, dx: Math.round(dx), dy: Math.round(dy),
+                dist: Math.round(dist) });
+            if (dist <= PAN_TOLERANCE_PX) break;
+            iter++;
+            const before = viewportKey();
+            await simulateDrag(canvas,
+                Math.max(-maxX, Math.min(maxX, dx)),
+                Math.max(-maxY, Math.min(maxY, dy)));
+            await waitForViewportChange(before);
         }
 
-        // 拉近到設定的層級（以畫面中心為基準，目標會留在中心）
+        // ── 拉近（以畫面中心為基準，目標會留在中心）──
         const afterPan = readViewport();
         const zoomInSteps = Math.round(MAP_FOCUS_ZOOM - (afterPan ? afterPan.zoom : workZoom));
         if (zoomInSteps !== 0) {
             const btn = findZoomButton(zoomInSteps > 0);
             if (btn) {
-                for (let i = 0; i < Math.abs(zoomInSteps); i++) { btn.click(); await wait(ZOOM_CLICK_GAP_MS); }
-            } else {
-                log('找不到縮放按鈕，只做了平移');
+                for (let i = 0; i < Math.abs(zoomInSteps); i++) {
+                    const before = viewportKey();
+                    btn.click();
+                    await waitForViewportChange(before);
+                }
             }
         }
-        log('已定位到', lat.toFixed(5), lon.toFixed(5),
-            '｜先縮小', zoomOutSteps, '級｜拖曳', drags, '次｜再放大', zoomInSteps, '級');
+        writeDiag({ step: 'done', iterations: iter, finalDistPx: Math.round(dist),
+            zoomOut: zoomOutSteps, zoomIn: zoomInSteps, viewport: readViewport() });
     }
 
     /**
