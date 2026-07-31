@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.33.0
+// @version      0.34.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -450,6 +450,11 @@
         log('已收下路線資料', (text.length / 1024).toFixed(1) + 'KB｜可用路線', usable.length, '條');
     }
 
+    /** 真正的網頁 window。用了 GM_* 授權後腳本跑在沙箱裡，很多操作必須經由它才有效 */
+    function pageWindow() {
+        return (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
+    }
+
     function armInterceptors() {
         // 一旦用了任何 GM_* 授權，Tampermonkey 就會把腳本放進沙箱執行，
         // 此處的 window 是包裝過的代理物件——改它的 fetch / XMLHttpRequest
@@ -457,7 +462,7 @@
         // 必須改 unsafeWindow（真正的網頁 window）才有效。
         // （先前用 @grant none 的診斷腳本攔得到，是因為它本來就跑在網頁環境裡；
         //   拿那個結果推論有 grant 的腳本也會成立，是錯的。）
-        const w = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
+        const w = pageWindow();
         if (w === window) {
             warn('取不到 unsafeWindow，將在沙箱內攔截——很可能攔不到網頁自己的請求');
         }
@@ -1893,15 +1898,21 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
     }
 
     function dispatchPointer(target, type, x, y, buttons) {
+        // 必須用網頁環境的建構子。沙箱建立的事件派送到網頁元素上，
+        // 網頁的監聽器不一定認得（Firefox 的沙箱有 Xray 隔離）——
+        // 先前在 Console 測試成功卻在腳本裡無效，就是這個差別造成的。
+        const w = pageWindow();
+        const PE = w.PointerEvent || PointerEvent;
+        const ME = w.MouseEvent || MouseEvent;
         const init = {
-            bubbles: true, cancelable: true, composed: true, view: window,
+            bubbles: true, cancelable: true, composed: true, view: w,
             clientX: x, clientY: y, screenX: x, screenY: y,
             button: 0, buttons: buttons,
             pointerId: 1, pointerType: 'mouse', isPrimary: true,
         };
         // pointer 與 mouse 兩套都送：不同實作監聽的種類不同
-        target.dispatchEvent(new PointerEvent(type, init));
-        target.dispatchEvent(new MouseEvent(type.replace('pointer', 'mouse'), init));
+        target.dispatchEvent(new PE(type, init));
+        target.dispatchEvent(new ME(type.replace('pointer', 'mouse'), init));
     }
 
     function simulateDrag(canvas, dx, dy) {
@@ -2000,6 +2011,11 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
     }
 
     function onNodeClick(node) {
+        const w = pageWindow();
+        log('點擊節點', node.county + node.town, node.lat.toFixed(5), node.lon.toFixed(5),
+            '｜事件環境=', w === window ? '沙箱（可能無效）' : 'unsafeWindow',
+            '｜視野=', JSON.stringify(readViewport()),
+            '｜找到畫布=', !!findMapCanvas());
         focusMapOn(node.lat, node.lon).catch(err => warn('定位失敗：', err.message));
     }
 
