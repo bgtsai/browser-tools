@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         通用診斷面板骨架
 // @namespace    browser-tools
-// @version      1.0
+// @version      1.1
 // @description  可複用的診斷面板骨架（方案 C）：面板 UI + 相對時間戳 + 開始/停止 + 一鍵複製，任務專屬邏輯只需替換「探針區塊」
 // @match        *://*/*
 // @grant        none
@@ -247,38 +247,82 @@
     // ─────────────────────────────────────────────────────────────────────
 
     let _bdpObservers = [];
+    let _rrRestore = [];
+
+    // ── 目前任務：找出 Google Maps 頁面裡「已經算好的路線資料」 ──────────
+    // 背景：route-rain 目前用 Routes API 重算一次已經知道的答案，既消耗每日配額，
+    //       算出來的也不保證跟畫面上完全一致。既然畫面已經把路線畫出來，
+    //       資料一定在頁面裡，應該直接取用。
+    // 手法：攔截 XHR 與 fetch，對每筆回應做特徵判斷，只記錄「看起來像路線資料」的。
+    //       完整內容存進 window.__rrCapture，面板上只留摘要，
+    //       避免一次複製出幾百 KB 難以閱讀。
+    // （前一版的兩個通用範本 watch display / probe data 保留在 git 歷史裡）
+
+    const RR_POLYLINE_RE = /[A-Za-z0-9_`~@?^\[\]{}|\\]{80,}/;   // 編碼過的 polyline 長這樣
+    const RR_TW_LAT_RE = /2[1-5]\.\d{4,}/g;                      // 台灣緯度 21～25.xxxx
+    const RR_MIN_SIZE = 200;
+
+    function rrEvaluate(how, url, text) {
+        if (!text || text.length < RR_MIN_SIZE) return;
+        const hasPoly = RR_POLYLINE_RE.test(text);
+        const latCount = (text.match(RR_TW_LAT_RE) || []).length;
+        // 兩個特徵至少中一個，否則多半是統計回報或圖磚請求
+        if (!hasPoly && latCount < 20) return;
+
+        const idx = window.__rrCapture.length;
+        window.__rrCapture.push({ how, url: String(url), text });
+
+        const shortUrl = String(url).replace(/^https?:\/\/[^/]+/, '').slice(0, 90);
+        const rpc = (String(url).match(/rpcids=([^&]+)/) || [])[1] || '';
+        log('候選', `#${idx} ${how} 大小=${(text.length / 1024).toFixed(1)}KB ` +
+            `polyline=${hasPoly ? '有' : '無'} 台灣座標=${latCount} 個` +
+            (rpc ? ` rpcids=${rpc}` : '') + `\n      ${shortUrl}`);
+    }
 
     function PROBE_SETUP() {
-        log('START', '監控開始');
+        log('START', '監控開始。請接著在頁面上「切換一次交通方式」或重新規劃路線，' +
+            '讓 Google 去要一次路線資料。');
+        window.__rrCapture = [];
 
-        // 範本：watch display —— 觀察某元素的 style.display 變化
-        // const target = document.querySelector('選擇器');
-        // if (target) {
-        //     let lastDisplay = getComputedStyle(target).display;
-        //     const mo = new MutationObserver(() => {
-        //         const now = getComputedStyle(target).display;
-        //         if (now !== lastDisplay) {
-        //             log('DISPLAY', `${lastDisplay} → ${now}`);
-        //             lastDisplay = now;
-        //         }
-        //     });
-        //     mo.observe(target, { attributes: true, attributeFilter: ['style', 'class'] });
-        //     _bdpObservers.push(mo);
-        // }
+        const origOpen = XMLHttpRequest.prototype.open;
+        const origSend = XMLHttpRequest.prototype.send;
+        XMLHttpRequest.prototype.open = function (method, url) {
+            this.__rrUrl = url;
+            return origOpen.apply(this, arguments);
+        };
+        XMLHttpRequest.prototype.send = function () {
+            this.addEventListener('load', () => {
+                try { rrEvaluate('XHR', this.__rrUrl, this.responseText); } catch (err) { /* 非文字回應，略過 */ }
+            });
+            return origSend.apply(this, arguments);
+        };
+        _rrRestore.push(() => {
+            XMLHttpRequest.prototype.open = origOpen;
+            XMLHttpRequest.prototype.send = origSend;
+        });
 
-        // 範本：probe data —— 讀取元素的資料路徑，相容 Polymer 與新框架兩種存取方式
-        // function readProbeData(el) {
-        //     if (!el) return null;
-        //     if (el.__data) return el.__data;               // 舊：Polymer
-        //     if (el.rawProps?.data) return el.rawProps.data(); // 新：reactive framework getter
-        //     return null;
-        // }
+        const origFetch = window.fetch;
+        window.fetch = function (...args) {
+            return origFetch.apply(this, args).then(res => {
+                // 一定要 clone，否則把 body 讀掉會讓網站自己拿不到資料
+                res.clone().text()
+                    .then(t => rrEvaluate('fetch', (args[0] && args[0].url) || args[0], t))
+                    .catch(() => {});
+                return res;
+            });
+        };
+        _rrRestore.push(() => { window.fetch = origFetch; });
+
+        log('READY', '攔截器已就位（XHR + fetch）。符合特徵的回應才會被記錄。');
     }
 
     function PROBE_TEARDOWN() {
+        _rrRestore.forEach(fn => { try { fn(); } catch (err) { /* 還原失敗不影響停止 */ } });
+        _rrRestore = [];
         _bdpObservers.forEach(mo => mo.disconnect());
         _bdpObservers = [];
-        log('STOP', '監控停止');
+        log('STOP', `監控停止，共捕捉 ${(window.__rrCapture || []).length} 筆候選。` +
+            `完整內容留在 window.__rrCapture，可用 __rrCapture[編號].text 取出。`);
     }
 
 })();
