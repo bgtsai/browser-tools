@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.24.0
+// @version      0.25.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -46,6 +46,7 @@
     const ROWH_W_PX = 126;                     // 左側地點欄寬度
     const INFO_MAX_W_PX = 860;                 // 資訊區的最大寬度（面板本身不再加寬）
     const MAP_FOCUS_ZOOM = 15;                 // 點擊節點時地圖縮放層級
+    const ROUTE_CHANGE_DEBOUNCE_MS = 600;      // 路線改變後等它安定再重算（ms）
     const DEPART_STEP_MIN = 15;                // 出發時間欄距（分鐘）
     const DEPART_COLUMNS_MAX = 96;             // 欄數上限（96 欄 × 15 分 = 24 小時）
                                                // 預報涵蓋 96 小時、可排到約 370 欄，但步行模式節點多，
@@ -113,6 +114,8 @@
         container: null,
         hiddenBlocks: [],
         originalPanelWidth: '',
+        lastRouteKey: '',
+        rerunTimer: null,
         panelBg: '',
         optionsClickHandler: null,
         townCache: null,
@@ -1301,6 +1304,36 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
      * display:none 對新元素無效，被隱藏的區塊就會重新冒出來把表格往下擠。
      * 因此面板每次變動都要重新套用一次。
      */
+    /**
+     * 取出網址中「決定路線內容」的部分，當作重繪的判斷依據。
+     * 只看 data= 段與交通方式代碼——視野位移（/@lat,lng,zoom）不影響路線，
+     * 若把它也算進去，光是拖曳地圖就會觸發整批重算，白白打 API。
+     */
+    function routeKeyOf(href) {
+        const m = href.match(/\/data=([^?]+)/);
+        return m ? m[1] : '';
+    }
+
+    /** 開著表格時偵測到路線改變（例如切換交通方式）就重跑一次 */
+    function scheduleRerunIfRouteChanged() {
+        if (!state.active || !state.container) return;
+        const key = routeKeyOf(location.href);
+        if (!key || key === state.lastRouteKey) return;
+        log('偵測到路線改變，重新計算表格');
+        state.lastRouteKey = key;
+        clearTimeout(state.rerunTimer);
+        // 切換交通方式時網址可能連續變動幾次，等安定下來再跑，避免重複請求
+        state.rerunTimer = setTimeout(() => {
+            if (!state.active || !state.container) return;
+            clearBody(state.container);
+            run(state.container).catch(err => {
+                warn(err);
+                clearBody(state.container);
+                showMessage(state.container, '出錯了：' + err.message);
+            });
+        }, ROUTE_CHANGE_DEBOUNCE_MS);
+    }
+
     function applyHiding(panel) {
         const optionsBtn = findOptionsButton();
         const optionsRow = optionsBtn
@@ -1347,6 +1380,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         const panel = findPanel();
         if (!panel) { alert('找不到路線面板，請先在 Google Maps 規劃好路線。'); return; }
 
+        state.lastRouteKey = routeKeyOf(location.href);
         state.hiddenBlocks = [];
         applyHiding(panel);
         // 先前會把面板加寬到固定寬度，但實測加寬只影響某一層容器、
@@ -1420,7 +1454,9 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             return;
         }
 
-        showMessage(wrap, '正在解析路線…');
+        // 中間各階段統一顯示「處理中」，唯獨向氣象署取資料時換成專屬訊息——
+        // 這樣畫面上出現那行字，就等於「這次真的動用了氣象署 API」，可以直接用來判斷有沒有走快取
+        showMessage(wrap, '處理中…');
         const parsed = parseRouteFromUrl(location.href);
         if (!parsed || parsed.points.length < 2) {
             clearBody(wrap);
@@ -1440,13 +1476,13 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         }
 
         clearBody(wrap);
-        showMessage(wrap, '正在向 Google 取得路徑…');
+        showMessage(wrap, '處理中…');
         const routes = await computeRoutes(keys.google, parsed, modeInfo.mode);
         const picked = pickMatchingRoute(routes, selected);
         const route = picked.route;
 
         clearBody(wrap);
-        showMessage(wrap, '正在判斷沿途行政區…');
+        showMessage(wrap, '處理中…');
         const { timeline, steps, totalSec } = buildTimeline(route);
         if (!timeline.length) throw new Error('Routes API 回傳的路徑沒有可用的座標');
         const nodes = buildNodes(timeline, totalSec);
@@ -1770,11 +1806,26 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
                     panel.appendChild(state.container);
                 }
                 applyHiding(panel);
+                scheduleRerunIfRouteChanged();
             });
         };
         new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
         window.addEventListener('resize', schedule);
         window.addEventListener('scroll', schedule, true);
+
+        // Google Maps 是 SPA，換路線只改網址不重新載入頁面。
+        // MutationObserver 多半也會被觸發，但直接監看網址變化比較直接可靠：
+        // popstate 只涵蓋上一頁/下一頁，程式主動改網址用的是 pushState/replaceState，
+        // 那兩個不會發事件，必須自己包一層。
+        window.addEventListener('popstate', schedule);
+        ['pushState', 'replaceState'].forEach(name => {
+            const orig = history[name];
+            history[name] = function (...args) {
+                const ret = orig.apply(this, args);
+                schedule();
+                return ret;
+            };
+        });
         log('啟動完成');
     }
 
