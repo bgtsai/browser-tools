@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.34.0
+// @version      0.35.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -1916,6 +1916,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
     }
 
     function simulateDrag(canvas, dx, dy) {
+        writeDiag({ step: 'drag-begin', dx: Math.round(dx), dy: Math.round(dy) });
         return new Promise(resolve => {
             const r = canvas.getBoundingClientRect();
             const cx = r.left + r.width / 2;
@@ -1929,6 +1930,8 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
                 if (step >= DRAG_STEPS) {
                     clearInterval(timer);
                     dispatchPointer(canvas, 'pointerup', cx + dx, cy + dy, 0);
+                    writeDiag({ step: 'drag-end', dx: Math.round(dx), dy: Math.round(dy),
+                        dispatched: DRAG_STEPS * 2 + 4 });
                     setTimeout(resolve, 260);   // 等地圖的慣性與網址更新安定
                 }
             }, DRAG_STEP_MS);
@@ -1954,6 +1957,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         const vp = readViewport();
         const canvas = findMapCanvas();
         if (!vp || !canvas) {
+            writeDiag({ step: 'abort', reason: !vp ? '讀不到視野' : '找不到畫布' });
             warn('找不到視野資訊或地圖畫布，略過定位');
             return;
         }
@@ -2010,13 +2014,38 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             '｜先縮小', zoomOutSteps, '級｜拖曳', drags, '次｜再放大', zoomInSteps, '級');
     }
 
+    /**
+     * 把診斷寫進 DOM 屬性。
+     * 沙箱腳本的 console 輸出在網頁主控台看不到（實測完全沒有任何一行），
+     * 但 DOM 是沙箱與網頁共用的，這樣就能從網頁環境讀到腳本的內部狀態。
+     * 讀法：document.documentElement.dataset.rrDiag
+     */
+    function writeDiag(obj) {
+        try {
+            document.documentElement.setAttribute('data-' + PREFIX + '-diag',
+                JSON.stringify({ t: new Date().toLocaleTimeString(), ...obj }));
+        } catch (err) { /* 診斷失敗不影響功能 */ }
+    }
+
     function onNodeClick(node) {
         const w = pageWindow();
-        log('點擊節點', node.county + node.town, node.lat.toFixed(5), node.lon.toFixed(5),
-            '｜事件環境=', w === window ? '沙箱（可能無效）' : 'unsafeWindow',
-            '｜視野=', JSON.stringify(readViewport()),
-            '｜找到畫布=', !!findMapCanvas());
-        focusMapOn(node.lat, node.lon).catch(err => warn('定位失敗：', err.message));
+        const canvas = findMapCanvas();
+        const vp = readViewport();
+        writeDiag({
+            step: 'click',
+            node: node.county + node.town,
+            lat: +node.lat.toFixed(5), lon: +node.lon.toFixed(5),
+            env: w === window ? 'sandbox' : 'unsafeWindow',
+            hasUnsafeWindow: typeof unsafeWindow !== 'undefined',
+            viewport: vp,
+            canvas: canvas ? Math.round(canvas.r.width) + 'x' + Math.round(canvas.r.height) : null,
+            hasPointerEvent: !!(w && w.PointerEvent),
+        });
+        log('點擊節點', node.county + node.town);
+        focusMapOn(node.lat, node.lon).catch(err => {
+            writeDiag({ step: 'error', message: err.message });
+            warn('定位失敗：', err.message);
+        });
     }
 
     // ════════════════════════════════════════════════════════════════
