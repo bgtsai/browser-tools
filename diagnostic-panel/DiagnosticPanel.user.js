@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         通用診斷面板骨架
 // @namespace    browser-tools
-// @version      1.2
+// @version      1.3
 // @description  可複用的診斷面板骨架（方案 C）：面板 UI + 相對時間戳 + 開始/停止 + 一鍵複製，任務專屬邏輯只需替換「探針區塊」
 // @match        *://*/*
 // @grant        none
@@ -249,105 +249,78 @@
     let _bdpObservers = [];
     let _rrRestore = [];
 
-    // ── 目前任務：找出 Google Maps 頁面裡「已經算好的路線資料」 ──────────
-    // 背景：route-rain 目前用 Routes API 重算一次已經知道的答案，既消耗每日配額，
-    //       算出來的也不保證跟畫面上完全一致。既然畫面已經把路線畫出來，
-    //       資料一定在頁面裡，應該直接取用。
-    // 手法：攔截 XHR 與 fetch，對每筆回應做特徵判斷，只記錄「看起來像路線資料」的。
-    //       完整內容存進 window.__rrCapture，面板上只留摘要，
-    //       避免一次複製出幾百 KB 難以閱讀。
-    // （前一版的兩個通用範本 watch display / probe data 保留在 git 歷史裡）
+    // ── 目前任務：route-rain 點擊格子後，地圖沒有反應，追出卡在哪一環 ──
+    // 三個環節依序檢查：
+    //   ① 點擊格子有沒有真的產生 click 事件（表格那端）
+    //   ② route-rain 有沒有把 pointer/mouse 事件派送到地圖畫布（腳本那端）
+    //   ③ 事件送到了、地圖有沒有反應（Google 那端）——看網址的視野段有無變化
+    // 本腳本是 @grant none，跑在網頁環境；若 route-rain 從沙箱派送的事件
+    // 在這裡「看不到」，就直接證明沙箱隔離是原因。
 
-    const RR_POLYLINE_RE = /[A-Za-z0-9_`~@?^\[\]{}|\\]{80,}/;   // 編碼過的 polyline 長這樣
-    const RR_TW_LAT_RE = /2[1-5]\.\d{4,}/g;                      // 台灣緯度 21～25.xxxx
-    const RR_MIN_SIZE = 200;
+    const RR_WATCH = ['pointerdown', 'pointermove', 'pointerup', 'mousedown', 'mousemove', 'mouseup'];
+    let _rrCanvasEvents = {};
+    let _rrLastView = '';
+    let _rrViewTimer = null;
 
-    function rrEvaluate(how, url, text) {
-        if (!text || text.length < RR_MIN_SIZE) return;
-        const hasPoly = RR_POLYLINE_RE.test(text);
-        const latCount = (text.match(RR_TW_LAT_RE) || []).length;
-        // 兩個特徵至少中一個，否則多半是統計回報或圖磚請求
-        if (!hasPoly && latCount < 20) return;
-
-        const shortUrl = String(url).replace(/^https?:\/\/[^/]+/, '').slice(0, 90);
-        const rpc = (String(url).match(/rpcids=([^&]+)/) || [])[1] || '';
-        const idx = window.__rrCapture.length + window.__rrPending.length;
-        const summary = `#${idx} ${how} 大小=${(text.length / 1024).toFixed(1)}KB ` +
-            `polyline=${hasPoly ? '有' : '無'} 台灣座標=${latCount} 個` +
-            (rpc ? ` rpcids=${rpc}` : '') + `\n      ${shortUrl}`;
-        const item = { how, url: String(url), text, summary };
-        // 監控尚未開始（頁面剛載入）就先暫存，等按下「開始監控」再一併列出
-        if (!isMonitoring) { window.__rrPending.push(item); return; }
-        window.__rrCapture.push(item);
-        log('候選', summary);
+    function rrViewOf() {
+        return (location.href.match(/\/@([^/]+)/) || [])[1] || '(無)';
     }
 
-    // ── 驗證用：攔截器提前到 document-start 立即架設 ──
-    // 直接開啟已規劃好的路線網址時，directions 請求會在頁面載入當下就發出，
-    // 若等到 document-idle 才架攔截器就已經錯過。這裡在腳本一載入就先包好，
-    // 面板 UI 仍等 DOM 就緒後才建立（骨架自己處理）。
-    // 因此「開始監控」按下之前捕捉到的，會先暫存在 __rrPending，按下後併入。
-    window.__rrCapture = window.__rrCapture || [];
-    window.__rrPending = window.__rrPending || [];
-    let _rrArmed = false;
+    function rrIsCanvas(el) {
+        return el && el.tagName === 'CANVAS';
+    }
 
     function PROBE_SETUP() {
-        log('START', '監控開始。若是「直接開啟已規劃好的網址」，載入當下攔到的資料會列在下方。');
-        if (window.__rrPending.length) {
-            log('載入期', `頁面載入當下已攔截到 ${window.__rrPending.length} 筆候選，併入清單`);
-            window.__rrPending.forEach(item => {
-                window.__rrCapture.push(item);
-                log('候選', item.summary + '　←載入期攔截');
-            });
-            window.__rrPending = [];
-        }
+        log('START', '請在 route-rain 的表格上點一格，觀察下方三個環節。');
+        _rrCanvasEvents = {};
+        _rrLastView = rrViewOf();
+        log('視野', '目前 ' + _rrLastView);
 
-        armInterceptors();
-        log('READY', '攔截器已就位（XHR + fetch，於 document-start 架設）。');
-    }
+        // ① 表格的點擊
+        const onCellClick = (ev) => {
+            const cell = ev.target && ev.target.closest && ev.target.closest('[class*="rr-c"]');
+            if (!cell) return;
+            log('①表格', `偵測到點擊格子　isTrusted=${ev.isTrusted}　class="${String(cell.className).slice(0, 40)}"`);
+            _rrCanvasEvents = {};   // 每次點擊重新計數，方便對應
+        };
+        document.addEventListener('click', onCellClick, true);
+        _rrRestore.push(() => document.removeEventListener('click', onCellClick, true));
 
-    function armInterceptors() {
-        if (_rrArmed) return;
-        _rrArmed = true;
-        const origOpen = XMLHttpRequest.prototype.open;
-        const origSend = XMLHttpRequest.prototype.send;
-        XMLHttpRequest.prototype.open = function (method, url) {
-            this.__rrUrl = url;
-            return origOpen.apply(this, arguments);
+        // ② 派送到畫布的事件
+        const onAny = (ev) => {
+            if (!rrIsCanvas(ev.target)) return;
+            const k = ev.type + (ev.isTrusted ? '(真)' : '(合成)');
+            _rrCanvasEvents[k] = (_rrCanvasEvents[k] || 0) + 1;
         };
-        XMLHttpRequest.prototype.send = function () {
-            this.addEventListener('load', () => {
-                try { rrEvaluate('XHR', this.__rrUrl, this.responseText); } catch (err) { /* 非文字回應，略過 */ }
-            });
-            return origSend.apply(this, arguments);
-        };
-        _rrRestore.push(() => {
-            XMLHttpRequest.prototype.open = origOpen;
-            XMLHttpRequest.prototype.send = origSend;
+        RR_WATCH.forEach(t => {
+            document.addEventListener(t, onAny, true);
+            _rrRestore.push(() => document.removeEventListener(t, onAny, true));
         });
 
-        const origFetch = window.fetch;
-        window.fetch = function (...args) {
-            return origFetch.apply(this, args).then(res => {
-                // 一定要 clone，否則把 body 讀掉會讓網站自己拿不到資料
-                res.clone().text()
-                    .then(t => rrEvaluate('fetch', (args[0] && args[0].url) || args[0], t))
-                    .catch(() => {});
-                return res;
-            });
-        };
-        _rrRestore.push(() => { window.fetch = origFetch; });
-    }
+        // 每 800ms 回報一次累積結果與視野變化
+        _rrViewTimer = setInterval(() => {
+            const keys = Object.keys(_rrCanvasEvents);
+            if (keys.length) {
+                log('②畫布', keys.map(k => `${k}×${_rrCanvasEvents[k]}`).join('　'));
+                _rrCanvasEvents = {};
+            }
+            const v = rrViewOf();
+            if (v !== _rrLastView) {
+                log('③地圖', `視野已改變　${_rrLastView} → ${v}`);
+                _rrLastView = v;
+            }
+        }, 800);
+        _rrRestore.push(() => clearInterval(_rrViewTimer));
 
-    armInterceptors();   // 不等「開始監控」，載入即架設，才攔得到頁面載入當下的請求
+        log('READY', '監聽就緒：①表格點擊　②畫布收到的事件（會標示真實或合成）　③視野變化');
+    }
 
     function PROBE_TEARDOWN() {
         _rrRestore.forEach(fn => { try { fn(); } catch (err) { /* 還原失敗不影響停止 */ } });
         _rrRestore = [];
         _bdpObservers.forEach(mo => mo.disconnect());
         _bdpObservers = [];
-        log('STOP', `監控停止，共捕捉 ${(window.__rrCapture || []).length} 筆候選。` +
-            `完整內容留在 window.__rrCapture，可用 __rrCapture[編號].text 取出。`);
+        log('STOP', '監控停止');
     }
 
 })();
