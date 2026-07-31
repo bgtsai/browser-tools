@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         通用診斷面板骨架
 // @namespace    browser-tools
-// @version      1.1
+// @version      1.2
 // @description  可複用的診斷面板骨架（方案 C）：面板 UI + 相對時間戳 + 開始/停止 + 一鍵複製，任務專屬邏輯只需替換「探針區塊」
 // @match        *://*/*
 // @grant        none
-// @run-at       document-idle
+// @run-at       document-start
 // ==/UserScript==
 
 (function () {
@@ -269,21 +269,46 @@
         // 兩個特徵至少中一個，否則多半是統計回報或圖磚請求
         if (!hasPoly && latCount < 20) return;
 
-        const idx = window.__rrCapture.length;
-        window.__rrCapture.push({ how, url: String(url), text });
-
         const shortUrl = String(url).replace(/^https?:\/\/[^/]+/, '').slice(0, 90);
         const rpc = (String(url).match(/rpcids=([^&]+)/) || [])[1] || '';
-        log('候選', `#${idx} ${how} 大小=${(text.length / 1024).toFixed(1)}KB ` +
+        const idx = window.__rrCapture.length + window.__rrPending.length;
+        const summary = `#${idx} ${how} 大小=${(text.length / 1024).toFixed(1)}KB ` +
             `polyline=${hasPoly ? '有' : '無'} 台灣座標=${latCount} 個` +
-            (rpc ? ` rpcids=${rpc}` : '') + `\n      ${shortUrl}`);
+            (rpc ? ` rpcids=${rpc}` : '') + `\n      ${shortUrl}`;
+        const item = { how, url: String(url), text, summary };
+        // 監控尚未開始（頁面剛載入）就先暫存，等按下「開始監控」再一併列出
+        if (!isMonitoring) { window.__rrPending.push(item); return; }
+        window.__rrCapture.push(item);
+        log('候選', summary);
     }
 
-    function PROBE_SETUP() {
-        log('START', '監控開始。請接著在頁面上「切換一次交通方式」或重新規劃路線，' +
-            '讓 Google 去要一次路線資料。');
-        window.__rrCapture = [];
+    // ── 驗證用：攔截器提前到 document-start 立即架設 ──
+    // 直接開啟已規劃好的路線網址時，directions 請求會在頁面載入當下就發出，
+    // 若等到 document-idle 才架攔截器就已經錯過。這裡在腳本一載入就先包好，
+    // 面板 UI 仍等 DOM 就緒後才建立（骨架自己處理）。
+    // 因此「開始監控」按下之前捕捉到的，會先暫存在 __rrPending，按下後併入。
+    window.__rrCapture = window.__rrCapture || [];
+    window.__rrPending = window.__rrPending || [];
+    let _rrArmed = false;
 
+    function PROBE_SETUP() {
+        log('START', '監控開始。若是「直接開啟已規劃好的網址」，載入當下攔到的資料會列在下方。');
+        if (window.__rrPending.length) {
+            log('載入期', `頁面載入當下已攔截到 ${window.__rrPending.length} 筆候選，併入清單`);
+            window.__rrPending.forEach(item => {
+                window.__rrCapture.push(item);
+                log('候選', item.summary + '　←載入期攔截');
+            });
+            window.__rrPending = [];
+        }
+
+        armInterceptors();
+        log('READY', '攔截器已就位（XHR + fetch，於 document-start 架設）。');
+    }
+
+    function armInterceptors() {
+        if (_rrArmed) return;
+        _rrArmed = true;
         const origOpen = XMLHttpRequest.prototype.open;
         const origSend = XMLHttpRequest.prototype.send;
         XMLHttpRequest.prototype.open = function (method, url) {
@@ -312,9 +337,9 @@
             });
         };
         _rrRestore.push(() => { window.fetch = origFetch; });
-
-        log('READY', '攔截器已就位（XHR + fetch）。符合特徵的回應才會被記錄。');
     }
+
+    armInterceptors();   // 不等「開始監控」，載入即架設，才攔得到頁面載入當下的請求
 
     function PROBE_TEARDOWN() {
         _rrRestore.forEach(fn => { try { fn(); } catch (err) { /* 還原失敗不影響停止 */ } });
