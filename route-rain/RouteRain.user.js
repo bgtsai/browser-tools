@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.40.1
+// @version      0.40.2
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -1933,6 +1933,8 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
     }
 
     // ── 動畫基礎 ──
+
+    const wait = ms => new Promise(r => setTimeout(r, ms));
 
     /** easeInOutCubic：起步加速、中段快、結尾減速。結尾速度趨近零，慣性問題自然消失 */
     const easeInOutCubic = t => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
