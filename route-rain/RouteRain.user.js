@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.40.0
+// @version      0.40.1
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -2055,20 +2055,46 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
                 Math.max(0, Math.floor(vp0.zoom - MIN_WORK_ZOOM)))
             : 0;
 
-        if (arcOut > 0) await smoothZoom(canvas, -arcOut, ZOOM_MS);
+        writeDiag({ step: 'plan', from: [vp0.lat, vp0.lon, vp0.zoom],
+            target: [+lat.toFixed(5), +lon.toFixed(5)],
+            screens: +screens.toFixed(2), arcOut, panMs: Math.round(panMs) });
+
+        if (arcOut > 0) {
+            await smoothZoom(canvas, -arcOut, ZOOM_MS);
+            await wait(200);
+            const v = readViewport();
+            writeDiag({ step: 'after-arc-out', want: +(vp0.zoom - arcOut).toFixed(2),
+                got: v ? v.zoom : null, center: v ? [v.lat, v.lon] : null });
+        }
 
         // 拉遠之後距離會縮小，重新量一次再平移
         const off1 = offsetToTarget(lat, lon) || off0;
         const limX = r.width * DRAG_MAX_SCREENS;
         const limY = r.height * DRAG_MAX_SCREENS;
-        await smoothPan(canvas,
-            Math.max(-limX, Math.min(limX, off1.dx)),
-            Math.max(-limY, Math.min(limY, off1.dy)),
-            panMs);
+        const useX = Math.max(-limX, Math.min(limX, off1.dx));
+        const useY = Math.max(-limY, Math.min(limY, off1.dy));
+        await smoothPan(canvas, useX, useY, panMs);
+        await wait(200);
+        const afterPan = offsetToTarget(lat, lon);
+        writeDiag({ step: 'after-pan',
+            wanted: [Math.round(off1.dx), Math.round(off1.dy)],
+            applied: [Math.round(useX), Math.round(useY)],
+            clamped: (useX !== off1.dx || useY !== off1.dy),
+            remainPx: afterPan ? Math.round(Math.hypot(afterPan.dx, afterPan.dy)) : null,
+            zoom: afterPan ? afterPan.zoom : null });
 
         // 拉近到目標層級（滾輪錨定中心，目標會留在原地）
         const vpMid = readViewport() || vp0;
-        await smoothZoom(canvas, MAP_FOCUS_ZOOM - vpMid.zoom, ZOOM_MS);
+        const wantZoomDelta = MAP_FOCUS_ZOOM - vpMid.zoom;
+        await smoothZoom(canvas, wantZoomDelta, ZOOM_MS);
+        await wait(250);
+        const vpZoomed = readViewport();
+        const offZoomed = offsetToTarget(lat, lon);
+        writeDiag({ step: 'after-zoom-in',
+            fromZoom: vpMid.zoom, wantDelta: +wantZoomDelta.toFixed(2),
+            wantZoom: MAP_FOCUS_ZOOM, gotZoom: vpZoomed ? vpZoomed.zoom : null,
+            zoomError: vpZoomed ? +(MAP_FOCUS_ZOOM - vpZoomed.zoom).toFixed(2) : null,
+            centerDriftPx: offZoomed ? Math.round(Math.hypot(offZoomed.dx, offZoomed.dy)) : null });
 
         const finalDist = await correctIfNeeded(canvas, lat, lon);
         const vpEnd = readViewport();
@@ -2089,12 +2115,16 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
      */
     function writeDiag(obj) {
         try {
+            const prev = document.documentElement.getAttribute('data-' + PREFIX + '-log') || '';
+            document.documentElement.setAttribute('data-' + PREFIX + '-log',
+                (prev + '\n' + JSON.stringify(obj)).slice(-4000));
             document.documentElement.setAttribute('data-' + PREFIX + '-diag',
                 JSON.stringify({ t: new Date().toLocaleTimeString(), ...obj }));
         } catch (err) { /* 診斷失敗不影響功能 */ }
     }
 
     function onNodeClick(node) {
+        document.documentElement.removeAttribute('data-' + PREFIX + '-log');   // 每次點擊重新記錄
         const w = pageWindow();
         const canvas = findMapCanvas();
         const vp = readViewport();
