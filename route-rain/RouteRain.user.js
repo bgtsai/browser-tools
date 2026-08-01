@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.42.0
+// @version      0.43.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -62,17 +62,14 @@
     //   50ms 以上 → 0.320 級（滿效率）
     // 因此縮放不能用 rAF 逐影格送，必須用固定間隔串接。
     const WHEEL_INTERVAL_MS = 50;              // 滾輪事件間隔，低於 30ms 會被整批忽略
-    // 網址反映新視野是非同步的，實測動畫結束後 250ms 仍可能是舊值。
-    // 用舊的縮放層級去換算位移，誤差會被後續的放大倍數放大（實測 412px → 8298px）。
-    const SETTLE_POLL_MS = 80;                 // 輪詢網址的間隔
-    const SETTLE_TIMEOUT_MS = 2500;            // 等待視野安定的逾時
-    const ZOOM_SETTLE_TOLERANCE = 0.4;         // 縮放層級落在目標 ±此值內就算安定
     const WHEEL_ZOOM_PER_EVENT = 0.32;         // 每個事件的縮放量（50ms 間隔下實測）
     // 拖曳時游標不能離開畫布，單次手勢最多只能移動約 0.4 個畫面。
     // 因此「要不要先拉遠」與「拉遠幾級」都由同一個條件決定：
     // 拉遠到剛好塞得進一次手勢即可，不多拉——多拉一級就多一次圖磚重載。
-    const DRAG_MAX_SCREENS = 0.4;              // 單次拖曳的位移上限（畫面數）
+    const DRAG_MAX_SCREENS = 0.6;              // 單次拖曳的位移上限（畫面數）；
+                                               // 方向感知的按下點讓行程從 0.4 提高到 0.6
     const SAFE_PRESS_MIN_PX = 60;              // 按下點至少要離路線這麼遠，否則會被判定為拖曳路線
+    const PRESS_EDGE_MARGIN_PX = 40;           // 按下點與拖曳終點都要離畫布邊緣這麼遠
     const ARC_MAX_ZOOM_OUT = 10;               // 拉遠的級數上限（台北→高雄這種極遠距離需要 9 級）
     const FINAL_FIX_PX = 100;                  // 整段結束後誤差超過此像素才做一次修正
     const PAN_TOLERANCE_PX = 30;               // 修正時的收斂門檻
@@ -1927,6 +1924,45 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         return { x, y };
     }
 
+    /** Web Mercator 反投影：世界像素座標 → 經緯度。維護自有視野模型時需要 */
+    function unprojectFromPixel(x, y, zoom) {
+        const world = 256 * Math.pow(2, zoom);
+        const lon = x / world * 360 - 180;
+        const n = Math.PI - 2 * Math.PI * y / world;
+        const lat = 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+        return { lat, lon };
+    }
+
+    /**
+     * 自有的視野模型。
+     *
+     * 為什麼不每一步都讀網址：網址更新是非同步的，每次都要輪詢等它反映，
+     * 實測那些等待佔掉整段動畫 31% 的時間，而且畫面在等待期間完全靜止——
+     * 那正是「一段一段、不連續」的來源。
+     *
+     * 我們自己知道送了幾個滾輪事件、拖了幾像素，可以直接推算新的視野，
+     * 讓各階段無縫接續。累積的誤差在最後統一校正一次即可。
+     */
+    function makeViewModel(vp) {
+        return {
+            lat: vp.lat, lon: vp.lon, zoom: vp.zoom,
+            /** 縮放以畫面中心為錨點，中心座標不變 */
+            applyZoom(delta) { this.zoom += delta; },
+            /** 拖曳 (dx, dy) 像素：地圖跟著游標走，等於中心往反方向移動 */
+            applyPan(dx, dy) {
+                const p = projectToPixel(this.lat, this.lon, this.zoom);
+                const n = unprojectFromPixel(p.x - dx, p.y - dy, this.zoom);
+                this.lat = n.lat; this.lon = n.lon;
+            },
+            /** 目標相對於畫面中心的像素位移 */
+            offsetTo(lat, lon) {
+                const c = projectToPixel(this.lat, this.lon, this.zoom);
+                const t = projectToPixel(lat, lon, this.zoom);
+                return { dx: c.x - t.x, dy: c.y - t.y };
+            },
+        };
+    }
+
     function dispatchPointer(target, type, x, y, buttons) {
         // 必須用網頁環境的建構子。沙箱建立的事件派送到網頁元素上，
         // 網頁的監聽器不一定認得（Firefox 的沙箱有 Xray 隔離）——
@@ -1949,39 +1985,6 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
 
     const wait = ms => new Promise(r => setTimeout(r, ms));
 
-    /**
-     * 等網址真的反映出新的視野再往下走。
-     *
-     * 這一步不能省：網址更新是非同步的，實測縮放動畫結束後再等 250ms，
-     * 讀到的仍可能是舊的縮放層級。用舊層級換算位移會差到十幾倍，
-     * 而殘留的誤差還會被後續的放大倍數再放大一次（實測 412px 變成 8298px）。
-     *
-     * @param expectZoom 預期的縮放層級；傳 null 表示只要視野有變動就算安定
-     */
-    async function waitForViewport(expectZoom, prevKey) {
-        const t0 = Date.now();
-        let lastSeen = null, stableCount = 0;
-        while (Date.now() - t0 < SETTLE_TIMEOUT_MS) {
-            const vp = readViewport();
-            if (vp) {
-                if (expectZoom !== null && Math.abs(vp.zoom - expectZoom) <= ZOOM_SETTLE_TOLERANCE) {
-                    return vp;
-                }
-                const key = viewportKey();
-                if (expectZoom === null) {
-                    // 沒有明確目標時，改判斷「連續兩次讀到相同且與先前不同」＝已停止變動
-                    if (key !== prevKey) {
-                        if (key === lastSeen) { stableCount++; if (stableCount >= 1) return vp; }
-                        else { lastSeen = key; stableCount = 0; }
-                    }
-                }
-            }
-            await wait(SETTLE_POLL_MS);
-        }
-        return readViewport();
-    }
-
-    const viewportKey = () => (location.href.match(/\/@[^/]+/) || [''])[0];
 
     /** easeInOutCubic：起步加速、中段快、結尾減速。結尾速度趨近零，慣性問題自然消失 */
     const easeInOutCubic = t => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
@@ -2009,7 +2012,6 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
      * 先前每段拖曳都是完整手勢，地圖每次獨立結算慣性，才會有段落感與甩飛。
      */
     async function smoothPan(canvas, dx, dy, durationMs, origin) {
-        const before = viewportKey();
         const r = canvas.getBoundingClientRect();
         const cx = origin ? origin.x : r.left + r.width / 2;
         const cy = origin ? origin.y : r.top + r.height / 2;
@@ -2019,7 +2021,6 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         });
         // 結尾速度已趨近零（緩動的效果），直接放開不會觸發慣性滑行
         dispatchPointer(canvas, 'pointerup', cx + dx, cy + dy, 0);
-        await waitForViewport(null, before);
     }
 
     /**
@@ -2042,7 +2043,6 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         const WE = w.WheelEvent || WheelEvent;
         const events = Math.max(1, Math.round(Math.abs(deltaZoom) / WHEEL_ZOOM_PER_EVENT));
         const sign = deltaZoom > 0 ? -1 : 1;      // deltaY 為負代表放大
-        const startZoom = (readViewport() || {}).zoom;
         for (let i = 0; i < events; i++) {
             canvas.dispatchEvent(new WE('wheel', {
                 bubbles: true, cancelable: true, composed: true, view: w,
@@ -2050,62 +2050,58 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             }));
             await wait(WHEEL_INTERVAL_MS);
         }
-        // 一定要等網址反映出新層級，否則後續的位移換算會用到舊值
-        const want = startZoom === undefined ? null : startZoom + deltaZoom;
-        const vp = await waitForViewport(want, null);
-        return vp ? vp.zoom : null;
+        // 不等網址——改由呼叫端更新自有的視野模型，各階段才能無縫接續
+        return events * WHEEL_ZOOM_PER_EVENT * (deltaZoom > 0 ? 1 : -1);
     }
 
     /**
-     * 找一個「離路線夠遠」的按下點。
-     *
-     * 從畫面正中央按下拖曳時，若中央剛好壓在路線上，Google 會判定成
-     * 「拖曳路線新增途經點」而<strong>實際改動使用者原本的規劃</strong>
-     * （實測看過網址的控制點數從 0 變 1）。這是破壞性的副作用。
-     *
-     * 不需要猜它的判定容差：我們手上就有完整的路線座標，
-     * 直接算出候選點到路線的最短距離，挑最遠的那個即可。
-     * 位移量不受影響——拖曳的位移是相對的，從哪裡按下都一樣。
+     * 挑一個按下點，同時滿足兩個條件：
+     *   ① 離路線夠遠——從路線上按下拖曳會被判定成「拖曳路線新增途經點」，
+     *      實際改動使用者原本的規劃（實測看過控制點數從 0 變 1）。
+     *      不必猜它的判定容差，我們手上就有路線座標，直接算。
+     *   ② 讓這次的位移放得下——游標不能拖出畫布，所以要往反方向按下：
+     *      要往左拖就從右側按下。這樣單次行程從 0.4 個畫面提高到約 0.6，
+     *      需要先拉遠的級數也跟著減少。
      */
-    function findSafePressPoint(canvas) {
+    function findPressPoint(canvas, dx, dy) {
         const r = canvas.getBoundingClientRect();
+        const M = PRESS_EDGE_MARGIN_PX;
+        // 按下點必須讓「按下點 + 位移」仍落在畫布內
+        const minX = Math.max(r.left + M, r.left + M - dx);
+        const maxX = Math.min(r.right - M, r.right - M - dx);
+        const minY = Math.max(r.top + M, r.top + M - dy);
+        const maxY = Math.min(r.bottom - M, r.bottom - M - dy);
+        const centre = { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
+        if (minX > maxX || minY > maxY) return centre;   // 位移超過可用行程，先回中點
+
         const vp = readViewport();
-        const centre = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
         const pts = state.routePoints;
         if (!vp || !pts || !pts.length) return centre;
 
-        // 把路線座標投影到螢幕
-        const c = projectToPixel(vp.lat, vp.lon, vp.zoom);
+        // 把路線投影到螢幕（取樣即可，判斷遠近不需要每一點）
+        const cc = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        const cp = projectToPixel(vp.lat, vp.lon, vp.zoom);
         const screen = [];
-        // 路線點可能上千個，取樣即可——判斷「離不離得夠遠」不需要每一點都算
-        const stride = Math.max(1, Math.floor(pts.length / 400));
+        const stride = Math.max(1, Math.floor(pts.length / 300));
         for (let i = 0; i < pts.length; i += stride) {
             const p = projectToPixel(pts[i][0], pts[i][1], vp.zoom);
-            screen.push({ x: centre.x + (p.x - c.x), y: centre.y + (p.y - c.y) });
+            screen.push({ x: cc.x + (p.x - cp.x), y: cc.y + (p.y - cp.y) });
         }
 
-        // 候選點取畫布內側的九宮格，避開邊緣（游標在邊緣容易拖出界）
-        const candidates = [];
-        for (const fx of [0.25, 0.5, 0.75]) {
-            for (const fy of [0.25, 0.5, 0.75]) {
-                candidates.push({ x: r.left + r.width * fx, y: r.top + r.height * fy });
-            }
-        }
         let best = centre, bestDist = -1;
-        for (const cand of candidates) {
-            let min = Infinity;
-            for (const s of screen) {
-                const d = Math.hypot(s.x - cand.x, s.y - cand.y);
-                if (d < min) min = d;
-                if (min < SAFE_PRESS_MIN_PX) break;   // 已經太近，不必再算
+        for (let fx = 0; fx <= 1.0001; fx += 0.25) {
+            for (let fy = 0; fy <= 1.0001; fy += 0.25) {
+                const cand = { x: minX + (maxX - minX) * fx, y: minY + (maxY - minY) * fy };
+                let min = Infinity;
+                for (const s of screen) {
+                    const d = Math.hypot(s.x - cand.x, s.y - cand.y);
+                    if (d < min) min = d;
+                    if (min < SAFE_PRESS_MIN_PX) break;
+                }
+                if (min > bestDist) { bestDist = min; best = cand; }
             }
-            if (min > bestDist) { bestDist = min; best = cand; }
         }
-        writeDiag({ step: 'press-point',
-            at: [Math.round(best.x), Math.round(best.y)],
-            distToRoutePx: bestDist === Infinity ? null : Math.round(bestDist),
-            safe: bestDist >= SAFE_PRESS_MIN_PX });
-        return best;
+        return { x: best.x, y: best.y, distToRoute: bestDist };
     }
 
     /** 目前視野下，目標相對於畫面中心的像素位移 */
@@ -2127,10 +2123,11 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             if (dist <= PAN_TOLERANCE_PX) return dist;
             if (i === 0 && dist <= FINAL_FIX_PX) return dist;   // 誤差不大就不動，避免多一次跳動
             const r = canvas.getBoundingClientRect();
-            await smoothPan(canvas,
-                Math.max(-r.width * DRAG_MAX_SCREENS, Math.min(r.width * DRAG_MAX_SCREENS, off.dx)),
-                Math.max(-r.height * DRAG_MAX_SCREENS, Math.min(r.height * DRAG_MAX_SCREENS, off.dy)),
-                PAN_MIN_MS, findSafePressPoint(canvas));
+            const dx = Math.max(-r.width * DRAG_MAX_SCREENS,
+                Math.min(r.width * DRAG_MAX_SCREENS, off.dx));
+            const dy = Math.max(-r.height * DRAG_MAX_SCREENS,
+                Math.min(r.height * DRAG_MAX_SCREENS, off.dy));
+            await smoothPan(canvas, dx, dy, PAN_MIN_MS, findPressPoint(canvas, dx, dy));
         }
         const off = offsetToTarget(lat, lon);
         return off ? Math.hypot(off.dx, off.dy) : null;
@@ -2153,11 +2150,15 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         const r = canvas.getBoundingClientRect();
         const limX = r.width * DRAG_MAX_SCREENS;
         const limY = r.height * DRAG_MAX_SCREENS;
-        const off0 = offsetToTarget(lat, lon);
+
+        // 全程以自有模型推算，不在階段之間讀網址——那些等待會讓畫面靜止，
+        // 是「一段一段」感受的主因。誤差留到最後統一校正。
+        const model = makeViewModel(vp0);
+        const off0 = model.offsetTo(lat, lon);
         const screens = Math.max(Math.abs(off0.dx) / r.width, Math.abs(off0.dy) / r.height);
         const panMs = Math.min(PAN_MAX_MS, PAN_MIN_MS + screens * PAN_MS_PER_SCREEN);
 
-        // ① 距離太遠先拉遠，拉到剛好塞得進一次手勢即可——多拉一級就多一次圖磚重載
+        // ① 太遠先拉遠，拉到剛好塞得進一次手勢即可——多拉一級就多一次圖磚重載
         const arcOut = screens > DRAG_MAX_SCREENS
             ? Math.min(ARC_MAX_ZOOM_OUT,
                 Math.ceil(Math.log2(screens / DRAG_MAX_SCREENS)),
@@ -2168,47 +2169,37 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             screens: +screens.toFixed(2), arcOut, panMs: Math.round(panMs) });
 
         if (arcOut > 0) {
-            const got = await smoothZoom(canvas, -arcOut);
-            writeDiag({ step: 'after-arc-out', want: +(vp0.zoom - arcOut).toFixed(2), got });
+            const applied = await smoothZoom(canvas, -arcOut);
+            model.applyZoom(applied);
         }
 
-        // ② 平移。位移一定要在「拉遠之後的層級」重新量——用舊層級會差十幾倍。
-        //    夾住時不是就此作罷，而是迴圈補足；每次都重新量，誤差不會累積。
+        // ② 平移。位移在「拉遠後的層級」重新算——用舊層級會差十幾倍
         let pans = 0;
         for (let i = 0; i < PAN_MAX_ITERATIONS; i++) {
-            const off = offsetToTarget(lat, lon);
-            if (!off) break;
-            const dist = Math.hypot(off.dx, off.dy);
-            if (dist <= PAN_TOLERANCE_PX) break;
+            const off = model.offsetTo(lat, lon);
+            if (Math.hypot(off.dx, off.dy) <= PAN_TOLERANCE_PX) break;
+            const dx = Math.max(-limX, Math.min(limX, off.dx));
+            const dy = Math.max(-limY, Math.min(limY, off.dy));
             pans++;
-            await smoothPan(canvas,
-                Math.max(-limX, Math.min(limX, off.dx)),
-                Math.max(-limY, Math.min(limY, off.dy)),
-                i === 0 ? panMs : PAN_MIN_MS,
-                findSafePressPoint(canvas));
+            await smoothPan(canvas, dx, dy, i === 0 ? panMs : PAN_MIN_MS,
+                findPressPoint(canvas, dx, dy));
+            model.applyPan(dx, dy);
         }
-        const afterPan = offsetToTarget(lat, lon);
-        writeDiag({ step: 'after-pan', pans,
-            remainPx: afterPan ? Math.round(Math.hypot(afterPan.dx, afterPan.dy)) : null,
-            zoom: afterPan ? afterPan.zoom : null });
 
         // ③ 拉近到目標層級（滾輪錨定畫面中心，目標會留在原地）
-        const vpMid = readViewport() || vp0;
-        const gotZoom = await smoothZoom(canvas, MAP_FOCUS_ZOOM - vpMid.zoom);
-        const offZoomed = offsetToTarget(lat, lon);
-        writeDiag({ step: 'after-zoom-in', fromZoom: vpMid.zoom, wantZoom: MAP_FOCUS_ZOOM,
-            gotZoom, driftPx: offZoomed ? Math.round(Math.hypot(offZoomed.dx, offZoomed.dy)) : null });
+        const applied = await smoothZoom(canvas, MAP_FOCUS_ZOOM - model.zoom);
+        model.applyZoom(applied);
 
-        // ④ 最後校正。放大之後同樣的角度誤差對應的實際距離很小，
-        //    所以這一步通常只要一次、幅度也小，不太影響流暢感。
+        // ④ 動畫全部結束後才讀真實視野、校正累積誤差。
+        //    只在這裡等一次，而不是每個階段都等。
         const finalDist = await correctIfNeeded(canvas, lat, lon);
         const vpEnd = readViewport();
         writeDiag({
             step: 'done', target: [+lat.toFixed(5), +lon.toFixed(5)],
             screens: +screens.toFixed(2), arcZoomOut: arcOut, pans,
+            modelZoom: +model.zoom.toFixed(2), realZoom: vpEnd ? vpEnd.zoom : null,
             finalDistPx: finalDist === null ? null : Math.round(finalDist),
             errorKm: vpEnd ? +(haversine(vpEnd.lat, vpEnd.lon, lat, lon) / 1000).toFixed(3) : null,
-            viewport: vpEnd,
         });
     }
 
