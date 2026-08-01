@@ -8,6 +8,7 @@
 | 工具 | 說明 | 安裝 |
 |---|---|---|
 | [診斷面板骨架](diagnostic-panel/DiagnosticPanel.user.js) | 可複用的通用診斷面板：相對時間戳、開始/停止、一鍵複製，任務專屬邏輯只需替換探針區塊 | [安裝](https://raw.githubusercontent.com/bgtsai/browser-tools/main/diagnostic-panel/DiagnosticPanel.user.js) |
+| [地圖操作手段測試](map-probe/MapProbe.user.js) | 一次性診斷工具：在與 route-rain 相同的沙箱環境下，逐一測試八種地圖移動與縮放手段是否可用、以及會不會誤改路線 | [安裝](https://raw.githubusercontent.com/bgtsai/browser-tools/main/map-probe/MapProbe.user.js) |
 | [Route Rain 路線降雨預報](route-rain/RouteRain.user.js) | 在 Google Maps 路線面板加一顆「路雨」按鈕，列出沿途各鄉鎮在不同出發時間下的降雨機率；資料來自 Google Routes API 與中央氣象署開放資料 | [安裝](https://raw.githubusercontent.com/bgtsai/browser-tools/main/route-rain/RouteRain.user.js) |
 
 ## 版本控制
