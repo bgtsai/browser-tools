@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.39.0
+// @version      0.40.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -46,18 +46,27 @@
     const ROWH_W_PX = 126;                     // 左側地點欄寬度
     const INFO_MAX_W_PX = 860;                 // 資訊區的最大寬度（面板本身不再加寬）
     const MAP_FOCUS_ZOOM = 16;                 // 點擊節點時要拉近到的縮放層級
-    const DRAG_STEPS = 12;                     // 一次拖曳分幾步送出（模擬連續移動）
-    const DRAG_STEP_MS = 16;                   // 每步間隔（ms），約等於一個影格
-    const DRAG_MAX_RATIO = 0.4;                // 單次拖曳最多用掉畫布的幾成，超過就分多次
-    const MAX_DRAGS_PER_MOVE = 2;              // 平移最多幾次拖曳；超過就先縮小再拖，比較快也比較穩
-    const PAN_TOLERANCE_PX = 30;               // 距離目標小於此像素就算到位
-    const PAN_MAX_ITERATIONS = 6;              // 閉環修正的次數上限，避免無限迴圈
-    const DRAG_DWELL_MS = 140;                 // 放開前先靜止這麼久，消除慣性滑動
-    const VIEW_POLL_MS = 80;                   // 輪詢網址視野變化的間隔
-    const VIEW_WAIT_MS = 1500;                 // 等視野更新的逾時
-    const ZOOM_CHUNK = 2;                      // 每次最多放大幾級，之間插入一次平移校正
-                                               // 一口氣放大多級會累積偏移，細調得拉很多次才拉得回來
-    const MIN_WORK_ZOOM = 5;                   // 為了拖曳而縮小時的下限，再小就整個台灣都看不清了
+
+    // ── 動畫參數 ──
+    // 目標是接近原生的滑順度。先前卡頓的四個成因與對策：
+    //   ① 動作被切成很多段    → 整段平移只按下／放開一次，中間持續送 move
+    //   ② 每段之間等網址更新  → 先算好整段軌跡再一次播完，只在最後校正一次
+    //   ③ 等速移動            → 加上 easeInOutCubic 緩動，起停自然
+    //   ④ 縮放一級一級跳      → 改用滾輪（實測是連續的，會出現 17.6z 這種非整數）
+    const PAN_MIN_MS = 350;                    // 平移最短時長
+    const PAN_MS_PER_SCREEN = 300;             // 每多移動一個畫面寬就多這麼久
+    const PAN_MAX_MS = 900;                    // 平移最長時長
+    const ZOOM_MS = 520;                       // 縮放動畫時長
+    const WHEEL_ZOOM_PER_EVENT = 0.32;         // 實測：一個 wheel 事件約產生 0.32 級縮放
+    // 拖曳時游標不能離開畫布，單次手勢最多只能移動約 0.4 個畫面。
+    // 因此「要不要先拉遠」與「拉遠幾級」都由同一個條件決定：
+    // 拉遠到剛好塞得進一次手勢即可，不多拉——多拉一級就多一次圖磚重載。
+    const DRAG_MAX_SCREENS = 0.4;              // 單次拖曳的位移上限（畫面數）
+    const ARC_MAX_ZOOM_OUT = 10;               // 拉遠的級數上限（台北→高雄這種極遠距離需要 9 級）
+    const FINAL_FIX_PX = 100;                  // 整段結束後誤差超過此像素才做一次修正
+    const PAN_TOLERANCE_PX = 30;               // 修正時的收斂門檻
+    const PAN_MAX_ITERATIONS = 3;              // 修正的次數上限
+    const MIN_WORK_ZOOM = 5;                   // 拉遠的下限
     const ROUTE_CHANGE_DEBOUNCE_MS = 600;      // 路線改變後等它安定再重算（ms）
     const DEPART_STEP_MIN = 15;                // 出發時間欄距（分鐘）
     const DEPART_COLUMNS_MAX = 96;             // 欄數上限（96 欄 × 15 分 = 24 小時）
@@ -1923,172 +1932,151 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         target.dispatchEvent(new ME(type.replace('pointer', 'mouse'), init));
     }
 
-    function simulateDrag(canvas, dx, dy) {
-        writeDiag({ step: 'drag-begin', dx: Math.round(dx), dy: Math.round(dy) });
+    // ── 動畫基礎 ──
+
+    /** easeInOutCubic：起步加速、中段快、結尾減速。結尾速度趨近零，慣性問題自然消失 */
+    const easeInOutCubic = t => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+
+    /**
+     * 以 requestAnimationFrame 逐影格執行動畫。
+     * 不用 setInterval：它跟螢幕更新不同步，會累積誤差與掉影格，
+     * rAF 才是與更新節奏對齊的標準做法。
+     */
+    function animate(durationMs, onFrame) {
         return new Promise(resolve => {
-            const r = canvas.getBoundingClientRect();
-            const cx = r.left + r.width / 2;
-            const cy = r.top + r.height / 2;
-            dispatchPointer(canvas, 'pointerdown', cx, cy, 1);
-            let step = 0;
-            const timer = setInterval(() => {
-                step++;
-                dispatchPointer(canvas, 'pointermove',
-                    cx + dx * step / DRAG_STEPS, cy + dy * step / DRAG_STEPS, 1);
-                if (step >= DRAG_STEPS) {
-                    clearInterval(timer);
-                    // 放開前先在原地靜止一段時間再補送一次 move：
-                    // 快速拖完就放開會被地圖判定為「甩動」而套用慣性滑行，
-                    // 實際移動距離遠大於要求的位移量，是先前跑到海上的主因。
-                    setTimeout(() => {
-                        dispatchPointer(canvas, 'pointermove', cx + dx, cy + dy, 1);
-                        dispatchPointer(canvas, 'pointerup', cx + dx, cy + dy, 0);
-                        writeDiag({ step: 'drag-end', dx: Math.round(dx), dy: Math.round(dy) });
-                        setTimeout(resolve, 300);
-                    }, DRAG_DWELL_MS);
-                }
-            }, DRAG_STEP_MS);
+            const t0 = performance.now();
+            const tick = (now) => {
+                const raw = Math.min(1, (now - t0) / durationMs);
+                onFrame(easeInOutCubic(raw), raw);
+                if (raw < 1) requestAnimationFrame(tick);
+                else resolve();
+            };
+            requestAnimationFrame(tick);
         });
     }
 
-    /** 找地圖右下角的縮放鈕。用可見標籤定位，不依賴混淆過的 class */
-    function findZoomButton(zoomIn) {
-        const want = zoomIn ? /放大|zoom in/i : /縮小|zoom out/i;
-        return [...document.querySelectorAll('button')]
-            .find(b => want.test(b.getAttribute('aria-label') || b.title || '')) || null;
+    /**
+     * 一次連續的拖曳手勢：只按下一次、放開一次，中間持續送 move。
+     * 先前每段拖曳都是完整手勢，地圖每次獨立結算慣性，才會有段落感與甩飛。
+     */
+    async function smoothPan(canvas, dx, dy, durationMs) {
+        const r = canvas.getBoundingClientRect();
+        const cx = r.left + r.width / 2;
+        const cy = r.top + r.height / 2;
+        dispatchPointer(canvas, 'pointerdown', cx, cy, 1);
+        await animate(durationMs, (e) => {
+            dispatchPointer(canvas, 'pointermove', cx + dx * e, cy + dy * e, 1);
+        });
+        // 結尾速度已趨近零（緩動的效果），直接放開不會觸發慣性滑行
+        dispatchPointer(canvas, 'pointerup', cx + dx, cy + dy, 0);
     }
 
-    const wait = ms => new Promise(r => setTimeout(r, ms));
-
     /**
-     * 等網址的視野段真的變了才往下走。
-     * 拖曳與縮放後網址是非同步更新的，立刻讀會拿到舊值——
-     * 縮放層級只要差一級，像素距離就差一倍，換算出來的位移會完全錯掉。
+     * 滾輪縮放。實測合成 wheel 有效，且縮放是連續的（會出現 17.6z 這種非整數），
+     * 又以游標位置為錨點——在畫布中心滾動，中心完全不動，
+     * 不像縮放按鈕會以「可見地圖區域」為錨點而把中心往右帶偏。
      */
-    async function waitForViewportChange(prevKey) {
-        const t0 = Date.now();
-        while (Date.now() - t0 < VIEW_WAIT_MS) {
-            const m = location.href.match(/\/@[^/]+/);
-            if (m && m[0] !== prevKey) return m[0];
-            await wait(VIEW_POLL_MS);
+    async function smoothZoom(canvas, deltaZoom, durationMs) {
+        if (Math.abs(deltaZoom) < 0.05) return;
+        const r = canvas.getBoundingClientRect();
+        const cx = r.left + r.width / 2;
+        const cy = r.top + r.height / 2;
+        const w = pageWindow();
+        const WE = w.WheelEvent || WheelEvent;
+        const totalEvents = Math.max(1, Math.round(Math.abs(deltaZoom) / WHEEL_ZOOM_PER_EVENT));
+        const sign = deltaZoom > 0 ? -1 : 1;      // deltaY 為負代表放大
+        let sent = 0;
+        await animate(durationMs, (e) => {
+            const want = Math.round(e * totalEvents);
+            while (sent < want) {
+                canvas.dispatchEvent(new WE('wheel', {
+                    bubbles: true, cancelable: true, composed: true, view: w,
+                    clientX: cx, clientY: cy, deltaY: sign * 120, deltaMode: 0,
+                }));
+                sent++;
+            }
+        });
+    }
+
+    /** 目前視野下，目標相對於畫面中心的像素位移 */
+    function offsetToTarget(lat, lon) {
+        const vp = readViewport();
+        if (!vp) return null;
+        const c = projectToPixel(vp.lat, vp.lon, vp.zoom);
+        const t = projectToPixel(lat, lon, vp.zoom);
+        return { dx: c.x - t.x, dy: c.y - t.y, zoom: vp.zoom };
+    }
+
+    /** 整段動畫結束後才校正，而且只在誤差夠大時才動——這是流暢度的關鍵取捨 */
+    async function correctIfNeeded(canvas, lat, lon) {
+        for (let i = 0; i < PAN_MAX_ITERATIONS; i++) {
+            await wait(160);                       // 等地圖與網址安定
+            const off = offsetToTarget(lat, lon);
+            if (!off) return null;
+            const dist = Math.hypot(off.dx, off.dy);
+            if (dist <= PAN_TOLERANCE_PX) return dist;
+            if (i === 0 && dist <= FINAL_FIX_PX) return dist;   // 誤差不大就不動，避免多一次跳動
+            const r = canvas.getBoundingClientRect();
+            await smoothPan(canvas,
+                Math.max(-r.width * DRAG_MAX_SCREENS, Math.min(r.width * DRAG_MAX_SCREENS, off.dx)),
+                Math.max(-r.height * DRAG_MAX_SCREENS, Math.min(r.height * DRAG_MAX_SCREENS, off.dy)),
+                PAN_MIN_MS);
         }
-        return (location.href.match(/\/@[^/]+/) || [''])[0];
-    }
-
-    const viewportKey = () => (location.href.match(/\/@[^/]+/) || [''])[0];
-
-    /**
-     * 先平移、再縮放。順序不能顛倒：
-     * 縮放以畫面中心為基準，先把目標拖到中心再放大，目標就會留在中心；
-     * 反過來先放大的話，每放大一級目標離中心的像素距離就加倍，很快超出單次拖曳範圍。
-     * 縮放用右下角的按鈕而不是滾輪——滾輪以游標位置為中心，按鈕以畫面中心為中心。
-     */
-    /**
-     * 閉環平移：每一輪都重新讀「實際的視野」再算剩餘距離，直到夠接近或達到次數上限。
-     * 不假設每次拖曳都精準移動——開環做法只要偏一次，後面全部建立在錯的基準上。
-     */
-    async function panTo(canvas, lat, lon, maxX, maxY, label) {
-        let iter = 0;
-        let dist = Infinity;
-        while (iter < PAN_MAX_ITERATIONS) {
-            const vp = readViewport();
-            if (!vp) break;
-            const c = projectToPixel(vp.lat, vp.lon, vp.zoom);
-            const t = projectToPixel(lat, lon, vp.zoom);
-            const dx = c.x - t.x;
-            const dy = c.y - t.y;
-            dist = Math.hypot(dx, dy);
-            writeDiag({ step: 'pan', phase: label, iter, zoom: vp.zoom,
-                dx: Math.round(dx), dy: Math.round(dy), dist: Math.round(dist) });
-            if (dist <= PAN_TOLERANCE_PX) break;
-            iter++;
-            const before = viewportKey();
-            await simulateDrag(canvas,
-                Math.max(-maxX, Math.min(maxX, dx)),
-                Math.max(-maxY, Math.min(maxY, dy)));
-            await waitForViewportChange(before);
-        }
-        return { iter, dist };
+        const off = offsetToTarget(lat, lon);
+        return off ? Math.hypot(off.dx, off.dy) : null;
     }
 
     /**
-     * 縮放到指定層級，並確認真的到位。
-     * 只按固定次數是不夠的：網址更新是非同步的，等待逾時就會被跳過，
-     * 實測出現過「目標 16 級卻停在 15 級」。改成以「目前層級」為準反覆補足。
-     */
-    async function zoomToLevel(targetZoom, maxAttempts) {
-        for (let attempt = 0; attempt < (maxAttempts || 10); attempt++) {
-            const vp = readViewport();
-            if (!vp) return;
-            const diff = Math.round(targetZoom - vp.zoom);
-            if (diff === 0) return;
-            const btn = findZoomButton(diff > 0);
-            if (!btn) { writeDiag({ step: 'zoom-skip', reason: '找不到縮放按鈕' }); return; }
-            const before = viewportKey();
-            btn.click();
-            await waitForViewportChange(before);
-        }
-        writeDiag({ step: 'zoom-incomplete', want: targetZoom, got: (readViewport() || {}).zoom });
-    }
-
-    /**
-     * 把地圖視野移到指定座標並拉近。
+     * 把地圖平順地移到指定座標並拉近。
      *
-     * 順序是「粗調平移 → 縮放 → 細調平移」。
-     * 最後一步的細調不可省：實測縮放鈕不是以網址中心為基準（左側面板讓可見地圖的
-     * 中心偏右約半個面板寬），連按六級之後中心會被帶偏三十公里以上。
-     * 與其去猜那個偏移量，不如縮放完再校正一次——在 zoom 16 時 30px 容差只約 3 公尺。
+     * 長距離時走「先拉遠 → 平移 → 拉近」的弧線（地圖界稱 flyTo，源自
+     * van Wijk & Nuij 2003）。除了視覺自然，還有實際效益：
+     * 在低縮放層級平移要載入的圖磚少得多，閃爍會明顯減少。
      */
     async function focusMapOn(lat, lon) {
         const canvas = findMapCanvas();
-        if (!canvas || !readViewport()) {
+        const vp0 = readViewport();
+        if (!canvas || !vp0) {
             writeDiag({ step: 'abort', reason: !canvas ? '找不到畫布' : '讀不到視野' });
             return;
         }
         const r = canvas.getBoundingClientRect();
-        const maxX = r.width * DRAG_MAX_RATIO;
-        const maxY = r.height * DRAG_MAX_RATIO;
+        const off0 = offsetToTarget(lat, lon);
+        const screens = Math.max(Math.abs(off0.dx) / r.width, Math.abs(off0.dy) / r.height);
 
-        // ① 距離太遠先縮小，像素距離每縮一級減半
-        const vp0 = readViewport();
-        const dragsAt = (zoom) => {
-            const c0 = projectToPixel(vp0.lat, vp0.lon, zoom);
-            const t0 = projectToPixel(lat, lon, zoom);
-            return Math.max(Math.abs(c0.x - t0.x) / maxX, Math.abs(c0.y - t0.y) / maxY);
-        };
-        let workZoom = vp0.zoom;
-        while (dragsAt(workZoom) > MAX_DRAGS_PER_MOVE && workZoom > MIN_WORK_ZOOM) workZoom--;
-        const zoomOutSteps = Math.round(vp0.zoom - workZoom);
-        if (zoomOutSteps > 0) await zoomToLevel(workZoom);
+        // 依距離決定平移時長：短距離不拖沓、長距離不倉促
+        const panMs = Math.min(PAN_MAX_MS, PAN_MIN_MS + screens * PAN_MS_PER_SCREEN);
 
-        // ② 粗調平移
-        const coarse = await panTo(canvas, lat, lon, maxX, maxY, 'coarse');
+        // 距離夠遠才走弧線；拉遠幾級取決於要跨越幾個畫面
+        // 拉遠到剛好塞得進一次手勢為止：每拉遠一級，像素距離減半
+        const arcOut = screens > DRAG_MAX_SCREENS
+            ? Math.min(ARC_MAX_ZOOM_OUT,
+                Math.ceil(Math.log2(screens / DRAG_MAX_SCREENS)),
+                Math.max(0, Math.floor(vp0.zoom - MIN_WORK_ZOOM)))
+            : 0;
 
-        // ③ 分段放大，每段之間校正一次——一口氣放大多級會累積偏移
-        let zoomRounds = 0;
-        let fine = { iter: 0, dist: Infinity };
-        for (let guard = 0; guard < 10; guard++) {
-            const vp = readViewport();
-            if (!vp || Math.round(MAP_FOCUS_ZOOM - vp.zoom) === 0) break;
-            const next = vp.zoom + Math.max(-ZOOM_CHUNK,
-                Math.min(ZOOM_CHUNK, Math.round(MAP_FOCUS_ZOOM - vp.zoom)));
-            await zoomToLevel(next);
-            fine = await panTo(canvas, lat, lon, maxX, maxY, 'fine' + guard);
-            zoomRounds++;
-        }
-        // 若一開始就已經在目標層級，仍要做一次校正
-        if (zoomRounds === 0) fine = await panTo(canvas, lat, lon, maxX, maxY, 'fine');
+        if (arcOut > 0) await smoothZoom(canvas, -arcOut, ZOOM_MS);
 
+        // 拉遠之後距離會縮小，重新量一次再平移
+        const off1 = offsetToTarget(lat, lon) || off0;
+        const limX = r.width * DRAG_MAX_SCREENS;
+        const limY = r.height * DRAG_MAX_SCREENS;
+        await smoothPan(canvas,
+            Math.max(-limX, Math.min(limX, off1.dx)),
+            Math.max(-limY, Math.min(limY, off1.dy)),
+            panMs);
+
+        // 拉近到目標層級（滾輪錨定中心，目標會留在原地）
+        const vpMid = readViewport() || vp0;
+        await smoothZoom(canvas, MAP_FOCUS_ZOOM - vpMid.zoom, ZOOM_MS);
+
+        const finalDist = await correctIfNeeded(canvas, lat, lon);
         const vpEnd = readViewport();
-        const errKm = vpEnd
-            ? haversine(vpEnd.lat, vpEnd.lon, lat, lon) / 1000
-            : null;
         writeDiag({
             step: 'done', target: [+lat.toFixed(5), +lon.toFixed(5)],
-            zoomOut: zoomOutSteps, coarseIter: coarse.iter,
-            zoomRounds, fineIter: fine.iter,
-            finalDistPx: Math.round(fine.dist),
-            errorKm: errKm === null ? null : +errKm.toFixed(3),
+            screens: +screens.toFixed(2), panMs: Math.round(panMs), arcZoomOut: arcOut,
+            finalDistPx: finalDist === null ? null : Math.round(finalDist),
+            errorKm: vpEnd ? +(haversine(vpEnd.lat, vpEnd.lon, lat, lon) / 1000).toFixed(3) : null,
             viewport: vpEnd,
         });
     }
