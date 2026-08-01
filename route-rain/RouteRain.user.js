@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.40.2
+// @version      0.41.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -56,12 +56,18 @@
     const PAN_MIN_MS = 350;                    // 平移最短時長
     const PAN_MS_PER_SCREEN = 300;             // 每多移動一個畫面寬就多這麼久
     const PAN_MAX_MS = 900;                    // 平移最長時長
-    const ZOOM_MS = 520;                       // 縮放動畫時長
-    const WHEEL_ZOOM_PER_EVENT = 0.32;         // 實測：一個 wheel 事件約產生 0.32 級縮放
+    // 滾輪縮放的實測結果（間隔 vs 每事件縮放量）：
+    //   16ms → 0.000 級（完全無效，那正是 requestAnimationFrame 的間隔）
+    //   30ms → 0.256 級（打折）
+    //   50ms 以上 → 0.320 級（滿效率）
+    // 因此縮放不能用 rAF 逐影格送，必須用固定間隔串接。
+    const WHEEL_INTERVAL_MS = 50;              // 滾輪事件間隔，低於 30ms 會被整批忽略
+    const WHEEL_ZOOM_PER_EVENT = 0.32;         // 每個事件的縮放量（50ms 間隔下實測）
     // 拖曳時游標不能離開畫布，單次手勢最多只能移動約 0.4 個畫面。
     // 因此「要不要先拉遠」與「拉遠幾級」都由同一個條件決定：
     // 拉遠到剛好塞得進一次手勢即可，不多拉——多拉一級就多一次圖磚重載。
     const DRAG_MAX_SCREENS = 0.4;              // 單次拖曳的位移上限（畫面數）
+    const SAFE_PRESS_MIN_PX = 60;              // 按下點至少要離路線這麼遠，否則會被判定為拖曳路線
     const ARC_MAX_ZOOM_OUT = 10;               // 拉遠的級數上限（台北→高雄這種極遠距離需要 9 級）
     const FINAL_FIX_PX = 100;                  // 整段結束後誤差超過此像素才做一次修正
     const PAN_TOLERANCE_PX = 30;               // 修正時的收斂門檻
@@ -136,6 +142,7 @@
         originalPanelWidth: '',
         lastRouteKey: '',
         capturedDirections: null,   // 攔截到的 /maps/preview/directions 回應
+        routePoints: null,          // 目前顯示路線的座標，用來算出離路線夠遠的按下點
         rerunTimer: null,
         panelBg: '',
         optionsClickHandler: null,
@@ -1611,6 +1618,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         const picked = pickAlternative(alts, selected);
         const alt = picked.alt;
 
+        state.routePoints = alt.points;   // 供計算安全按下點
         const { timeline, steps, totalSec } = buildTimeline(alt);
         if (!timeline.length) throw new Error('Routes API 回傳的路徑沒有可用的座標');
         const nodes = buildNodes(timeline, totalSec);
@@ -1961,10 +1969,10 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
      * 一次連續的拖曳手勢：只按下一次、放開一次，中間持續送 move。
      * 先前每段拖曳都是完整手勢，地圖每次獨立結算慣性，才會有段落感與甩飛。
      */
-    async function smoothPan(canvas, dx, dy, durationMs) {
+    async function smoothPan(canvas, dx, dy, durationMs, origin) {
         const r = canvas.getBoundingClientRect();
-        const cx = r.left + r.width / 2;
-        const cy = r.top + r.height / 2;
+        const cx = origin ? origin.x : r.left + r.width / 2;
+        const cy = origin ? origin.y : r.top + r.height / 2;
         dispatchPointer(canvas, 'pointerdown', cx, cy, 1);
         await animate(durationMs, (e) => {
             dispatchPointer(canvas, 'pointermove', cx + dx * e, cy + dy * e, 1);
@@ -1974,30 +1982,86 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
     }
 
     /**
-     * 滾輪縮放。實測合成 wheel 有效，且縮放是連續的（會出現 17.6z 這種非整數），
-     * 又以游標位置為錨點——在畫布中心滾動，中心完全不動，
-     * 不像縮放按鈕會以「可見地圖區域」為錨點而把中心往右帶偏。
+     * 滾輪縮放。
+     *
+     * 以固定 50ms 間隔送出事件，不用 requestAnimationFrame——實測 16ms 間隔
+     * （rAF 的節奏）會讓所有事件被整批忽略，一級都不動。這正是先前
+     * 「zoomError=5、縮放完全沒發生」的原因。
+     *
+     * 滾輪本身的縮放是連續的（會產生 17.6z 這種非整數層級），所以即使不是
+     * 逐影格送，視覺上仍然是平滑推近，不像縮放按鈕那樣一級一級跳。
+     * 另外它以游標位置為錨點，在畫布中心送出就不會帶偏中心。
      */
-    async function smoothZoom(canvas, deltaZoom, durationMs) {
-        if (Math.abs(deltaZoom) < 0.05) return;
+    async function smoothZoom(canvas, deltaZoom) {
+        if (Math.abs(deltaZoom) < WHEEL_ZOOM_PER_EVENT / 2) return 0;
         const r = canvas.getBoundingClientRect();
         const cx = r.left + r.width / 2;
         const cy = r.top + r.height / 2;
         const w = pageWindow();
         const WE = w.WheelEvent || WheelEvent;
-        const totalEvents = Math.max(1, Math.round(Math.abs(deltaZoom) / WHEEL_ZOOM_PER_EVENT));
+        const events = Math.max(1, Math.round(Math.abs(deltaZoom) / WHEEL_ZOOM_PER_EVENT));
         const sign = deltaZoom > 0 ? -1 : 1;      // deltaY 為負代表放大
-        let sent = 0;
-        await animate(durationMs, (e) => {
-            const want = Math.round(e * totalEvents);
-            while (sent < want) {
-                canvas.dispatchEvent(new WE('wheel', {
-                    bubbles: true, cancelable: true, composed: true, view: w,
-                    clientX: cx, clientY: cy, deltaY: sign * 120, deltaMode: 0,
-                }));
-                sent++;
+        for (let i = 0; i < events; i++) {
+            canvas.dispatchEvent(new WE('wheel', {
+                bubbles: true, cancelable: true, composed: true, view: w,
+                clientX: cx, clientY: cy, deltaY: sign * 120, deltaMode: 0,
+            }));
+            await wait(WHEEL_INTERVAL_MS);
+        }
+        await wait(250);   // 等最後一個事件的動畫與網址更新安定
+        return events;
+    }
+
+    /**
+     * 找一個「離路線夠遠」的按下點。
+     *
+     * 從畫面正中央按下拖曳時，若中央剛好壓在路線上，Google 會判定成
+     * 「拖曳路線新增途經點」而<strong>實際改動使用者原本的規劃</strong>
+     * （實測看過網址的控制點數從 0 變 1）。這是破壞性的副作用。
+     *
+     * 不需要猜它的判定容差：我們手上就有完整的路線座標，
+     * 直接算出候選點到路線的最短距離，挑最遠的那個即可。
+     * 位移量不受影響——拖曳的位移是相對的，從哪裡按下都一樣。
+     */
+    function findSafePressPoint(canvas) {
+        const r = canvas.getBoundingClientRect();
+        const vp = readViewport();
+        const centre = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        const pts = state.routePoints;
+        if (!vp || !pts || !pts.length) return centre;
+
+        // 把路線座標投影到螢幕
+        const c = projectToPixel(vp.lat, vp.lon, vp.zoom);
+        const screen = [];
+        // 路線點可能上千個，取樣即可——判斷「離不離得夠遠」不需要每一點都算
+        const stride = Math.max(1, Math.floor(pts.length / 400));
+        for (let i = 0; i < pts.length; i += stride) {
+            const p = projectToPixel(pts[i][0], pts[i][1], vp.zoom);
+            screen.push({ x: centre.x + (p.x - c.x), y: centre.y + (p.y - c.y) });
+        }
+
+        // 候選點取畫布內側的九宮格，避開邊緣（游標在邊緣容易拖出界）
+        const candidates = [];
+        for (const fx of [0.25, 0.5, 0.75]) {
+            for (const fy of [0.25, 0.5, 0.75]) {
+                candidates.push({ x: r.left + r.width * fx, y: r.top + r.height * fy });
             }
-        });
+        }
+        let best = centre, bestDist = -1;
+        for (const cand of candidates) {
+            let min = Infinity;
+            for (const s of screen) {
+                const d = Math.hypot(s.x - cand.x, s.y - cand.y);
+                if (d < min) min = d;
+                if (min < SAFE_PRESS_MIN_PX) break;   // 已經太近，不必再算
+            }
+            if (min > bestDist) { bestDist = min; best = cand; }
+        }
+        writeDiag({ step: 'press-point',
+            at: [Math.round(best.x), Math.round(best.y)],
+            distToRoutePx: bestDist === Infinity ? null : Math.round(bestDist),
+            safe: bestDist >= SAFE_PRESS_MIN_PX });
+        return best;
     }
 
     /** 目前視野下，目標相對於畫面中心的像素位移 */
@@ -2022,7 +2086,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             await smoothPan(canvas,
                 Math.max(-r.width * DRAG_MAX_SCREENS, Math.min(r.width * DRAG_MAX_SCREENS, off.dx)),
                 Math.max(-r.height * DRAG_MAX_SCREENS, Math.min(r.height * DRAG_MAX_SCREENS, off.dy)),
-                PAN_MIN_MS);
+                PAN_MIN_MS, findSafePressPoint(canvas));
         }
         const off = offsetToTarget(lat, lon);
         return off ? Math.hypot(off.dx, off.dy) : null;
@@ -2062,7 +2126,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             screens: +screens.toFixed(2), arcOut, panMs: Math.round(panMs) });
 
         if (arcOut > 0) {
-            await smoothZoom(canvas, -arcOut, ZOOM_MS);
+            await smoothZoom(canvas, -arcOut);
             await wait(200);
             const v = readViewport();
             writeDiag({ step: 'after-arc-out', want: +(vp0.zoom - arcOut).toFixed(2),
@@ -2075,7 +2139,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         const limY = r.height * DRAG_MAX_SCREENS;
         const useX = Math.max(-limX, Math.min(limX, off1.dx));
         const useY = Math.max(-limY, Math.min(limY, off1.dy));
-        await smoothPan(canvas, useX, useY, panMs);
+        await smoothPan(canvas, useX, useY, panMs, findSafePressPoint(canvas));
         await wait(200);
         const afterPan = offsetToTarget(lat, lon);
         writeDiag({ step: 'after-pan',
@@ -2088,7 +2152,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         // 拉近到目標層級（滾輪錨定中心，目標會留在原地）
         const vpMid = readViewport() || vp0;
         const wantZoomDelta = MAP_FOCUS_ZOOM - vpMid.zoom;
-        await smoothZoom(canvas, wantZoomDelta, ZOOM_MS);
+        await smoothZoom(canvas, wantZoomDelta);
         await wait(250);
         const vpZoomed = readViewport();
         const offZoomed = offsetToTarget(lat, lon);
@@ -2125,8 +2189,13 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         } catch (err) { /* 診斷失敗不影響功能 */ }
     }
 
+    function routeCtrlCount() {
+        return ((location.href.match(/\/data=([^?]+)/) || [''])[1].match(/3m4/g) || []).length;
+    }
+
     function onNodeClick(node) {
         document.documentElement.removeAttribute('data-' + PREFIX + '-log');   // 每次點擊重新記錄
+        const ctrlBefore = routeCtrlCount();
         const w = pageWindow();
         const canvas = findMapCanvas();
         const vp = readViewport();
@@ -2144,7 +2213,14 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             hasPointerEvent: !!(w && w.PointerEvent),
         });
         log('點擊節點', node.county + node.town);
-        focusMapOn(node.lat, node.lon).catch(err => {
+        focusMapOn(node.lat, node.lon).then(() => {
+            const after = routeCtrlCount();
+            if (after !== ctrlBefore) {
+                // 破壞性副作用：模擬拖曳被判定成「拖曳路線新增途經點」
+                writeDiag({ step: 'route-modified', before: ctrlBefore, after });
+                warn('警告：定位過程改動了路線的途經點', ctrlBefore, '→', after);
+            }
+        }).catch(err => {
             writeDiag({ step: 'error', message: err.message });
             warn('定位失敗：', err.message);
         });
