@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         通用診斷面板骨架
 // @namespace    browser-tools
-// @version      1.4
+// @version      1.5
 // @description  可複用的診斷面板骨架（方案 C）：面板 UI + 相對時間戳 + 開始/停止 + 一鍵複製，任務專屬邏輯只需替換「探針區塊」
 // @match        *://*/*
 // @grant        none
@@ -249,138 +249,78 @@
     let _bdpObservers = [];
     let _rrRestore = [];
 
-    // ── 目前任務：找出 Google Maps 的「相機層」，並同時驗證滾輪縮放是否可行 ──
+    // ── 目前任務：讀出 route-rain 的定位診斷，並監看路線是否被改動 ──
     //
-    // 一次執行回答四件事：
-    //   ① window 上有沒有具備地圖控制方法的物件
-    //   ② 從 canvas 及其祖先的自有屬性反查，有沒有內部控制器
-    //   ③ 用「數值特徵」找相機狀態物件——方法名稱會被混淆，但存著的
-    //      經緯度騙不了人：找出屬性值剛好等於目前地圖中心的物件
-    //   ④ 備案驗證：合成的 wheel 事件能不能縮放地圖
+    // route-rain 使用 GM_* 授權，跑在沙箱裡，它的 console 輸出在網頁主控台看不到，
+    // 因此改寫進 DOM 屬性（data-rr-log）。本面板是 @grant none、跑在網頁環境，
+    // 可以直接讀那個屬性——使用者只要按開始／停止／複製，不必再手動貼 Console 指令。
     //
-    // 本腳本是 @grant none，跑在網頁環境；先前在沙箱裡掃描的結果不可信。
+    // 同時監看網址的 data= 段：點格子時若路線被改動（例如模擬拖曳被誤判為
+    // 「拖曳路線新增途經點」），這裡會立刻顯示前後差異。
 
-    const CAM_METHODS = ['panTo', 'panBy', 'setCenter', 'getCenter', 'setZoom', 'getZoom',
-        'moveCamera', 'setCameraParams', 'flyTo', 'setView', 'fitBounds'];
-    const SCAN_MAX_NODES = 30000;
-    const SCAN_MAX_DEPTH = 4;
-    const LATLNG_TOLERANCE = 0.02;
+    const RR_LOG_ATTR = 'data-rr-log';
+    const RR_DIAG_ATTR = 'data-rr-diag';
+    let _rrSeenLog = '';
+    let _rrRouteKey = '';
+    let _rrTimer = null;
 
-    function rrViewport() {
-        const m = location.href.match(/\/@(-?[\d.]+),(-?[\d.]+),([\d.]+)z/);
-        return m ? { lat: +m[1], lon: +m[2], zoom: +m[3] } : null;
+    function rrRouteKeyOf() {
+        return (location.href.match(/\/data=([^?]+)/) || [])[1] || '';
     }
 
-    function rrScan(roots, vp) {
-        const seen = new WeakSet();
-        const methodHits = [];
-        const valueHits = [];
-        let nodes = 0;
-
-        const visit = (obj, path, depth) => {
-            if (!obj || depth > SCAN_MAX_DEPTH || nodes > SCAN_MAX_NODES) return;
-            const t = typeof obj;
-            if (t !== 'object' && t !== 'function') return;
-            if (seen.has(obj)) return;
-            seen.add(obj);
-            nodes++;
-
-            let keys;
-            try { keys = Object.getOwnPropertyNames(obj); } catch (err) { return; }
-
-            // ① 方法名稱比對
-            const found = CAM_METHODS.filter(m => {
-                try { return typeof obj[m] === 'function'; } catch (err) { return false; }
-            });
-            if (found.length >= 2) methodHits.push(`${path}  →  ${found.join(', ')}`);
-
-            // ③ 數值特徵：同一個物件裡同時有接近中心緯度與經度的數字
-            if (vp && keys.length <= 60) {
-                const nums = [];
-                for (const k of keys) {
-                    let v;
-                    try { v = obj[k]; } catch (err) { continue; }
-                    if (typeof v === 'number' && isFinite(v)) nums.push([k, v]);
-                }
-                const nearLat = nums.filter(([, v]) => Math.abs(v - vp.lat) < LATLNG_TOLERANCE);
-                const nearLon = nums.filter(([, v]) => Math.abs(v - vp.lon) < LATLNG_TOLERANCE);
-                if (nearLat.length && nearLon.length) {
-                    valueHits.push(`${path}  {${nearLat[0][0]}:${nearLat[0][1].toFixed(5)}, ` +
-                        `${nearLon[0][0]}:${nearLon[0][1].toFixed(5)}}  共 ${keys.length} 個屬性`);
-                }
-            }
-
-            if (depth >= SCAN_MAX_DEPTH) return;
-            for (const k of keys) {
-                if (/^(window|self|top|parent|frames|document|location|history)$/.test(k)) continue;
-                let v;
-                try { v = obj[k]; } catch (err) { continue; }
-                if (v && (typeof v === 'object' || typeof v === 'function')) {
-                    visit(v, path + '.' + k, depth + 1);
-                }
-            }
-        };
-
-        roots.forEach(([obj, name]) => visit(obj, name, 0));
-        return { methodHits, valueHits, nodes };
+    function rrPretty(line) {
+        try {
+            const o = JSON.parse(line);
+            const step = o.step || '?';
+            const rest = Object.keys(o)
+                .filter(k => k !== 'step' && k !== 't')
+                .map(k => `${k}=${JSON.stringify(o[k])}`)
+                .join('  ');
+            return `${step.padEnd(16)}${rest}`;
+        } catch (err) {
+            return line;
+        }
     }
 
     function PROBE_SETUP() {
-        const vp = rrViewport();
-        log('START', `目前視野：${vp ? `${vp.lat}, ${vp.lon} @ ${vp.zoom}z` : '(讀不到)'}`);
-
-        const canvas = [...document.querySelectorAll('canvas')]
-            .map(el => ({ el, r: el.getBoundingClientRect() }))
-            .filter(o => o.r.width > 200 && o.r.height > 200)
-            .sort((a, b) => b.r.width * b.r.height - a.r.width * a.r.height)[0];
-        if (!canvas) { log('錯誤', '找不到地圖畫布，後續測試無法進行'); return; }
-        log('畫布', `${Math.round(canvas.r.width)}x${Math.round(canvas.r.height)}`);
-
-        // 從多個根出發：window、畫布本身、以及畫布往上四層的祖先
-        const roots = [[window, 'window'], [canvas.el, 'canvas']];
-        let anc = canvas.el.parentElement;
-        for (let i = 0; i < 4 && anc; i++, anc = anc.parentElement) {
-            roots.push([anc, `祖先[${i}]`]);
+        _rrSeenLog = '';
+        _rrRouteKey = rrRouteKeyOf();
+        log('START', '請在 route-rain 的表格上點一格。下方會列出定位的每個階段，' +
+            '並在路線被改動時提出警告。');
+        if (!document.querySelector('[data-rr-btn]')) {
+            log('注意', '找不到 route-rain 的按鈕，請確認腳本已啟用且頁面已重新整理');
         }
 
-        const t0 = performance.now();
-        const { methodHits, valueHits, nodes } = rrScan(roots, vp);
-        log('掃描', `走訪 ${nodes} 個物件，耗時 ${Math.round(performance.now() - t0)} ms`);
-
-        log('①②方法比對', methodHits.length
-            ? methodHits.slice(0, 10).join('\n      ')
-            : '找不到具備兩個以上地圖控制方法的物件');
-
-        log('③數值特徵', valueHits.length
-            ? valueHits.slice(0, 12).join('\n      ')
-            : '找不到屬性值等於目前地圖中心的物件');
-
-        // ④ 滾輪縮放測試（備案方案的可行性）
-        const cx = canvas.r.left + canvas.r.width / 2;
-        const cy = canvas.r.top + canvas.r.height / 2;
-        const before = (location.href.match(/\/@[^/]+/) || ['(無)'])[0];
-        log('④滾輪', `開始測試，於畫布中心送出 5 次 wheel（縮放前 ${before}）`);
-        let n = 0;
-        const timer = setInterval(() => {
-            n++;
-            canvas.el.dispatchEvent(new WheelEvent('wheel', {
-                bubbles: true, cancelable: true, composed: true, view: window,
-                clientX: cx, clientY: cy, deltaY: -120, deltaMode: 0,
-            }));
-            if (n >= 5) {
-                clearInterval(timer);
-                setTimeout(() => {
-                    const after = (location.href.match(/\/@[^/]+/) || ['(無)'])[0];
-                    log('④滾輪', `縮放後 ${after}\n      結果：` +
-                        (after !== before ? '視野已改變 → 合成 wheel 可行' : '沒有變化 → 合成 wheel 無效'));
-                    log('DONE', '四項檢查完成，請按「停止監控」後複製。');
-                }, 1500);
+        _rrTimer = setInterval(() => {
+            // ① 定位診斷
+            const raw = document.documentElement.getAttribute(RR_LOG_ATTR) || '';
+            if (raw && raw !== _rrSeenLog) {
+                const prevLines = _rrSeenLog ? _rrSeenLog.trim().split('\n') : [];
+                const lines = raw.trim().split('\n');
+                // 每次點擊會重置屬性，所以行數變少代表是新的一輪
+                const fresh = lines.length < prevLines.length ? lines : lines.slice(prevLines.length);
+                fresh.filter(Boolean).forEach(l => log('定位', rrPretty(l)));
+                _rrSeenLog = raw;
             }
-        }, 120);
-        _rrRestore.push(() => clearInterval(timer));
+
+            // ② 路線是否被改動
+            const key = rrRouteKeyOf();
+            if (key !== _rrRouteKey) {
+                const before = (_rrRouteKey.match(/3m4/g) || []).length;
+                const after = (key.match(/3m4/g) || []).length;
+                log('⚠路線', `網址的 data= 段改變了　控制點 ${before} → ${after}` +
+                    (after > before ? '　←路線被新增了途經點，這就是「路線跑掉」' : ''));
+                _rrRouteKey = key;
+            }
+        }, 400);
+        _rrRestore.push(() => clearInterval(_rrTimer));
+
+        log('READY', '監看中：route-rain 的定位階段　＋　路線是否被改動');
     }
 
     function PROBE_TEARDOWN() {
+        const last = document.documentElement.getAttribute(RR_DIAG_ATTR);
+        if (last) log('最後狀態', rrPretty(last));
         _rrRestore.forEach(fn => { try { fn(); } catch (err) { /* 還原失敗不影響停止 */ } });
         _rrRestore = [];
         _bdpObservers.forEach(mo => mo.disconnect());
