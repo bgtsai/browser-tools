@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.43.0
+// @version      0.44.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -71,7 +71,11 @@
     const SAFE_PRESS_MIN_PX = 60;              // 按下點至少要離路線這麼遠，否則會被判定為拖曳路線
     const PRESS_EDGE_MARGIN_PX = 40;           // 按下點與拖曳終點都要離畫布邊緣這麼遠
     const ARC_MAX_ZOOM_OUT = 10;               // 拉遠的級數上限（台北→高雄這種極遠距離需要 9 級）
-    const FINAL_FIX_PX = 100;                  // 整段結束後誤差超過此像素才做一次修正
+    const FINAL_FIX_PX = 60;                   // 整段結束後誤差超過此像素才做修正
+    // 網址落後真實視野 0.7～1.4 秒（實測）。用固定秒數等待很容易讀到舊值，
+    // 而舊值算出來的誤差是假的，據以校正只會更錯。改成輪詢到「不再變動」為止。
+    const SETTLE_POLL_MS = 250;                // 輪詢間隔；連續兩次相同即視為停止
+    const SETTLE_TIMEOUT_MS = 3000;            // 等待上限，逾時就用當下的值繼續
     const PAN_TOLERANCE_PX = 30;               // 修正時的收斂門檻
     const PAN_MAX_ITERATIONS = 3;              // 修正的次數上限
     const MIN_WORK_ZOOM = 5;                   // 拉遠的下限
@@ -2104,6 +2108,43 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         return { x: best.x, y: best.y, distToRoute: bestDist };
     }
 
+    const viewportKey = () => (location.href.match(/\/@[^/]+/) || [''])[0];
+
+    /**
+     * 等到視野真的停止變動。
+     *
+     * 判準是「連續兩次讀到相同的網址視野段」，而不是等固定秒數——
+     * 網址落後真實視野 0.7～1.4 秒且長短不定（跟動畫幅度、網路、機器都有關），
+     * 固定秒數必然有時等不夠。實測在探針上加了這個之後，
+     * 同一組參數的量測從「100% 和 129% 交替」變成四組全部零變異。
+     */
+    async function waitSettled(timeoutMs) {
+        const t0 = Date.now();
+        let last = null;
+        while (Date.now() - t0 < (timeoutMs || SETTLE_TIMEOUT_MS)) {
+            const key = viewportKey();
+            if (key === last) return true;
+            last = key;
+            await wait(SETTLE_POLL_MS);
+        }
+        return false;                           // 逾時：可能還在動，但不能無限等
+    }
+
+    /** 等視野停穩後，把模型校準回真實值——避免推算誤差一路累積下去 */
+    async function syncModel(model, label) {
+        const settled = await waitSettled();
+        const vp = readViewport();
+        if (!vp) return null;
+        const drift = Math.hypot(
+            projectToPixel(model.lat, model.lon, vp.zoom).x - projectToPixel(vp.lat, vp.lon, vp.zoom).x,
+            projectToPixel(model.lat, model.lon, vp.zoom).y - projectToPixel(vp.lat, vp.lon, vp.zoom).y);
+        writeDiag({ step: 'sync-' + label, settled,
+            modelZoom: +model.zoom.toFixed(2), realZoom: vp.zoom,
+            driftPx: Math.round(drift) });
+        model.lat = vp.lat; model.lon = vp.lon; model.zoom = vp.zoom;
+        return vp;
+    }
+
     /** 目前視野下，目標相對於畫面中心的像素位移 */
     function offsetToTarget(lat, lon) {
         const vp = readViewport();
@@ -2114,13 +2155,19 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
     }
 
     /** 整段動畫結束後才校正，而且只在誤差夠大時才動——這是流暢度的關鍵取捨 */
+    /**
+     * 最後校正：等視野真的停穩，量實際誤差，超過門檻就修，修完再量。
+     * 迴圈直到到位或次數用盡——這是「結果一定要對」的保證。
+     */
     async function correctIfNeeded(canvas, lat, lon) {
+        let dist = null;
         for (let i = 0; i < PAN_MAX_ITERATIONS; i++) {
-            await wait(160);                       // 等地圖與網址安定
+            await waitSettled();                    // 關鍵：不是等固定秒數，是等真的不動了
             const off = offsetToTarget(lat, lon);
-            if (!off) return null;
-            const dist = Math.hypot(off.dx, off.dy);
-            if (dist <= PAN_TOLERANCE_PX) return dist;
+            if (!off) return dist;
+            dist = Math.hypot(off.dx, off.dy);
+            writeDiag({ step: 'correct', round: i, distPx: Math.round(dist) });
+            if (dist <= PAN_TOLERANCE_PX) return dist;          // 已經夠準
             if (i === 0 && dist <= FINAL_FIX_PX) return dist;   // 誤差不大就不動，避免多一次跳動
             const r = canvas.getBoundingClientRect();
             const dx = Math.max(-r.width * DRAG_MAX_SCREENS,
@@ -2129,8 +2176,9 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
                 Math.min(r.height * DRAG_MAX_SCREENS, off.dy));
             await smoothPan(canvas, dx, dy, PAN_MIN_MS, findPressPoint(canvas, dx, dy));
         }
+        await waitSettled();
         const off = offsetToTarget(lat, lon);
-        return off ? Math.hypot(off.dx, off.dy) : null;
+        return off ? Math.hypot(off.dx, off.dy) : dist;
     }
 
     /**
@@ -2171,6 +2219,9 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         if (arcOut > 0) {
             const applied = await smoothZoom(canvas, -arcOut);
             model.applyZoom(applied);
+            // 這一步之後的殘留誤差會被最後的放大倍數放大（拉遠 5 級＝放大 32 倍），
+            // 所以這裡值得付出一次等待，把模型校準回真實值再往下走
+            await syncModel(model, 'arc-out');
         }
 
         // ② 平移。位移在「拉遠後的層級」重新算——用舊層級會差十幾倍
@@ -2193,6 +2244,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         // ④ 動畫全部結束後才讀真實視野、校正累積誤差。
         //    只在這裡等一次，而不是每個階段都等。
         const finalDist = await correctIfNeeded(canvas, lat, lon);
+        await waitSettled();          // 回報前再確認一次，避免 errorKm 是用舊值算的
         const vpEnd = readViewport();
         writeDiag({
             step: 'done', target: [+lat.toFixed(5), +lon.toFixed(5)],
