@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         地圖操作手段測試
 // @namespace    browser-tools
-// @version      2.0
-// @description  在與 route-rain 相同的沙箱環境下，測出相機控制項、滾輪間隔門檻、拖曳重試間隔
+// @version      3.0
+// @description  在與 route-rain 相同的沙箱環境下，測出鍵盤平移與縮放的可用性與精度
 // @match        https://www.google.com/maps/*
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -251,19 +251,27 @@
 
     let _bdpObservers = [];
 
-    // ── 目的：把三個還沒定案的參數一次量出來 ──
-    //   ① 相機控制項——搜到的 Playwright 文章指出平移／縮放按鈕藏在
-    //      「Map camera controls」子選單裡，要先展開才點得到。
-    //      若可用，平移完全不碰畫布，就不會誤觸「拖曳路線新增途經點」。
-    //   ② 滾輪間隔門檻——滾輪在 120ms 間隔下有效，用 rAF（約 16ms）連送卻完全失效。
-    //      找出最小可用間隔，才能決定縮放動畫可以多平滑。
-    //   ③ 拖曳重試間隔——連續兩次拖曳無法累加（第二次量到 0px），
-    //      找出要間隔多久才會生效，決定長距離能不能分次完成。
+    // ── 目的：鍵盤方案能不能用、準不準 ──
     //
-    // @grant 與 route-rain 完全相同，確保跑在同一種沙箱環境。
+    // 背景：往內挖相機層已經確定不通（狀態物件在內部持有參照，從外部攔不到）。
+    // 官方無障礙文件寫著「按 Tab 直到焦點設為地圖」之後，方向鍵可平移、+/- 可縮放，
+    // 而先前測試「鍵盤無效」很可能是因為沒讓地圖取得焦點。
+    //
+    // 鍵盤方案的價值不只是備案：它完全不碰畫布，因此
+    //   ・不可能誤觸「拖曳路線新增途經點」
+    //   ・可以在最終縮放層級做微調，殘留誤差不會再被放大
+    //
+    // 要回答四件事：
+    //   ① 該讓哪個元素取得焦點才有效
+    //   ② 一次按鍵移動多少像素——這決定能不能算出要按幾次
+    //   ③ 重複按是否穩定——這決定準不準
+    //   ④ +/- 一次縮放多少級
+    //
+    // 注意：網址更新落後真實視野超過一秒（v1.6 實測），所以每次量測都要等夠久。
 
     const W = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
     const sleep = ms => new Promise(r => setTimeout(r, ms));
+    const SETTLE_MS = 1600;        // 等網址反映新視野；實測落後可達 1.4 秒
 
     function viewport() {
         const m = location.href.match(/\/@(-?[\d.]+),(-?[\d.]+),([\d.]+)z/);
@@ -271,12 +279,6 @@
     }
     function ctrlPoints() {
         return ((location.href.match(/\/data=([^?]+)/) || [''])[1].match(/3m4/g) || []).length;
-    }
-    function mapCanvas() {
-        return [...document.querySelectorAll('canvas')]
-            .map(el => ({ el, r: el.getBoundingClientRect() }))
-            .filter(o => o.r.width > 200 && o.r.height > 200)
-            .sort((a, b) => b.r.width * b.r.height - a.r.width * a.r.height)[0] || null;
     }
     function projectPx(lat, lon, zoom) {
         const world = 256 * Math.pow(2, zoom);
@@ -291,168 +293,128 @@
         const p2 = projectPx(b.lat, b.lon, a.zoom);
         return Math.round(Math.hypot(p2.x - p1.x, p2.y - p1.y));
     }
-    function fire(target, type, x, y, buttons, extra) {
-        const Ctor = type.startsWith('pointer') ? (W.PointerEvent || PointerEvent)
-                   : type === 'wheel' ? (W.WheelEvent || WheelEvent)
-                   : (W.MouseEvent || MouseEvent);
+    function mapCanvas() {
+        return [...document.querySelectorAll('canvas')]
+            .map(el => ({ el, r: el.getBoundingClientRect() }))
+            .filter(o => o.r.width > 200 && o.r.height > 200)
+            .sort((a, b) => b.r.width * b.r.height - a.r.width * a.r.height)[0] || null;
+    }
+
+    function pressKey(target, key, code, opts) {
+        const KE = W.KeyboardEvent || KeyboardEvent;
         const init = Object.assign({
             bubbles: true, cancelable: true, composed: true, view: W,
-            clientX: x, clientY: y, screenX: x, screenY: y,
-            button: 0, buttons: buttons,
-            pointerId: 1, pointerType: 'mouse', isPrimary: true,
-        }, extra || {});
-        target.dispatchEvent(new Ctor(type, init));
-        if (type.startsWith('pointer')) {
-            const M = W.MouseEvent || MouseEvent;
-            target.dispatchEvent(new M(type.replace('pointer', 'mouse'), init));
-        }
-    }
-    async function dragBy(canvas, fromX, fromY, dx, dy, steps, ms) {
-        fire(canvas, 'pointerdown', fromX, fromY, 1);
-        for (let i = 1; i <= steps; i++) {
-            fire(canvas, 'pointermove', fromX + dx * i / steps, fromY + dy * i / steps, 1);
-            await sleep(ms / steps);
-        }
-        fire(canvas, 'pointerup', fromX + dx, fromY + dy, 0);
-    }
-    /** 把所有帶 aria-label 的可見按鈕列出來，用來找相機控制項 */
-    function visibleButtons() {
-        return [...document.querySelectorAll('button,[role="button"]')]
-            .map(b => {
-                const r = b.getBoundingClientRect();
-                return { el: b, label: (b.getAttribute('aria-label') || b.title || '').trim(), r };
-            })
-            .filter(o => o.label && o.r.width > 0 && o.r.height > 0);
+            key, code, location: 0, repeat: false,
+        }, opts || {});
+        const t = target || document.activeElement || document.body;
+        t.dispatchEvent(new KE('keydown', init));
+        t.dispatchEvent(new KE('keypress', init));
+        t.dispatchEvent(new KE('keyup', init));
     }
 
-    // ═══════════ ① 相機控制項 ═══════════
-    async function testCameraControls() {
-        log('①相機控制項', '搜尋展開按鈕…');
-        const before = visibleButtons();
-        const beforeLabels = new Set(before.map(o => o.label));
-
-        // 用可見文字／aria-label 找，不依賴混淆過的 class
-        const opener = before.find(o => /相機|camera|控制項|map controls/i.test(o.label));
-        if (!opener) {
-            const sample = before.map(o => o.label).filter(l => l.length < 24).slice(0, 30);
-            log('①結果', '❌ 找不到「相機控制項」展開按鈕\n      目前可見按鈕（前 30 個）：' +
-                (sample.join('｜') || '（無）'));
-            return;
-        }
-        log('①展開', `找到「${opener.label}」，點擊展開…`);
-        opener.el.click();
-        await sleep(900);
-
-        const after = visibleButtons();
-        const fresh = after.filter(o => !beforeLabels.has(o.label));
-        log('①新出現', fresh.length
-            ? fresh.map(o => o.label).join('｜')
-            : '（展開後沒有新按鈕出現）');
-
-        // 找平移與縮放按鈕
-        const findBtn = (re) => after.find(o => re.test(o.label));
-        const moveLeft = findBtn(/向左移|move left|左移/i);
-        const zoomIn = findBtn(/放大|zoom in/i);
-
-        if (moveLeft) {
-            const v0 = viewport(), c0 = ctrlPoints();
-            moveLeft.el.click();
-            await sleep(1000);
-            const v1 = viewport();
-            const px = shiftPx(v0, v1);
-            log('①平移按鈕', (px > 5 ? '✅ 有效' : '❌ 無效') +
-                `　「${moveLeft.label}」點 1 次位移 ${px}px` +
-                (ctrlPoints() !== c0 ? '　⚠️ 路線被改動' : '　路線未改動'));
-        } else {
-            log('①平移按鈕', '❌ 展開後仍找不到平移按鈕');
-        }
-
-        if (zoomIn) {
-            const v0 = viewport();
-            zoomIn.el.click();
-            await sleep(1000);
-            const v1 = viewport();
-            const dz = v1 && v0 ? +(v1.zoom - v0.zoom).toFixed(2) : 0;
-            log('①縮放按鈕', (Math.abs(dz) > 0.1 ? '✅ 有效' : '❌ 無效') +
-                `　「${zoomIn.label}」點 1 次 ${dz} 級　中心位移 ${shiftPx(v0, v1)}px`);
-        } else {
-            log('①縮放按鈕', '❌ 展開後仍找不到縮放按鈕');
-        }
+    /** 列出「可能就是地圖」的可聚焦元素：有 tabindex 且覆蓋畫布區域 */
+    function focusCandidates(canvasRect) {
+        const all = [...document.querySelectorAll('[tabindex]')];
+        return all.map(el => {
+            const r = el.getBoundingClientRect();
+            return { el, r, ti: el.getAttribute('tabindex'),
+                     label: (el.getAttribute('aria-label') || '').slice(0, 30),
+                     cls: String(el.className || '').slice(0, 40) };
+        }).filter(o => o.r.width > canvasRect.width * 0.5 && o.r.height > canvasRect.height * 0.5)
+          .slice(0, 8);
     }
 
-    // ═══════════ ② 滾輪間隔門檻 ═══════════
-    async function testWheelIntervals() {
-        const canvas = mapCanvas();
-        const cx = canvas.r.left + canvas.r.width / 2;
-        const cy = canvas.r.top + canvas.r.height / 2;
-        const EVENTS = 5;
-        for (const gap of [16, 30, 50, 80, 120]) {
-            const v0 = viewport();
-            for (let i = 0; i < EVENTS; i++) {
-                fire(canvas.el, 'wheel', cx, cy, 0, { deltaY: -120, deltaMode: 0 });
-                await sleep(gap);
-            }
-            await sleep(1000);
-            const v1 = viewport();
-            const dz = v1 && v0 ? +(v1.zoom - v0.zoom).toFixed(2) : 0;
-            log('②滾輪 ' + gap + 'ms',
-                (Math.abs(dz) > 0.1 ? '✅' : '❌') +
-                `　${EVENTS} 事件共 ${dz} 級　每事件 ${(dz / EVENTS).toFixed(3)} 級`);
-            // 復位，避免愈縮愈深影響下一輪
-            for (let i = 0; i < EVENTS; i++) {
-                fire(canvas.el, 'wheel', cx, cy, 0, { deltaY: 120, deltaMode: 0 });
-                await sleep(120);
-            }
-            await sleep(800);
-        }
-    }
-
-    // ═══════════ ③ 拖曳重試間隔 ═══════════
-    async function testDragGaps() {
-        const canvas = mapCanvas();
-        // 從角落按下，避開路線
-        const px = canvas.r.left + canvas.r.width * 0.85;
-        const py = canvas.r.top + canvas.r.height * 0.15;
-        for (const gap of [0, 200, 500, 900]) {
-            const v0 = viewport(), c0 = ctrlPoints();
-            await dragBy(canvas.el, px, py, 250, 0, 12, 250);
-            await sleep(400);
-            const vMid = viewport();
-            await sleep(gap);
-            await dragBy(canvas.el, px, py, 250, 0, 12, 250);
-            await sleep(700);
-            const v1 = viewport();
-            const first = shiftPx(v0, vMid);
-            const second = shiftPx(vMid, v1);
-            log('③拖曳間隔 ' + gap + 'ms',
-                (second > first * 0.5 ? '✅ 第二次生效' : '❌ 第二次無效') +
-                `　第一次 ${first}px　第二次 ${second}px` +
-                (ctrlPoints() !== c0 ? '　⚠️ 路線被改動' : ''));
-            // 拖回去復位
-            await sleep(500);
-            await dragBy(canvas.el, px, py, -(first + second), 0, 12, 300);
-            await sleep(700);
-        }
+    async function tryFocusAndPan(cand, canvas) {
+        try { cand.el.focus({ preventScroll: true }); } catch (err) { return null; }
+        const active = document.activeElement === cand.el;
+        const v0 = viewport();
+        for (let i = 0; i < 3; i++) { pressKey(cand.el, 'ArrowRight', 'ArrowRight'); await sleep(200); }
+        await sleep(SETTLE_MS);
+        const v1 = viewport();
+        return { active, moved: shiftPx(v0, v1), v0, v1 };
     }
 
     async function runAll() {
         const canvas = mapCanvas();
         if (!canvas) { log('錯誤', '找不到地圖畫布'); return; }
         log('環境', `畫布 ${Math.round(canvas.r.width)}x${Math.round(canvas.r.height)}　` +
-            `unsafeWindow=${W !== window ? '可用' : '不可用'}　` +
             `視野 ${JSON.stringify(viewport())}　控制點 ${ctrlPoints()} 個`);
 
-        await testCameraControls();
-        log('──', '① 完成，開始 ②');
-        await testWheelIntervals();
-        log('──', '② 完成，開始 ③');
-        await testDragGaps();
-        log('DONE', '三項測試完成，請按「停止監控」後複製。地圖已被移動，重新整理即可復原。');
+        // ① 找出該聚焦哪個元素
+        const cands = focusCandidates(canvas.r);
+        log('①可聚焦候選', cands.length
+            ? cands.map((c, i) => `[${i}] tabindex=${c.ti} class="${c.cls}" ${c.label}`).join('\n      ')
+            : '找不到覆蓋畫布的可聚焦元素');
+
+        let winner = null;
+        for (let i = 0; i < cands.length; i++) {
+            const res = await tryFocusAndPan(cands[i], canvas);
+            if (!res) continue;
+            log(`①測試候選[${i}]`,
+                `focus 成功=${res.active}　按 3 次方向鍵位移 ${res.moved}px`);
+            if (res.moved > 5) { winner = { cand: cands[i], idx: i }; break; }
+        }
+        // 也試試直接對畫布與 document 送鍵
+        if (!winner) {
+            for (const [name, target] of [['畫布', canvas.el], ['document.body', document.body]]) {
+                const v0 = viewport();
+                try { target.focus && target.focus({ preventScroll: true }); } catch (err) { /* 不可聚焦 */ }
+                for (let i = 0; i < 3; i++) { pressKey(target, 'ArrowRight', 'ArrowRight'); await sleep(200); }
+                await sleep(SETTLE_MS);
+                const moved = shiftPx(v0, viewport());
+                log('①直接送鍵', `${name}：位移 ${moved}px`);
+                if (moved > 5) { winner = { cand: { el: target }, idx: -1 }; break; }
+            }
+        }
+
+        if (!winner) {
+            log('結論', '❌ 鍵盤完全無反應——合成的鍵盤事件不被接受。\n' +
+                '      兩條路線都不通，只能沿用現有的「滾輪＋拖曳」模擬方案並繼續優化它。');
+            log('DONE', '測試結束。');
+            return;
+        }
+        const el = winner.cand.el;
+        log('①結論', `✅ 有效：候選[${winner.idx}]（-1 代表直接送鍵）`);
+
+        // ② 每次按鍵移動多少、③ 是否穩定
+        const perPress = [];
+        for (let round = 0; round < 3; round++) {
+            const v0 = viewport();
+            pressKey(el, 'ArrowRight', 'ArrowRight');
+            await sleep(SETTLE_MS);
+            const d = shiftPx(v0, viewport());
+            perPress.push(d);
+        }
+        const avg = perPress.reduce((a, b) => a + b, 0) / perPress.length;
+        const spread = Math.max(...perPress) - Math.min(...perPress);
+        log('②③單次位移', `三次各為 ${perPress.join(', ')} px　平均 ${avg.toFixed(0)}px　` +
+            `落差 ${spread}px　→ ${spread <= 2 ? '穩定，可據以計算按幾次' : '不穩定，難以精確定位'}`);
+
+        // Shift+方向鍵（官方文件說是「以方形為單位」大幅移動）
+        {
+            const v0 = viewport();
+            pressKey(el, 'ArrowRight', 'ArrowRight', { shiftKey: true });
+            await sleep(SETTLE_MS);
+            log('②Shift+方向鍵', `位移 ${shiftPx(v0, viewport())} px`);
+        }
+
+        // ④ 縮放
+        for (const [label, key, code] of [['+ 放大', '+', 'Equal'], ['- 縮小', '-', 'Minus']]) {
+            const v0 = viewport();
+            pressKey(el, key, code);
+            await sleep(SETTLE_MS);
+            const v1 = viewport();
+            const dz = v1 && v0 ? +(v1.zoom - v0.zoom).toFixed(2) : 0;
+            log('④' + label, `${dz} 級　中心位移 ${shiftPx(v0, v1)}px`);
+        }
+
+        log('⑤副作用', ctrlPoints() === 0 ? '路線未被改動 ✅' : '⚠️ 路線的途經點數改變了');
+        log('DONE', '測試結束，請按「停止監控」後複製。地圖已被移動，重新整理即可復原。');
     }
 
     function PROBE_SETUP() {
-        log('START', '開始測試，全程約 60 秒，請勿操作頁面。');
-        runAll().catch(err => log('錯誤', err.message + '\n      ' + (err.stack || '').slice(0, 200)));
+        log('START', '開始測試鍵盤方案，全程約 40 秒，請勿操作頁面或移動滑鼠到地圖上。');
+        runAll().catch(err => log('錯誤', err.message + '\n      ' + String(err.stack || '').slice(0, 200)));
     }
 
     function PROBE_TEARDOWN() {
