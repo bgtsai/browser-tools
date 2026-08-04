@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         通用診斷面板骨架
 // @namespace    browser-tools
-// @version      2.2
+// @version      2.3
 // @description  診斷面板骨架：面板 UI + 相對時間戳 + 開始/停止 + 一鍵複製；任務專屬邏輯只需替換「探針區塊」。目前任務：找出讓拖曳穩定到位的參數組合
 // @match        https://www.google.com/maps/*
 // @grant        GM_setValue
@@ -114,6 +114,36 @@
     controls.appendChild(clearBtn);
     controls.appendChild(copyBtn);
     body.appendChild(controls);
+
+    // ── 操作指引區 ────────────────────────────────────────────────────
+    // 由探針區塊透過 guide([...]) 設定。把「按下開始後要做什麼」直接寫在面板上，
+    // 使用者就不必在對話視窗與被測頁面之間來回切換、或把步驟背下來。
+    // 沒有設定時整個區塊不顯示，不佔版面。
+    const guideBox = document.createElement('div');
+    guideBox.id = 'bdp-guide';
+    guideBox.style.cssText =
+        'padding: 8px 10px; border-bottom: 1px solid #333; flex-shrink: 0; display: none;' +
+        'background: #2a2a1f; color: #e8d98a; line-height: 1.65;';
+    body.appendChild(guideBox);
+
+    /**
+     * 設定操作指引。傳入字串陣列，會自動編號；傳入空值則隱藏整區。
+     * 供探針區塊在 PROBE_SETUP 之外的頂層呼叫，面板一出現就看得到。
+     */
+    function guide(steps) {
+        if (!steps || !steps.length) { guideBox.style.display = 'none'; return; }
+        guideBox.style.display = '';
+        guideBox.textContent = '';
+        const title = document.createElement('div');
+        title.style.cssText = 'font-weight: 600; margin-bottom: 4px; color: #f5e6a3;';
+        title.textContent = '操作步驟';
+        guideBox.appendChild(title);
+        steps.forEach((s, i) => {
+            const line = document.createElement('div');
+            line.textContent = `${i + 1}. ${s}`;
+            guideBox.appendChild(line);
+        });
+    }
 
     const countLine = document.createElement('div');
     countLine.id = 'bdp-count';
@@ -423,6 +453,13 @@
         log('④副作用', ctrlPoints() === 0 ? '路線未被改動 ✅' : '⚠️ 路線的途經點數改變了');
         log('DONE', '測試完成，請按「停止監控」後複製。');
     }
+
+    guide([
+        '確認頁面上已經規劃好一條路線',
+        '按下方的「開始監控」',
+        '等約 2 分鐘，期間不要操作頁面或把滑鼠移到地圖上',
+        '看到 DONE 之後按「停止監控」，再按「複製」',
+    ]);
 
     function PROBE_SETUP() {
         log('START', '開始測試四組參數，全程約 2 分鐘，請勿操作頁面。');
