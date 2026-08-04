@@ -1,10 +1,13 @@
 // ==UserScript==
 // @name         通用診斷面板骨架
 // @namespace    browser-tools
-// @version      1.9
-// @description  可複用的診斷面板骨架（方案 C）：面板 UI + 相對時間戳 + 開始/停止 + 一鍵複製，任務專屬邏輯只需替換「探針區塊」
-// @match        *://*/*
-// @grant        none
+// @version      2.0
+// @description  診斷面板骨架：面板 UI + 相對時間戳 + 開始/停止 + 一鍵複製；任務專屬邏輯只需替換「探針區塊」。目前任務：Google Maps 拖曳精度
+// @match        https://www.google.com/maps/*
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_registerMenuCommand
+// @grant        unsafeWindow
 // @run-at       document-start
 // ==/UserScript==
 
@@ -15,6 +18,19 @@
     // 這是「骨架」而非單一診斷工具。每次要診斷不同問題時，
     // 只需要替換下方標示「探針區塊」的那一段（PROBE_SETUP / PROBE_TEARDOWN），
     // 其餘的面板 UI、時間戳、複製邏輯不需要改動。
+    //
+    // ── 執行環境（重要）──
+    // 本腳本使用 GM_* 授權，因此跑在**沙箱**裡，與 route-rain 相同。
+    // 沙箱的 window 與網頁真正使用的那一份是兩個不同的物件，凡是要
+    //   ・攔截網頁發出的請求
+    //   ・派送網頁監聽得到的合成事件
+    //   ・讀取網頁自己的全域變數
+    // 都必須明寫 unsafeWindow，否則只會動到沙箱自己的副本。
+    // 這個坑踩過三次（攔截器、事件建構子、滾輪縮放），
+    // 「被迫明寫 unsafeWindow」正是選擇這個環境的理由——它讓錯誤無所遁形。
+    //
+    // @match 一律限定在當前任務的網站，不要用 *://*/*——
+    // 這個面板是針對性工具，不該在每個網頁都載入。
     //
     // DOM 上所有自建的 id / class 一律加 bdp（browser diagnostic panel）前綴，
     // 避免跟頁面本身或其他擴充功能的命名空間衝突。
@@ -247,195 +263,177 @@
     // ─────────────────────────────────────────────────────────────────────
 
     let _bdpObservers = [];
-    let _rrRestore = [];
 
-    // ── 目的：最後一次嘗試找出相機層的入口 ──
+    // ── 目前任務：驗證「拖曳少掉第一格」的假設，並找出正確的補償方式 ──
     //
-    // 上一版在 window._.aP 的座標屬性上裝 setter 失敗（0 個成功）。
-    // 這一版做三件事，把「為什麼失敗」與「還有沒有別的路」一次問清楚：
-    //   ① 診斷失敗原因——凍結？封裝？屬性不可設定？
-    //      若是凍結，代表 Google 每次是「換一個新的狀態物件」而非改寫舊的，
-    //      那就該往上一層裝設。
-    //   ② 改在「持有者」上裝 setter（window._ 的 aP 這個屬性本身），
-    //      物件被替換時就能捕捉到呼叫堆疊。
-    //   ③ 擴大搜尋範圍——深度加到 5，並加入畫布與其祖先的自訂屬性
-    //      （框架常把控制器掛在 DOM 元素上）。
+    // 實測：要求 400px、分 16 格送出，三次都精準地只移動 374px（達成率 94%）。
+    //   400 ÷ 16 = 25px/格　　400 − 25 = 375px　≈ 實測 374px
+    // 推論：第一個 pointermove 被當成「拖曳開始」的判定，它的位移不被套用。
     //
-    // 這是這條路線的最後一次嘗試。若仍拿不到可呼叫的入口，就轉向鍵盤方案。
+    // 這個推論可以證偽：若成立，損失量恆等於「一格」，
+    // 因此格數越多、每格越小、達成率越高——
+    //   8 格 → 約 87.5%　16 格 → 約 94%　32 格 → 約 97%
+    // 若三者達成率相同，推論就是錯的，得另尋原因。
+    //
+    // 同時驗證修法：pointerdown 之後先在原位補送一個零位移的 pointermove，
+    // 把「拖曳開始」那一格消耗掉，後續每格就都會被完整套用。
+    //
+    // 另外順帶確認縮放層級是否影響達成率（理論上不影響，位移是螢幕像素）。
 
-    const TOL = 0.02;
-    const MAX_TARGETS = 60;
-    const MAX_STACKS = 25;
-    let _holders = [];
-    let _hits = [];
-    let _armed = false;
-    let _logging = false;      // 防止在 setter 裡呼叫 log 造成遞迴
-    let _watchTimer = null;
+    const W = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
+    const POINTER_ID = 10088;
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-    function vpOf() {
+    function viewport() {
         const m = location.href.match(/\/@(-?[\d.]+),(-?[\d.]+),([\d.]+)z/);
         return m ? { lat: +m[1], lon: +m[2], zoom: +m[3] } : null;
     }
-    function briefStack(err) {
-        return String(err.stack || '').split('\n')
-            .filter(l => l && !/DiagnosticPanel|briefStack|<anonymous>:/.test(l))
-            .slice(0, 8)
-            .map(l => l.trim().replace(/https?:\/\/[^\s)]+\//g, '').slice(0, 100))
-            .join('\n        ');
+    const vpKey = () => (location.href.match(/\/@[^/]+/) || [''])[0];
+    function ctrlPoints() {
+        return ((location.href.match(/\/data=([^?]+)/) || [''])[1].match(/3m4/g) || []).length;
     }
-    /** 這個物件是不是「存著目前地圖中心」 */
-    function holdsCentre(obj, vp) {
-        let keys;
-        try { keys = Object.getOwnPropertyNames(obj); } catch (err) { return null; }
-        if (keys.length > 40) return null;
-        let latKey = null, lonKey = null;
-        for (const k of keys) {
-            let v;
-            try { v = obj[k]; } catch (err) { continue; }
-            if (typeof v !== 'number' || !isFinite(v)) continue;
-            if (latKey === null && Math.abs(v - vp.lat) < TOL) latKey = k;
-            if (lonKey === null && Math.abs(v - vp.lon) < TOL) lonKey = k;
+    function projectPx(lat, lon, zoom) {
+        const world = 256 * Math.pow(2, zoom);
+        const s = Math.sin(lat * Math.PI / 180);
+        return { x: (lon + 180) / 360 * world,
+                 y: (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * world };
+    }
+    function shiftPx(a, b) {
+        if (!a || !b) return 0;
+        const p1 = projectPx(a.lat, a.lon, a.zoom);
+        const p2 = projectPx(b.lat, b.lon, a.zoom);
+        return Math.round(Math.hypot(p2.x - p1.x, p2.y - p1.y));
+    }
+    /** 網址落後真實視野，所以它一變就代表動作已完成——這是可靠的完成訊號 */
+    async function waitUrlChange(prevKey, timeoutMs) {
+        const t0 = performance.now();
+        while (performance.now() - t0 < (timeoutMs || 4000)) {
+            if (vpKey() !== prevKey) { await sleep(250); return Math.round(performance.now() - t0); }
+            await sleep(60);
         }
-        return (latKey !== null && lonKey !== null) ? { latKey, lonKey } : null;
+        return -1;
     }
-
-    /** 掃描：回傳 [{holder, key, obj, path}]——holder[key] 就是那個狀態物件 */
-    function scan(vp) {
-        const seen = new WeakSet();
-        const found = [];
-        const visit = (obj, path, depth, holder, key) => {
-            if (!obj || depth > 5 || found.length >= MAX_TARGETS) return;
-            const t = typeof obj;
-            if (t !== 'object' && t !== 'function') return;
-            if (seen.has(obj)) return;
-            seen.add(obj);
-            if (holder && holdsCentre(obj, vp)) found.push({ holder, key, obj, path });
-            if (depth >= 5) return;
-            let keys;
-            try { keys = Object.getOwnPropertyNames(obj); } catch (err) { return; }
-            for (const k of keys) {
-                if (/^(window|self|top|parent|frames|document|location|history)$/.test(k)) continue;
-                let v;
-                try { v = obj[k]; } catch (err) { continue; }
-                if (v && (typeof v === 'object' || typeof v === 'function')) {
-                    visit(v, path + '.' + k, depth + 1, obj, k);
-                }
-            }
-        };
-        visit(window, 'window', 0, null, null);
-        if (window._) visit(window._, 'window._', 0, null, null);
-        // 框架常把控制器掛在 DOM 元素上，畫布與其祖先一併掃
-        const cv = [...document.querySelectorAll('canvas')]
+    function mapCanvas() {
+        return [...document.querySelectorAll('canvas')]
             .map(el => ({ el, r: el.getBoundingClientRect() }))
             .filter(o => o.r.width > 200 && o.r.height > 200)
-            .sort((a, b) => b.r.width * b.r.height - a.r.width * a.r.height)[0];
-        if (cv) {
-            let n = cv.el, d = 0;
-            while (n && d < 5) { visit(n, `canvas祖先[${d}]`, 3, null, null); n = n.parentElement; d++; }
-        }
-        return found;
+            .sort((a, b) => b.r.width * b.r.height - a.r.width * a.r.height)[0] || null;
+    }
+    /** 事件建構子一律取自 unsafeWindow：沙箱建立的事件網頁不一定認得 */
+    function fire(target, mouseType, pointerType, opts) {
+        const ME = W.MouseEvent || MouseEvent;
+        const PE = W.PointerEvent || PointerEvent;
+        target.dispatchEvent(new ME(mouseType, opts));
+        target.dispatchEvent(new PE(pointerType, Object.assign(
+            { pointerId: POINTER_ID, isPrimary: true, pointerType: 'mouse' }, opts)));
     }
 
-    function describeWhyLocked(obj) {
-        const bits = [];
-        if (Object.isFrozen(obj)) bits.push('已凍結(frozen)');
-        else if (Object.isSealed(obj)) bits.push('已封裝(sealed)');
-        else if (!Object.isExtensible(obj)) bits.push('不可擴充');
-        const d = Object.getOwnPropertyDescriptor(obj, Object.getOwnPropertyNames(obj)[0]);
-        if (d) bits.push(`首個屬性 writable=${d.writable} configurable=${d.configurable}`);
-        return bits.join('　') || '沒有明顯的鎖定';
+    async function drag(canvas, dx, dy, frames, frameMs, primeFirst) {
+        const r = canvas.getBoundingClientRect();
+        const x = r.left + r.width * 0.75;     // 往左拖，從右側按下，行程才夠
+        const y = r.top + r.height * 0.5;
+        const base = { bubbles: true, cancelable: true, view: W, button: 0, buttons: 1 };
+        fire(canvas, 'mousedown', 'pointerdown',
+            Object.assign({}, base, { detail: 1, clientX: x, clientY: y }));
+        if (primeFirst) {
+            // 在原位補一格零位移，把「拖曳開始」的判定消耗掉
+            fire(canvas, 'mousemove', 'pointermove',
+                Object.assign({}, base, { cancelable: false, detail: 88, clientX: x, clientY: y }));
+            await sleep(frameMs);
+        }
+        for (let i = 1; i <= frames; i++) {
+            fire(canvas, 'mousemove', 'pointermove', Object.assign({}, base,
+                { cancelable: false, detail: 88, clientX: x + dx * i / frames, clientY: y + dy * i / frames }));
+            await sleep(frameMs);
+        }
+        const ex = x + dx, ey = y + dy;
+        // 放開前在原位再送一次 move：速度歸零，不會觸發慣性滑行
+        fire(canvas, 'mousemove', 'pointermove',
+            Object.assign({}, base, { cancelable: false, detail: 88, clientX: ex, clientY: ey }));
+        fire(canvas, 'mouseup', 'pointerup',
+            Object.assign({}, base, { detail: 1, buttons: 0, clientX: ex, clientY: ey }));
+    }
+
+    /** 拖過去、量一次、再拖回來，避免位置漂移影響下一輪 */
+    async function measure(canvas, dxPx, frames, primeFirst) {
+        const v0 = viewport(), key0 = vpKey();
+        await drag(canvas, dxPx, 0, frames, 16, primeFirst);
+        await waitUrlChange(key0, 4000);
+        const moved = shiftPx(v0, viewport());
+        await sleep(300);
+        const keyBack = vpKey();
+        await drag(canvas, -dxPx, 0, frames, 16, primeFirst);
+        await waitUrlChange(keyBack, 4000);
+        await sleep(300);
+        return { moved, pct: Math.round(moved / Math.abs(dxPx) * 1000) / 10 };
+    }
+
+    async function wheelZoom(canvas, levels) {
+        const WE = W.WheelEvent || WheelEvent;
+        const r = canvas.getBoundingClientRect();
+        const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+        const events = Math.max(1, Math.round(Math.abs(levels) / 0.32));
+        for (let i = 0; i < events; i++) {
+            canvas.dispatchEvent(new WE('wheel', {
+                bubbles: true, cancelable: true, view: W,
+                clientX: cx, clientY: cy, deltaY: (levels > 0 ? -120 : 120), deltaMode: 0,
+            }));
+            await sleep(50);       // 實測：低於 30ms 會被整批忽略
+        }
+        await sleep(900);
+    }
+
+    async function runAll() {
+        const canvas = mapCanvas();
+        if (!canvas) { log('錯誤', '找不到地圖畫布'); return; }
+        const DX = -400;
+        log('環境', `畫布 ${Math.round(canvas.r.width)}x${Math.round(canvas.r.height)}　` +
+            `視野 ${JSON.stringify(viewport())}　控制點 ${ctrlPoints()} 個`);
+
+        // ① 格數假設：損失若恆為「一格」，達成率應隨格數上升
+        log('──', '① 不同格數（要求 400px）');
+        const table = [];
+        for (const frames of [8, 16, 32]) {
+            const r = await measure(canvas.el, DX, frames, false);
+            const predicted = Math.round((1 - 1 / frames) * 1000) / 10;
+            table.push({ frames, ...r, predicted });
+            log(`①${frames} 格`, `位移 ${r.moved}px　達成率 ${r.pct}%　` +
+                `（假設預測 ${predicted}%，差 ${Math.round(Math.abs(r.pct - predicted) * 10) / 10}%）`);
+        }
+        const maxDiff = Math.max(...table.map(t => Math.abs(t.pct - t.predicted)));
+        const spread = Math.max(...table.map(t => t.pct)) - Math.min(...table.map(t => t.pct));
+        log('①判讀', maxDiff <= 2
+            ? '✅ 與預測吻合 → 確實是少掉第一格，補一格即可修正'
+            : (spread <= 2
+                ? '❌ 三種格數達成率幾乎相同 → 損失與格數無關，假設錯誤，另有原因'
+                : `⚠️ 有差異但不符預測（最大偏離 ${Math.round(maxDiff * 10) / 10}%），需再分析`));
+
+        // ② 驗證修法
+        log('──', '② 加上「補一格空移動」');
+        for (const frames of [8, 16]) {
+            const r = await measure(canvas.el, DX, frames, true);
+            log(`②${frames} 格＋補一格`, `位移 ${r.moved}px　達成率 ${r.pct}%　` +
+                (r.pct >= 98 ? '✅ 接近 100%' : '仍有落差'));
+        }
+
+        // ③ 縮放層級是否影響（理論上不影響，位移是螢幕像素）
+        log('──', '③ 換一個縮放層級再測（16 格＋補一格）');
+        await wheelZoom(canvas.el, -2);
+        const zoomed = viewport();
+        const r3 = await measure(canvas.el, DX, 16, true);
+        log('③縮小 2 級後', `zoom=${zoomed ? zoomed.zoom : '?'}　位移 ${r3.moved}px　達成率 ${r3.pct}%`);
+        await wheelZoom(canvas.el, 2);
+
+        log('④副作用', ctrlPoints() === 0 ? '路線未被改動 ✅' : '⚠️ 路線的途經點數改變了');
+        log('DONE', '測試完成，請按「停止監控」後複製。');
     }
 
     function PROBE_SETUP() {
-        const vp = vpOf();
-        if (!vp) { log('錯誤', '網址讀不到視野'); return; }
-        log('START', `目前視野 ${vp.lat}, ${vp.lon} @ ${vp.zoom}z`);
-
-        const t0 = performance.now();
-        const found = scan(vp);
-        log('①掃描結果', found.length
-            ? `${found.length} 個狀態物件（耗時 ${Math.round(performance.now() - t0)}ms）\n      ` +
-              found.slice(0, 10).map(f => `${f.path}　${describeWhyLocked(f.obj)}`).join('\n      ')
-            : '找不到任何存著目前中心的物件');
-        if (!found.length) { log('結論', '這條路不通，改用鍵盤方案'); return; }
-
-        // 改在「持有者」上裝設：物件被整個替換時才捕捉得到
-        let ok = 0;
-        _holders = [];
-        for (const f of found) {
-            let current = f.obj;
-            try {
-                Object.defineProperty(f.holder, f.key, {
-                    configurable: true, enumerable: true,
-                    get() { return current; },
-                    set(v) {
-                        if (_armed && v !== current && _hits.length < MAX_STACKS) {
-                            const hit = { path: f.path, stack: briefStack(new Error()) };
-                            _hits.push(hit);
-                            // 即時回報，不要等到「停止監控」才顯示——
-                            // 上一次就是因為結果只在停止時才輸出，使用者點完步驟直接複製，
-                            // 結果一片空白，白跑一輪。
-                            if (!_logging) {
-                                _logging = true;
-                                try {
-                                    log(`③捕捉 #${_hits.length}`, `${hit.path}\n        ${hit.stack}`);
-                                } finally { _logging = false; }
-                            }
-                        }
-                        current = v;
-                    },
-                });
-                _holders.push(f); ok++;
-            } catch (err) { /* 持有者本身也鎖住 */ }
-        }
-        log('②在持有者上裝設', `${ok} / ${found.length} 個成功`);
-        if (!ok) {
-            log('結論', '持有者也無法裝設 → 從外部完全攔不到，改用鍵盤方案');
-            return;
-        }
-        _armed = true;
-        _hits = [];
-        log('READY', '請點一個路線步驟讓地圖移動。結果會即時顯示在下方，不必等停止監控。');
-
-        // 監看視野是否變動，用來分辨「沒動」與「動了但攔不到」
-        let lastKey = (location.href.match(/\/@[^/]+/) || [''])[0];
-        let reported = false;
-        _watchTimer = setInterval(() => {
-            const key = (location.href.match(/\/@[^/]+/) || [''])[0];
-            if (key === lastKey) return;
-            lastKey = key;
-            if (_hits.length === 0 && !reported) {
-                reported = true;
-                log('④判讀', '視野已改變，但完全沒有捕捉到寫入 →\n' +
-                    '      內部持有自己的參照，從外部攔不到。這條路不通，建議改用鍵盤方案。');
-            } else if (_hits.length) {
-                log('④判讀', `視野已改變，且捕捉到 ${_hits.length} 筆寫入 → 上面的堆疊就是入口`);
-            }
-        }, 300);
-        _rrRestore.push(() => clearInterval(_watchTimer));
+        log('START', '開始測試，全程約 90 秒，請勿操作頁面。');
+        runAll().catch(err => log('錯誤', err.message + '\n      ' + String(err.stack || '').slice(0, 200)));
     }
 
     function PROBE_TEARDOWN() {
-        _armed = false;
-        if (_hits.length) {
-            log('③捕捉到替換', `共 ${_hits.length} 筆，列出前 4 筆：`);
-            _hits.slice(0, 4).forEach((h, i) => {
-                log(`  第 ${i + 1} 筆`, `${h.path}\n        ${h.stack}`);
-            });
-            log('判讀', '堆疊裡若出現接收經緯度的函式，那就是相機層的入口');
-        } else {
-            log('③捕捉到替換', '沒有捕捉到任何替換');
-            const vp = vpOf();
-            if (vp) {
-                const again = scan(vp);
-                log('④判讀', again.length
-                    ? '重新掃描仍找得到狀態物件，但替換沒經過我們裝的 setter →'
-                      + ' 內部持有自己的參照，從外部攔不到，改用鍵盤方案'
-                    : '重新掃描已找不到 → 狀態存在閉包裡，改用鍵盤方案');
-            }
-        }
-        _rrRestore.forEach(fn => { try { fn(); } catch (err) { /* 還原失敗不影響停止 */ } });
-        _rrRestore = [];
         _bdpObservers.forEach(mo => mo.disconnect());
         _bdpObservers = [];
         log('STOP', '監控停止');
