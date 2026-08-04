@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         通用診斷面板骨架
 // @namespace    browser-tools
-// @version      1.5
+// @version      1.6
 // @description  可複用的診斷面板骨架（方案 C）：面板 UI + 相對時間戳 + 開始/停止 + 一鍵複製，任務專屬邏輯只需替換「探針區塊」
 // @match        *://*/*
 // @grant        none
@@ -249,78 +249,160 @@
     let _bdpObservers = [];
     let _rrRestore = [];
 
-    // ── 目前任務：讀出 route-rain 的定位診斷，並監看路線是否被改動 ──
+    // ── 目的：弄清楚 Google 自己「平滑移動＋縮放」的觸發鏈路 ──
     //
-    // route-rain 使用 GM_* 授權，跑在沙箱裡，它的 console 輸出在網頁主控台看不到，
-    // 因此改寫進 DOM 屬性（data-rr-log）。本面板是 @grant none、跑在網頁環境，
-    // 可以直接讀那個屬性——使用者只要按開始／停止／複製，不必再手動貼 Console 指令。
+    // 不是驗證「點得動嗎」，而是要看清楚：使用者點下路線步驟之後，
+    // 網頁內部到底發生了什麼，才有機會改成由我們用自己的座標去觸發。
     //
-    // 同時監看網址的 data= 段：點格子時若路線被改動（例如模擬拖曳被誤判為
-    // 「拖曳路線新增途經點」），這裡會立刻顯示前後差異。
+    // 觀察四件事：
+    //   ① 被點的元素本身——jsaction 等屬性會透露 Google 內部的動作名稱
+    //   ② 視野的變化曲線——高頻取樣，看它是連續動畫還是一次跳到位
+    //   ③ 誰改的網址——攔 pushState/replaceState 並抓呼叫堆疊，
+    //      堆疊裡會出現 Google 自己的函式名稱，那是往內挖的入口
+    //   ④ 期間的網路請求與 rAF 次數——判斷動畫是本地算的還是要跟伺服器要資料
+    //
+    // 本腳本是 @grant none，跑在網頁環境（page context）。
+    // 研究網頁內部機制必須在這個環境，沙箱裡看到的是包裝過的副本，
+    // 抓到的堆疊也不是網頁自己的。
 
-    const RR_LOG_ATTR = 'data-rr-log';
-    const RR_DIAG_ATTR = 'data-rr-diag';
-    let _rrSeenLog = '';
-    let _rrRouteKey = '';
-    let _rrTimer = null;
+    const SAMPLE_MS = 50;          // 視野取樣間隔
+    const WATCH_MS = 4000;         // 一次點擊後觀察多久
+    let _samples = [];
+    let _stacks = [];
+    let _rafCount = 0;
+    let _netCount = 0;
+    let _watching = false;
 
-    function rrRouteKeyOf() {
-        return (location.href.match(/\/data=([^?]+)/) || [])[1] || '';
+    function vpOf() {
+        const m = location.href.match(/\/@(-?[\d.]+),(-?[\d.]+),([\d.]+)z/);
+        return m ? { lat: +m[1], lon: +m[2], zoom: +m[3] } : null;
     }
 
-    function rrPretty(line) {
-        try {
-            const o = JSON.parse(line);
-            const step = o.step || '?';
-            const rest = Object.keys(o)
-                .filter(k => k !== 'step' && k !== 't')
-                .map(k => `${k}=${JSON.stringify(o[k])}`)
-                .join('  ');
-            return `${step.padEnd(16)}${rest}`;
-        } catch (err) {
-            return line;
+    /** 只留 Google 自己的框架，濾掉本腳本與瀏覽器內建的堆疊列 */
+    function briefStack(err) {
+        return String(err.stack || '').split('\n')
+            .filter(l => l && !/DiagnosticPanel|briefStack|hookHistory/.test(l))
+            .slice(0, 6)
+            .map(l => l.trim().replace(/https?:\/\/[^\s)]+\//g, '').slice(0, 110))
+            .join('\n        ');
+    }
+
+    function describeElement(el) {
+        const out = [];
+        let n = el, depth = 0;
+        while (n && n.nodeType === 1 && depth < 5) {
+            const attrs = [...n.attributes]
+                .filter(a => /^(class|jsaction|jslog|jsname|data-|aria-|role)/.test(a.name))
+                .map(a => `${a.name}="${a.value.slice(0, 90)}"`)
+                .join(' ');
+            out.push(`  [${depth}] <${n.tagName.toLowerCase()}> ${attrs}`);
+            n = n.parentElement; depth++;
         }
+        return out.join('\n');
+    }
+
+    function startWatch(label, el) {
+        _samples = []; _stacks = []; _rafCount = 0; _netCount = 0;
+        _watching = true;
+        log('▶ 觸發', label + '\n' + describeElement(el));
+
+        const t0 = performance.now();
+        const timer = setInterval(() => {
+            const vp = vpOf();
+            if (vp) _samples.push({ t: Math.round(performance.now() - t0), ...vp });
+            if (performance.now() - t0 >= WATCH_MS) {
+                clearInterval(timer);
+                _watching = false;
+                report();
+            }
+        }, SAMPLE_MS);
+        _rrRestore.push(() => clearInterval(timer));
+    }
+
+    function report() {
+        // 只保留「有變化」的取樣點，看得出動畫的節奏
+        const changed = [];
+        let prev = null;
+        for (const s of _samples) {
+            const key = `${s.lat},${s.lon},${s.zoom}`;
+            if (key !== prev) { changed.push(s); prev = key; }
+        }
+        log('②視野變化', changed.length <= 1
+            ? '整段沒有變化（或只跳一次）'
+            : `${changed.length} 次變化，網址是「持續更新」而非一次到位\n      ` +
+              changed.slice(0, 14).map(s => `${s.t}ms  ${s.lat},${s.lon} @${s.zoom}z`).join('\n      ') +
+              (changed.length > 14 ? `\n      …共 ${changed.length} 筆` : ''));
+
+        if (changed.length >= 2) {
+            const a = changed[0], b = changed[changed.length - 1];
+            log('②總結', `歷時 ${b.t - a.t}ms　zoom ${a.zoom} → ${b.zoom}　` +
+                `中心 ${a.lat},${a.lon} → ${b.lat},${b.lon}`);
+        }
+        log('③改網址的堆疊', _stacks.length
+            ? _stacks.slice(0, 3).map((s, i) => `第 ${i + 1} 次（${s.type}）\n        ${s.stack}`).join('\n      ')
+            : '期間沒有呼叫 pushState／replaceState');
+        log('④其他', `requestAnimationFrame 呼叫 ${_rafCount} 次　網路請求 ${_netCount} 次`);
+        log('DONE', '本次觀察結束。可以再點一個步驟繼續觀察，或按「停止監控」後複製。');
+    }
+
+    function hookHistory() {
+        ['pushState', 'replaceState'].forEach(name => {
+            const orig = history[name];
+            history[name] = function (...args) {
+                if (_watching) {
+                    _stacks.push({ type: name, stack: briefStack(new Error()) });
+                }
+                return orig.apply(this, args);
+            };
+            _rrRestore.push(() => { history[name] = orig; });
+        });
     }
 
     function PROBE_SETUP() {
-        _rrSeenLog = '';
-        _rrRouteKey = rrRouteKeyOf();
-        log('START', '請在 route-rain 的表格上點一格。下方會列出定位的每個階段，' +
-            '並在路線被改動時提出警告。');
-        if (!document.querySelector('[data-rr-btn]')) {
-            log('注意', '找不到 route-rain 的按鈕，請確認腳本已啟用且頁面已重新整理');
-        }
+        log('START', '請先在左側面板展開路線的「詳細資料」，然後點其中一個步驟。');
 
-        _rrTimer = setInterval(() => {
-            // ① 定位診斷
-            const raw = document.documentElement.getAttribute(RR_LOG_ATTR) || '';
-            if (raw && raw !== _rrSeenLog) {
-                const prevLines = _rrSeenLog ? _rrSeenLog.trim().split('\n') : [];
-                const lines = raw.trim().split('\n');
-                // 每次點擊會重置屬性，所以行數變少代表是新的一輪
-                const fresh = lines.length < prevLines.length ? lines : lines.slice(prevLines.length);
-                fresh.filter(Boolean).forEach(l => log('定位', rrPretty(l)));
-                _rrSeenLog = raw;
-            }
+        hookHistory();
 
-            // ② 路線是否被改動
-            const key = rrRouteKeyOf();
-            if (key !== _rrRouteKey) {
-                const before = (_rrRouteKey.match(/3m4/g) || []).length;
-                const after = (key.match(/3m4/g) || []).length;
-                log('⚠路線', `網址的 data= 段改變了　控制點 ${before} → ${after}` +
-                    (after > before ? '　←路線被新增了途經點，這就是「路線跑掉」' : ''));
-                _rrRouteKey = key;
-            }
-        }, 400);
-        _rrRestore.push(() => clearInterval(_rrTimer));
+        const origRaf = window.requestAnimationFrame;
+        window.requestAnimationFrame = function (cb) {
+            if (_watching) _rafCount++;
+            return origRaf.call(window, cb);
+        };
+        _rrRestore.push(() => { window.requestAnimationFrame = origRaf; });
 
-        log('READY', '監看中：route-rain 的定位階段　＋　路線是否被改動');
+        const origFetch = window.fetch;
+        window.fetch = function (...a) { if (_watching) _netCount++; return origFetch.apply(this, a); };
+        _rrRestore.push(() => { window.fetch = origFetch; });
+        const origSend = XMLHttpRequest.prototype.send;
+        XMLHttpRequest.prototype.send = function () { if (_watching) _netCount++; return origSend.apply(this, arguments); };
+        _rrRestore.push(() => { XMLHttpRequest.prototype.send = origSend; });
+
+        // 在捕獲階段監聽，才能在 Google 自己處理之前先記錄下來
+        const onClick = (ev) => {
+            if (_watching) return;                       // 上一次觀察還沒結束
+            const el = ev.target;
+            if (!el || el.nodeType !== 1) return;
+            if (el.closest && el.closest('#bdp-panel')) return;   // 忽略面板自己
+            const txt = (el.textContent || '').trim().slice(0, 40);
+            startWatch(`點擊「${txt || '(無文字)'}」`, el);
+        };
+        document.addEventListener('click', onClick, true);
+        _rrRestore.push(() => document.removeEventListener('click', onClick, true));
+
+        // 順便把疑似「步驟清單」的元素列出來，方便找到要點哪裡
+        const steps = [...document.querySelectorAll('[jsaction]')]
+            .filter(e => /step|direction|maneuver/i.test(e.getAttribute('jsaction') || ''))
+            .slice(0, 12);
+        log('提示', steps.length
+            ? `找到 ${steps.length} 個 jsaction 含 step/direction 的元素：\n      ` +
+              steps.map(e => (e.getAttribute('jsaction') || '').slice(0, 80)).join('\n      ')
+            : '目前找不到明顯的步驟元素，請先展開「詳細資料」再開始監控');
+
+        log('READY', '監聽就緒。點一個路線步驟，會自動記錄 4 秒內的變化。');
     }
 
     function PROBE_TEARDOWN() {
-        const last = document.documentElement.getAttribute(RR_DIAG_ATTR);
-        if (last) log('最後狀態', rrPretty(last));
+        _watching = false;
         _rrRestore.forEach(fn => { try { fn(); } catch (err) { /* 還原失敗不影響停止 */ } });
         _rrRestore = [];
         _bdpObservers.forEach(mo => mo.disconnect());
