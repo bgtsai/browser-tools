@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         通用診斷面板骨架
 // @namespace    browser-tools
-// @version      1.7
+// @version      1.8
 // @description  可複用的診斷面板骨架（方案 C）：面板 UI + 相對時間戳 + 開始/停止 + 一鍵複製，任務專屬邏輯只需替換「探針區塊」
 // @match        *://*/*
 // @grant        none
@@ -249,24 +249,24 @@
     let _bdpObservers = [];
     let _rrRestore = [];
 
-    // ── 目的：找出「用經緯度驅動相機」的那個入口 ──
+    // ── 目的：最後一次嘗試找出相機層的入口 ──
     //
-    // 為什麼不從點擊步驟往下追：那條路只追得到「動畫結束後寫網址」的下游函式（eyh），
-    // 中間全是混淆名稱，逐層往上挖既慢又脆弱。
+    // 上一版在 window._.aP 的座標屬性上裝 setter 失敗（0 個成功）。
+    // 這一版做三件事，把「為什麼失敗」與「還有沒有別的路」一次問清楚：
+    //   ① 診斷失敗原因——凍結？封裝？屬性不可設定？
+    //      若是凍結，代表 Google 每次是「換一個新的狀態物件」而非改寫舊的，
+    //      那就該往上一層裝設。
+    //   ② 改在「持有者」上裝 setter（window._ 的 aP 這個屬性本身），
+    //      物件被替換時就能捕捉到呼叫堆疊。
+    //   ③ 擴大搜尋範圍——深度加到 5，並加入畫布與其祖先的自訂屬性
+    //      （框架常把控制器掛在 DOM 元素上）。
     //
-    // 改從資料端切入：先前用數值特徵找到 window._.aP 存著目前的地圖中心
-    // （屬性值剛好等於網址裡的經緯度）。方法名稱可以混淆，但**存著的座標騙不了人**。
-    // 這次在那些物件上裝設 setter，等使用者點一個步驟時，
-    // 誰寫入新的座標就會連同呼叫堆疊一起被記錄下來——那才是相機層。
-    //
-    // 判斷成敗的標準：
-    //   ・堆疊裡出現「接收經緯度」的函式 → 有機會直接呼叫，繼續挖
-    //   ・座標變了但 setter 沒觸發 → 物件是被整個替換的，這條路不通，改用鍵盤方案
+    // 這是這條路線的最後一次嘗試。若仍拿不到可呼叫的入口，就轉向鍵盤方案。
 
-    const TOL = 0.02;              // 判定「這個數字就是目前中心座標」的容差
-    const MAX_TARGETS = 40;        // 最多裝設幾個物件
-    const MAX_STACKS = 25;         // 最多記錄幾筆堆疊
-    let _targets = [];
+    const TOL = 0.02;
+    const MAX_TARGETS = 60;
+    const MAX_STACKS = 25;
+    let _holders = [];
     let _hits = [];
     let _armed = false;
 
@@ -274,129 +274,137 @@
         const m = location.href.match(/\/@(-?[\d.]+),(-?[\d.]+),([\d.]+)z/);
         return m ? { lat: +m[1], lon: +m[2], zoom: +m[3] } : null;
     }
-
     function briefStack(err) {
         return String(err.stack || '').split('\n')
-            .filter(l => l && !/DiagnosticPanel|briefStack|instrument|<anonymous>:/.test(l))
+            .filter(l => l && !/DiagnosticPanel|briefStack|<anonymous>:/.test(l))
             .slice(0, 8)
             .map(l => l.trim().replace(/https?:\/\/[^\s)]+\//g, '').slice(0, 100))
             .join('\n        ');
     }
+    /** 這個物件是不是「存著目前地圖中心」 */
+    function holdsCentre(obj, vp) {
+        let keys;
+        try { keys = Object.getOwnPropertyNames(obj); } catch (err) { return null; }
+        if (keys.length > 40) return null;
+        let latKey = null, lonKey = null;
+        for (const k of keys) {
+            let v;
+            try { v = obj[k]; } catch (err) { continue; }
+            if (typeof v !== 'number' || !isFinite(v)) continue;
+            if (latKey === null && Math.abs(v - vp.lat) < TOL) latKey = k;
+            if (lonKey === null && Math.abs(v - vp.lon) < TOL) lonKey = k;
+        }
+        return (latKey !== null && lonKey !== null) ? { latKey, lonKey } : null;
+    }
 
-    /** 用數值特徵找出「存著目前地圖中心」的物件——名稱會混淆，座標不會 */
-    function findCameraStateObjects(vp) {
+    /** 掃描：回傳 [{holder, key, obj, path}]——holder[key] 就是那個狀態物件 */
+    function scan(vp) {
         const seen = new WeakSet();
         const found = [];
-        const visit = (obj, path, depth) => {
-            if (!obj || depth > 4 || found.length >= MAX_TARGETS) return;
+        const visit = (obj, path, depth, holder, key) => {
+            if (!obj || depth > 5 || found.length >= MAX_TARGETS) return;
             const t = typeof obj;
             if (t !== 'object' && t !== 'function') return;
             if (seen.has(obj)) return;
             seen.add(obj);
+            if (holder && holdsCentre(obj, vp)) found.push({ holder, key, obj, path });
+            if (depth >= 5) return;
             let keys;
             try { keys = Object.getOwnPropertyNames(obj); } catch (err) { return; }
-            if (keys.length <= 40) {
-                const latKeys = [], lonKeys = [];
-                for (const k of keys) {
-                    let v;
-                    try { v = obj[k]; } catch (err) { continue; }
-                    if (typeof v !== 'number' || !isFinite(v)) continue;
-                    if (Math.abs(v - vp.lat) < TOL) latKeys.push(k);
-                    if (Math.abs(v - vp.lon) < TOL) lonKeys.push(k);
-                }
-                if (latKeys.length && lonKeys.length) {
-                    found.push({ obj, path, latKey: latKeys[0], lonKey: lonKeys[0] });
-                }
-            }
-            if (depth >= 4) return;
             for (const k of keys) {
                 if (/^(window|self|top|parent|frames|document|location|history)$/.test(k)) continue;
                 let v;
                 try { v = obj[k]; } catch (err) { continue; }
                 if (v && (typeof v === 'object' || typeof v === 'function')) {
-                    visit(v, path + '.' + k, depth + 1);
+                    visit(v, path + '.' + k, depth + 1, obj, k);
                 }
             }
         };
-        // 從 window 與 Closure 的命名空間 window._ 兩處出發
-        visit(window, 'window', 0);
-        if (window._) visit(window._, 'window._', 0);
+        visit(window, 'window', 0, null, null);
+        if (window._) visit(window._, 'window._', 0, null, null);
+        // 框架常把控制器掛在 DOM 元素上，畫布與其祖先一併掃
+        const cv = [...document.querySelectorAll('canvas')]
+            .map(el => ({ el, r: el.getBoundingClientRect() }))
+            .filter(o => o.r.width > 200 && o.r.height > 200)
+            .sort((a, b) => b.r.width * b.r.height - a.r.width * a.r.height)[0];
+        if (cv) {
+            let n = cv.el, d = 0;
+            while (n && d < 5) { visit(n, `canvas祖先[${d}]`, 3, null, null); n = n.parentElement; d++; }
+        }
         return found;
     }
 
-    /** 在座標屬性上裝 setter：誰寫入新值，就把呼叫堆疊記下來 */
-    function instrument(target) {
-        let ok = 0;
-        for (const key of [target.latKey, target.lonKey]) {
-            let current;
-            try { current = target.obj[key]; } catch (err) { continue; }
-            try {
-                Object.defineProperty(target.obj, key, {
-                    configurable: true,
-                    enumerable: true,
-                    get() { return current; },
-                    set(v) {
-                        if (_armed && v !== current && _hits.length < MAX_STACKS) {
-                            _hits.push({
-                                path: target.path, key,
-                                from: current, to: v,
-                                stack: briefStack(new Error()),
-                            });
-                        }
-                        current = v;
-                    },
-                });
-                ok++;
-            } catch (err) { /* 不可設定的屬性，略過 */ }
-        }
-        return ok;
+    function describeWhyLocked(obj) {
+        const bits = [];
+        if (Object.isFrozen(obj)) bits.push('已凍結(frozen)');
+        else if (Object.isSealed(obj)) bits.push('已封裝(sealed)');
+        else if (!Object.isExtensible(obj)) bits.push('不可擴充');
+        const d = Object.getOwnPropertyDescriptor(obj, Object.getOwnPropertyNames(obj)[0]);
+        if (d) bits.push(`首個屬性 writable=${d.writable} configurable=${d.configurable}`);
+        return bits.join('　') || '沒有明顯的鎖定';
     }
 
     function PROBE_SETUP() {
         const vp = vpOf();
-        if (!vp) { log('錯誤', '網址讀不到視野，請先在地圖上規劃路線'); return; }
-        log('START', `目前視野 ${vp.lat}, ${vp.lon} @ ${vp.zoom}z　開始尋找存著這組座標的物件…`);
+        if (!vp) { log('錯誤', '網址讀不到視野'); return; }
+        log('START', `目前視野 ${vp.lat}, ${vp.lon} @ ${vp.zoom}z`);
 
         const t0 = performance.now();
-        _targets = findCameraStateObjects(vp);
-        log('①找到的候選', _targets.length
-            ? `${_targets.length} 個（耗時 ${Math.round(performance.now() - t0)}ms）\n      ` +
-              _targets.slice(0, 12).map(t => `${t.path}  {${t.latKey}:lat, ${t.lonKey}:lon}`).join('\n      ')
-            : '找不到——可能座標存在閉包裡，從外部拿不到');
+        const found = scan(vp);
+        log('①掃描結果', found.length
+            ? `${found.length} 個狀態物件（耗時 ${Math.round(performance.now() - t0)}ms）\n      ` +
+              found.slice(0, 10).map(f => `${f.path}　${describeWhyLocked(f.obj)}`).join('\n      ')
+            : '找不到任何存著目前中心的物件');
+        if (!found.length) { log('結論', '這條路不通，改用鍵盤方案'); return; }
 
-        let armedCount = 0;
-        _targets.forEach(t => { armedCount += instrument(t); });
-        log('②裝設結果', `成功在 ${armedCount} 個屬性上裝了 setter`);
-        if (!armedCount) {
-            log('結論', '無法裝設（屬性不可設定）→ 這條路不通，建議改用鍵盤方案');
+        // 改在「持有者」上裝設：物件被整個替換時才捕捉得到
+        let ok = 0;
+        _holders = [];
+        for (const f of found) {
+            let current = f.obj;
+            try {
+                Object.defineProperty(f.holder, f.key, {
+                    configurable: true, enumerable: true,
+                    get() { return current; },
+                    set(v) {
+                        if (_armed && v !== current && _hits.length < MAX_STACKS) {
+                            let c = null;
+                            try { c = holdsCentre(v, { lat: 0, lon: 0 }); } catch (err) { /* 忽略 */ }
+                            _hits.push({ path: f.path, stack: briefStack(new Error()) });
+                        }
+                        current = v;
+                    },
+                });
+                _holders.push(f); ok++;
+            } catch (err) { /* 持有者本身也鎖住 */ }
+        }
+        log('②在持有者上裝設', `${ok} / ${found.length} 個成功`);
+        if (!ok) {
+            log('結論', '持有者也無法裝設 → 從外部完全攔不到，改用鍵盤方案');
             return;
         }
-
         _armed = true;
         _hits = [];
-        log('READY', '請點一個路線步驟（或任何會讓地圖平移的操作），' +
-            '然後按「停止監控」看結果。');
+        log('READY', '請點一個路線步驟讓地圖移動，然後按「停止監控」。');
     }
 
     function PROBE_TEARDOWN() {
         _armed = false;
-        const vp = vpOf();
         if (_hits.length) {
-            log('③誰寫入了座標', `共捕捉 ${_hits.length} 筆，列出前 5 筆：`);
-            _hits.slice(0, 5).forEach((h, i) => {
-                log(`  第 ${i + 1} 筆`,
-                    `${h.path}.${h.key}　${Number(h.from).toFixed(5)} → ${Number(h.to).toFixed(5)}\n        ${h.stack}`);
+            log('③捕捉到替換', `共 ${_hits.length} 筆，列出前 4 筆：`);
+            _hits.slice(0, 4).forEach((h, i) => {
+                log(`  第 ${i + 1} 筆`, `${h.path}\n        ${h.stack}`);
             });
+            log('判讀', '堆疊裡若出現接收經緯度的函式，那就是相機層的入口');
         } else {
-            log('③誰寫入了座標', '完全沒有捕捉到寫入。');
-            // 分辨兩種可能：根本沒動，或物件被整個替換掉
+            log('③捕捉到替換', '沒有捕捉到任何替換');
+            const vp = vpOf();
             if (vp) {
-                const again = findCameraStateObjects(vp);
-                const stillSame = again.some(a => _targets.some(t => t.obj === a.obj));
-                log('④判讀', stillSame
-                    ? '原物件仍存著最新座標，但沒觸發 setter → 可能是用內部欄位直接改寫'
-                    : '原物件已不再存著最新座標 → 物件是被整個替換的，'
-                      + '從外部裝設無效，這條路不通');
+                const again = scan(vp);
+                log('④判讀', again.length
+                    ? '重新掃描仍找得到狀態物件，但替換沒經過我們裝的 setter →'
+                      + ' 內部持有自己的參照，從外部攔不到，改用鍵盤方案'
+                    : '重新掃描已找不到 → 狀態存在閉包裡，改用鍵盤方案');
             }
         }
         _rrRestore.forEach(fn => { try { fn(); } catch (err) { /* 還原失敗不影響停止 */ } });
