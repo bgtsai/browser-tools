@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         通用診斷面板骨架
 // @namespace    browser-tools
-// @version      1.8
+// @version      1.9
 // @description  可複用的診斷面板骨架（方案 C）：面板 UI + 相對時間戳 + 開始/停止 + 一鍵複製，任務專屬邏輯只需替換「探針區塊」
 // @match        *://*/*
 // @grant        none
@@ -269,6 +269,8 @@
     let _holders = [];
     let _hits = [];
     let _armed = false;
+    let _logging = false;      // 防止在 setter 裡呼叫 log 造成遞迴
+    let _watchTimer = null;
 
     function vpOf() {
         const m = location.href.match(/\/@(-?[\d.]+),(-?[\d.]+),([\d.]+)z/);
@@ -368,9 +370,17 @@
                     get() { return current; },
                     set(v) {
                         if (_armed && v !== current && _hits.length < MAX_STACKS) {
-                            let c = null;
-                            try { c = holdsCentre(v, { lat: 0, lon: 0 }); } catch (err) { /* 忽略 */ }
-                            _hits.push({ path: f.path, stack: briefStack(new Error()) });
+                            const hit = { path: f.path, stack: briefStack(new Error()) };
+                            _hits.push(hit);
+                            // 即時回報，不要等到「停止監控」才顯示——
+                            // 上一次就是因為結果只在停止時才輸出，使用者點完步驟直接複製，
+                            // 結果一片空白，白跑一輪。
+                            if (!_logging) {
+                                _logging = true;
+                                try {
+                                    log(`③捕捉 #${_hits.length}`, `${hit.path}\n        ${hit.stack}`);
+                                } finally { _logging = false; }
+                            }
                         }
                         current = v;
                     },
@@ -385,7 +395,24 @@
         }
         _armed = true;
         _hits = [];
-        log('READY', '請點一個路線步驟讓地圖移動，然後按「停止監控」。');
+        log('READY', '請點一個路線步驟讓地圖移動。結果會即時顯示在下方，不必等停止監控。');
+
+        // 監看視野是否變動，用來分辨「沒動」與「動了但攔不到」
+        let lastKey = (location.href.match(/\/@[^/]+/) || [''])[0];
+        let reported = false;
+        _watchTimer = setInterval(() => {
+            const key = (location.href.match(/\/@[^/]+/) || [''])[0];
+            if (key === lastKey) return;
+            lastKey = key;
+            if (_hits.length === 0 && !reported) {
+                reported = true;
+                log('④判讀', '視野已改變，但完全沒有捕捉到寫入 →\n' +
+                    '      內部持有自己的參照，從外部攔不到。這條路不通，建議改用鍵盤方案。');
+            } else if (_hits.length) {
+                log('④判讀', `視野已改變，且捕捉到 ${_hits.length} 筆寫入 → 上面的堆疊就是入口`);
+            }
+        }, 300);
+        _rrRestore.push(() => clearInterval(_watchTimer));
     }
 
     function PROBE_TEARDOWN() {
