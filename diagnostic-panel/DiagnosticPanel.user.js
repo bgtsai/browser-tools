@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         通用診斷面板骨架
 // @namespace    browser-tools
-// @version      2.0
-// @description  診斷面板骨架：面板 UI + 相對時間戳 + 開始/停止 + 一鍵複製；任務專屬邏輯只需替換「探針區塊」。目前任務：Google Maps 拖曳精度
+// @version      2.1
+// @description  診斷面板骨架：面板 UI + 相對時間戳 + 開始/停止 + 一鍵複製；任務專屬邏輯只需替換「探針區塊」。目前任務：驗證拖曳的補償公式
 // @match        https://www.google.com/maps/*
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -264,24 +264,22 @@
 
     let _bdpObservers = [];
 
-    // ── 目前任務：驗證「拖曳少掉第一格」的假設，並找出正確的補償方式 ──
+    // ── 目前任務：驗證補償公式 S = dx × N/(N−1) 能否讓拖曳精準到位 ──
     //
-    // 實測：要求 400px、分 16 格送出，三次都精準地只移動 374px（達成率 94%）。
-    //   400 ÷ 16 = 25px/格　　400 − 25 = 375px　≈ 實測 374px
-    // 推論：第一個 pointermove 被當成「拖曳開始」的判定，它的位移不被套用。
+    // 已確立的事實（上一輪三個資料點、零誤差）：
+    //   拖曳分 N 格送出時，**第一格的位移不會被套用**，實際到位 = 送出量 × (N−1)/N
+    //   8 格 → 87.5%（7/8）　16 格 → 93.8%（15/16）　32 格 → 97.0%（31/32）
     //
-    // 這個推論可以證偽：若成立，損失量恆等於「一格」，
-    // 因此格數越多、每格越小、達成率越高——
-    //   8 格 → 約 87.5%　16 格 → 約 94%　32 格 → 約 97%
-    // 若三者達成率相同，推論就是錯的，得另尋原因。
+    // 因此要讓實際到位等於目標 dx，送出量應為 dx × N/(N−1)。
+    // 本輪驗證這個公式在不同格數、不同距離、不同縮放層級下都成立。
     //
-    // 同時驗證修法：pointerdown 之後先在原位補送一個零位移的 pointermove，
-    // 把「拖曳開始」那一格消耗掉，後續每格就都會被完整套用。
-    //
-    // 另外順帶確認縮放層級是否影響達成率（理論上不影響，位移是螢幕像素）。
+    // 判讀條件這次設**雙邊**：|達成率 − 100| ≤ 2 才算通過。
+    // 上一輪寫成 pct >= 98 而沒有上限，結果把 112.5% 也判成「接近 100%」——
+    // 判斷條件比實際要求寬鬆，等於沒有檢查。
 
     const W = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
     const POINTER_ID = 10088;
+    const FRAME_MS = 16;
     const sleep = ms => new Promise(r => setTimeout(r, ms));
 
     function viewport() {
@@ -304,11 +302,11 @@
         const p2 = projectPx(b.lat, b.lon, a.zoom);
         return Math.round(Math.hypot(p2.x - p1.x, p2.y - p1.y));
     }
-    /** 網址落後真實視野，所以它一變就代表動作已完成——這是可靠的完成訊號 */
+    /** 網址落後真實視野，所以它一變就代表動作已完成 */
     async function waitUrlChange(prevKey, timeoutMs) {
         const t0 = performance.now();
-        while (performance.now() - t0 < (timeoutMs || 4000)) {
-            if (vpKey() !== prevKey) { await sleep(250); return Math.round(performance.now() - t0); }
+        while (performance.now() - t0 < (timeoutMs || 5000)) {
+            if (vpKey() !== prevKey) { await sleep(300); return Math.round(performance.now() - t0); }
             await sleep(60);
         }
         return -1;
@@ -328,108 +326,112 @@
             { pointerId: POINTER_ID, isPrimary: true, pointerType: 'mouse' }, opts)));
     }
 
-    async function drag(canvas, dx, dy, frames, frameMs, primeFirst) {
+    /**
+     * 拖曳。compensate=true 時把送出量放大為 dx × N/(N−1)，
+     * 抵銷「第一格不被套用」的損失。
+     */
+    async function drag(canvas, dx, dy, frames, compensate) {
+        const factor = compensate ? frames / (frames - 1) : 1;
+        const sx = dx * factor, sy = dy * factor;
         const r = canvas.getBoundingClientRect();
-        const x = r.left + r.width * 0.75;     // 往左拖，從右側按下，行程才夠
+        // 往左拖就從右側按下，行程才夠；反之亦然
+        const x = r.left + r.width * (sx < 0 ? 0.78 : 0.22);
         const y = r.top + r.height * 0.5;
         const base = { bubbles: true, cancelable: true, view: W, button: 0, buttons: 1 };
         fire(canvas, 'mousedown', 'pointerdown',
             Object.assign({}, base, { detail: 1, clientX: x, clientY: y }));
-        if (primeFirst) {
-            // 在原位補一格零位移，把「拖曳開始」的判定消耗掉
-            fire(canvas, 'mousemove', 'pointermove',
-                Object.assign({}, base, { cancelable: false, detail: 88, clientX: x, clientY: y }));
-            await sleep(frameMs);
-        }
         for (let i = 1; i <= frames; i++) {
             fire(canvas, 'mousemove', 'pointermove', Object.assign({}, base,
-                { cancelable: false, detail: 88, clientX: x + dx * i / frames, clientY: y + dy * i / frames }));
-            await sleep(frameMs);
+                { cancelable: false, detail: 88,
+                  clientX: x + sx * i / frames, clientY: y + sy * i / frames }));
+            await sleep(FRAME_MS);
         }
-        const ex = x + dx, ey = y + dy;
-        // 放開前在原位再送一次 move：速度歸零，不會觸發慣性滑行
+        const ex = x + sx, ey = y + sy;
+        // 放開前在原位再送一次 move：速度歸零，不觸發慣性滑行
         fire(canvas, 'mousemove', 'pointermove',
             Object.assign({}, base, { cancelable: false, detail: 88, clientX: ex, clientY: ey }));
         fire(canvas, 'mouseup', 'pointerup',
             Object.assign({}, base, { detail: 1, buttons: 0, clientX: ex, clientY: ey }));
     }
 
-    /** 拖過去、量一次、再拖回來，避免位置漂移影響下一輪 */
-    async function measure(canvas, dxPx, frames, primeFirst) {
+    /** 拖過去量一次，再拖回來復位，避免位置漂移影響下一輪 */
+    async function measure(canvas, dxPx, frames, compensate) {
         const v0 = viewport(), key0 = vpKey();
-        await drag(canvas, dxPx, 0, frames, 16, primeFirst);
-        await waitUrlChange(key0, 4000);
+        await drag(canvas, dxPx, 0, frames, compensate);
+        await waitUrlChange(key0, 5000);
         const moved = shiftPx(v0, viewport());
         await sleep(300);
         const keyBack = vpKey();
-        await drag(canvas, -dxPx, 0, frames, 16, primeFirst);
-        await waitUrlChange(keyBack, 4000);
+        await drag(canvas, -dxPx, 0, frames, compensate);
+        await waitUrlChange(keyBack, 5000);
         await sleep(300);
         return { moved, pct: Math.round(moved / Math.abs(dxPx) * 1000) / 10 };
     }
+
+    /** |達成率 − 100| ≤ 2 才算通過——雙邊判斷，超過與不足都不行 */
+    const verdict = pct => (Math.abs(pct - 100) <= 2 ? '✅' : '❌');
 
     async function wheelZoom(canvas, levels) {
         const WE = W.WheelEvent || WheelEvent;
         const r = canvas.getBoundingClientRect();
         const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
         const events = Math.max(1, Math.round(Math.abs(levels) / 0.32));
+        const key0 = vpKey();
         for (let i = 0; i < events; i++) {
             canvas.dispatchEvent(new WE('wheel', {
                 bubbles: true, cancelable: true, view: W,
                 clientX: cx, clientY: cy, deltaY: (levels > 0 ? -120 : 120), deltaMode: 0,
             }));
-            await sleep(50);       // 實測：低於 30ms 會被整批忽略
+            await sleep(50);            // 實測：低於 30ms 會被整批忽略
         }
-        await sleep(900);
+        // 上一輪就是縮放後只等 900ms 就開始拖曳，量到動畫還沒結束的混合結果。
+        // 這次等網址真的改變，再多留一段時間讓動畫完全停下。
+        await waitUrlChange(key0, 5000);
+        await sleep(800);
     }
 
     async function runAll() {
         const canvas = mapCanvas();
         if (!canvas) { log('錯誤', '找不到地圖畫布'); return; }
-        const DX = -400;
         log('環境', `畫布 ${Math.round(canvas.r.width)}x${Math.round(canvas.r.height)}　` +
             `視野 ${JSON.stringify(viewport())}　控制點 ${ctrlPoints()} 個`);
 
-        // ① 格數假設：損失若恆為「一格」，達成率應隨格數上升
-        log('──', '① 不同格數（要求 400px）');
-        const table = [];
+        const results = [];
+
+        log('──', '① 不同格數（要求 400px，已補償）');
         for (const frames of [8, 16, 32]) {
-            const r = await measure(canvas.el, DX, frames, false);
-            const predicted = Math.round((1 - 1 / frames) * 1000) / 10;
-            table.push({ frames, ...r, predicted });
-            log(`①${frames} 格`, `位移 ${r.moved}px　達成率 ${r.pct}%　` +
-                `（假設預測 ${predicted}%，差 ${Math.round(Math.abs(r.pct - predicted) * 10) / 10}%）`);
-        }
-        const maxDiff = Math.max(...table.map(t => Math.abs(t.pct - t.predicted)));
-        const spread = Math.max(...table.map(t => t.pct)) - Math.min(...table.map(t => t.pct));
-        log('①判讀', maxDiff <= 2
-            ? '✅ 與預測吻合 → 確實是少掉第一格，補一格即可修正'
-            : (spread <= 2
-                ? '❌ 三種格數達成率幾乎相同 → 損失與格數無關，假設錯誤，另有原因'
-                : `⚠️ 有差異但不符預測（最大偏離 ${Math.round(maxDiff * 10) / 10}%），需再分析`));
-
-        // ② 驗證修法
-        log('──', '② 加上「補一格空移動」');
-        for (const frames of [8, 16]) {
-            const r = await measure(canvas.el, DX, frames, true);
-            log(`②${frames} 格＋補一格`, `位移 ${r.moved}px　達成率 ${r.pct}%　` +
-                (r.pct >= 98 ? '✅ 接近 100%' : '仍有落差'));
+            const r = await measure(canvas.el, -400, frames, true);
+            results.push(r.pct);
+            log(`①${frames} 格`, `送出 ${Math.round(400 * frames / (frames - 1))}px　` +
+                `實際 ${r.moved}px　達成率 ${r.pct}%　${verdict(r.pct)}`);
         }
 
-        // ③ 縮放層級是否影響（理論上不影響，位移是螢幕像素）
-        log('──', '③ 換一個縮放層級再測（16 格＋補一格）');
+        log('──', '② 不同距離（16 格，已補償）');
+        for (const dist of [150, 700]) {
+            const r = await measure(canvas.el, -dist, 16, true);
+            results.push(r.pct);
+            log(`②${dist}px`, `實際 ${r.moved}px　達成率 ${r.pct}%　${verdict(r.pct)}`);
+        }
+
+        log('──', '③ 換縮放層級（16 格，已補償）');
         await wheelZoom(canvas.el, -2);
         const zoomed = viewport();
-        const r3 = await measure(canvas.el, DX, 16, true);
-        log('③縮小 2 級後', `zoom=${zoomed ? zoomed.zoom : '?'}　位移 ${r3.moved}px　達成率 ${r3.pct}%`);
+        const r3 = await measure(canvas.el, -400, 16, true);
+        results.push(r3.pct);
+        log('③縮小 2 級後', `zoom=${zoomed ? zoomed.zoom : '?'}　實際 ${r3.moved}px　` +
+            `達成率 ${r3.pct}%　${verdict(r3.pct)}`);
         await wheelZoom(canvas.el, 2);
 
+        const worst = Math.max(...results.map(p => Math.abs(p - 100)));
+        log('總結', worst <= 2
+            ? `✅ 全部通過，最大偏離 ${Math.round(worst * 10) / 10}% → 補償公式成立，可套入 route-rain`
+            : `❌ 最大偏離 ${Math.round(worst * 10) / 10}%，公式在某些情況下不成立，需再分析`);
         log('④副作用', ctrlPoints() === 0 ? '路線未被改動 ✅' : '⚠️ 路線的途經點數改變了');
         log('DONE', '測試完成，請按「停止監控」後複製。');
     }
 
     function PROBE_SETUP() {
-        log('START', '開始測試，全程約 90 秒，請勿操作頁面。');
+        log('START', '開始驗證補償公式，全程約 90 秒，請勿操作頁面。');
         runAll().catch(err => log('錯誤', err.message + '\n      ' + String(err.stack || '').slice(0, 200)));
     }
 
