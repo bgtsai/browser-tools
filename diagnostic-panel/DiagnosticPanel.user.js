@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         通用診斷面板骨架
 // @namespace    browser-tools
-// @version      1.6
+// @version      1.7
 // @description  可複用的診斷面板骨架（方案 C）：面板 UI + 相對時間戳 + 開始/停止 + 一鍵複製，任務專屬邏輯只需替換「探針區塊」
 // @match        *://*/*
 // @grant        none
@@ -249,160 +249,156 @@
     let _bdpObservers = [];
     let _rrRestore = [];
 
-    // ── 目的：弄清楚 Google 自己「平滑移動＋縮放」的觸發鏈路 ──
+    // ── 目的：找出「用經緯度驅動相機」的那個入口 ──
     //
-    // 不是驗證「點得動嗎」，而是要看清楚：使用者點下路線步驟之後，
-    // 網頁內部到底發生了什麼，才有機會改成由我們用自己的座標去觸發。
+    // 為什麼不從點擊步驟往下追：那條路只追得到「動畫結束後寫網址」的下游函式（eyh），
+    // 中間全是混淆名稱，逐層往上挖既慢又脆弱。
     //
-    // 觀察四件事：
-    //   ① 被點的元素本身——jsaction 等屬性會透露 Google 內部的動作名稱
-    //   ② 視野的變化曲線——高頻取樣，看它是連續動畫還是一次跳到位
-    //   ③ 誰改的網址——攔 pushState/replaceState 並抓呼叫堆疊，
-    //      堆疊裡會出現 Google 自己的函式名稱，那是往內挖的入口
-    //   ④ 期間的網路請求與 rAF 次數——判斷動畫是本地算的還是要跟伺服器要資料
+    // 改從資料端切入：先前用數值特徵找到 window._.aP 存著目前的地圖中心
+    // （屬性值剛好等於網址裡的經緯度）。方法名稱可以混淆，但**存著的座標騙不了人**。
+    // 這次在那些物件上裝設 setter，等使用者點一個步驟時，
+    // 誰寫入新的座標就會連同呼叫堆疊一起被記錄下來——那才是相機層。
     //
-    // 本腳本是 @grant none，跑在網頁環境（page context）。
-    // 研究網頁內部機制必須在這個環境，沙箱裡看到的是包裝過的副本，
-    // 抓到的堆疊也不是網頁自己的。
+    // 判斷成敗的標準：
+    //   ・堆疊裡出現「接收經緯度」的函式 → 有機會直接呼叫，繼續挖
+    //   ・座標變了但 setter 沒觸發 → 物件是被整個替換的，這條路不通，改用鍵盤方案
 
-    const SAMPLE_MS = 50;          // 視野取樣間隔
-    const WATCH_MS = 4000;         // 一次點擊後觀察多久
-    let _samples = [];
-    let _stacks = [];
-    let _rafCount = 0;
-    let _netCount = 0;
-    let _watching = false;
+    const TOL = 0.02;              // 判定「這個數字就是目前中心座標」的容差
+    const MAX_TARGETS = 40;        // 最多裝設幾個物件
+    const MAX_STACKS = 25;         // 最多記錄幾筆堆疊
+    let _targets = [];
+    let _hits = [];
+    let _armed = false;
 
     function vpOf() {
         const m = location.href.match(/\/@(-?[\d.]+),(-?[\d.]+),([\d.]+)z/);
         return m ? { lat: +m[1], lon: +m[2], zoom: +m[3] } : null;
     }
 
-    /** 只留 Google 自己的框架，濾掉本腳本與瀏覽器內建的堆疊列 */
     function briefStack(err) {
         return String(err.stack || '').split('\n')
-            .filter(l => l && !/DiagnosticPanel|briefStack|hookHistory/.test(l))
-            .slice(0, 6)
-            .map(l => l.trim().replace(/https?:\/\/[^\s)]+\//g, '').slice(0, 110))
+            .filter(l => l && !/DiagnosticPanel|briefStack|instrument|<anonymous>:/.test(l))
+            .slice(0, 8)
+            .map(l => l.trim().replace(/https?:\/\/[^\s)]+\//g, '').slice(0, 100))
             .join('\n        ');
     }
 
-    function describeElement(el) {
-        const out = [];
-        let n = el, depth = 0;
-        while (n && n.nodeType === 1 && depth < 5) {
-            const attrs = [...n.attributes]
-                .filter(a => /^(class|jsaction|jslog|jsname|data-|aria-|role)/.test(a.name))
-                .map(a => `${a.name}="${a.value.slice(0, 90)}"`)
-                .join(' ');
-            out.push(`  [${depth}] <${n.tagName.toLowerCase()}> ${attrs}`);
-            n = n.parentElement; depth++;
-        }
-        return out.join('\n');
-    }
-
-    function startWatch(label, el) {
-        _samples = []; _stacks = []; _rafCount = 0; _netCount = 0;
-        _watching = true;
-        log('▶ 觸發', label + '\n' + describeElement(el));
-
-        const t0 = performance.now();
-        const timer = setInterval(() => {
-            const vp = vpOf();
-            if (vp) _samples.push({ t: Math.round(performance.now() - t0), ...vp });
-            if (performance.now() - t0 >= WATCH_MS) {
-                clearInterval(timer);
-                _watching = false;
-                report();
-            }
-        }, SAMPLE_MS);
-        _rrRestore.push(() => clearInterval(timer));
-    }
-
-    function report() {
-        // 只保留「有變化」的取樣點，看得出動畫的節奏
-        const changed = [];
-        let prev = null;
-        for (const s of _samples) {
-            const key = `${s.lat},${s.lon},${s.zoom}`;
-            if (key !== prev) { changed.push(s); prev = key; }
-        }
-        log('②視野變化', changed.length <= 1
-            ? '整段沒有變化（或只跳一次）'
-            : `${changed.length} 次變化，網址是「持續更新」而非一次到位\n      ` +
-              changed.slice(0, 14).map(s => `${s.t}ms  ${s.lat},${s.lon} @${s.zoom}z`).join('\n      ') +
-              (changed.length > 14 ? `\n      …共 ${changed.length} 筆` : ''));
-
-        if (changed.length >= 2) {
-            const a = changed[0], b = changed[changed.length - 1];
-            log('②總結', `歷時 ${b.t - a.t}ms　zoom ${a.zoom} → ${b.zoom}　` +
-                `中心 ${a.lat},${a.lon} → ${b.lat},${b.lon}`);
-        }
-        log('③改網址的堆疊', _stacks.length
-            ? _stacks.slice(0, 3).map((s, i) => `第 ${i + 1} 次（${s.type}）\n        ${s.stack}`).join('\n      ')
-            : '期間沒有呼叫 pushState／replaceState');
-        log('④其他', `requestAnimationFrame 呼叫 ${_rafCount} 次　網路請求 ${_netCount} 次`);
-        log('DONE', '本次觀察結束。可以再點一個步驟繼續觀察，或按「停止監控」後複製。');
-    }
-
-    function hookHistory() {
-        ['pushState', 'replaceState'].forEach(name => {
-            const orig = history[name];
-            history[name] = function (...args) {
-                if (_watching) {
-                    _stacks.push({ type: name, stack: briefStack(new Error()) });
+    /** 用數值特徵找出「存著目前地圖中心」的物件——名稱會混淆，座標不會 */
+    function findCameraStateObjects(vp) {
+        const seen = new WeakSet();
+        const found = [];
+        const visit = (obj, path, depth) => {
+            if (!obj || depth > 4 || found.length >= MAX_TARGETS) return;
+            const t = typeof obj;
+            if (t !== 'object' && t !== 'function') return;
+            if (seen.has(obj)) return;
+            seen.add(obj);
+            let keys;
+            try { keys = Object.getOwnPropertyNames(obj); } catch (err) { return; }
+            if (keys.length <= 40) {
+                const latKeys = [], lonKeys = [];
+                for (const k of keys) {
+                    let v;
+                    try { v = obj[k]; } catch (err) { continue; }
+                    if (typeof v !== 'number' || !isFinite(v)) continue;
+                    if (Math.abs(v - vp.lat) < TOL) latKeys.push(k);
+                    if (Math.abs(v - vp.lon) < TOL) lonKeys.push(k);
                 }
-                return orig.apply(this, args);
-            };
-            _rrRestore.push(() => { history[name] = orig; });
-        });
+                if (latKeys.length && lonKeys.length) {
+                    found.push({ obj, path, latKey: latKeys[0], lonKey: lonKeys[0] });
+                }
+            }
+            if (depth >= 4) return;
+            for (const k of keys) {
+                if (/^(window|self|top|parent|frames|document|location|history)$/.test(k)) continue;
+                let v;
+                try { v = obj[k]; } catch (err) { continue; }
+                if (v && (typeof v === 'object' || typeof v === 'function')) {
+                    visit(v, path + '.' + k, depth + 1);
+                }
+            }
+        };
+        // 從 window 與 Closure 的命名空間 window._ 兩處出發
+        visit(window, 'window', 0);
+        if (window._) visit(window._, 'window._', 0);
+        return found;
+    }
+
+    /** 在座標屬性上裝 setter：誰寫入新值，就把呼叫堆疊記下來 */
+    function instrument(target) {
+        let ok = 0;
+        for (const key of [target.latKey, target.lonKey]) {
+            let current;
+            try { current = target.obj[key]; } catch (err) { continue; }
+            try {
+                Object.defineProperty(target.obj, key, {
+                    configurable: true,
+                    enumerable: true,
+                    get() { return current; },
+                    set(v) {
+                        if (_armed && v !== current && _hits.length < MAX_STACKS) {
+                            _hits.push({
+                                path: target.path, key,
+                                from: current, to: v,
+                                stack: briefStack(new Error()),
+                            });
+                        }
+                        current = v;
+                    },
+                });
+                ok++;
+            } catch (err) { /* 不可設定的屬性，略過 */ }
+        }
+        return ok;
     }
 
     function PROBE_SETUP() {
-        log('START', '請先在左側面板展開路線的「詳細資料」，然後點其中一個步驟。');
+        const vp = vpOf();
+        if (!vp) { log('錯誤', '網址讀不到視野，請先在地圖上規劃路線'); return; }
+        log('START', `目前視野 ${vp.lat}, ${vp.lon} @ ${vp.zoom}z　開始尋找存著這組座標的物件…`);
 
-        hookHistory();
+        const t0 = performance.now();
+        _targets = findCameraStateObjects(vp);
+        log('①找到的候選', _targets.length
+            ? `${_targets.length} 個（耗時 ${Math.round(performance.now() - t0)}ms）\n      ` +
+              _targets.slice(0, 12).map(t => `${t.path}  {${t.latKey}:lat, ${t.lonKey}:lon}`).join('\n      ')
+            : '找不到——可能座標存在閉包裡，從外部拿不到');
 
-        const origRaf = window.requestAnimationFrame;
-        window.requestAnimationFrame = function (cb) {
-            if (_watching) _rafCount++;
-            return origRaf.call(window, cb);
-        };
-        _rrRestore.push(() => { window.requestAnimationFrame = origRaf; });
+        let armedCount = 0;
+        _targets.forEach(t => { armedCount += instrument(t); });
+        log('②裝設結果', `成功在 ${armedCount} 個屬性上裝了 setter`);
+        if (!armedCount) {
+            log('結論', '無法裝設（屬性不可設定）→ 這條路不通，建議改用鍵盤方案');
+            return;
+        }
 
-        const origFetch = window.fetch;
-        window.fetch = function (...a) { if (_watching) _netCount++; return origFetch.apply(this, a); };
-        _rrRestore.push(() => { window.fetch = origFetch; });
-        const origSend = XMLHttpRequest.prototype.send;
-        XMLHttpRequest.prototype.send = function () { if (_watching) _netCount++; return origSend.apply(this, arguments); };
-        _rrRestore.push(() => { XMLHttpRequest.prototype.send = origSend; });
-
-        // 在捕獲階段監聽，才能在 Google 自己處理之前先記錄下來
-        const onClick = (ev) => {
-            if (_watching) return;                       // 上一次觀察還沒結束
-            const el = ev.target;
-            if (!el || el.nodeType !== 1) return;
-            if (el.closest && el.closest('#bdp-panel')) return;   // 忽略面板自己
-            const txt = (el.textContent || '').trim().slice(0, 40);
-            startWatch(`點擊「${txt || '(無文字)'}」`, el);
-        };
-        document.addEventListener('click', onClick, true);
-        _rrRestore.push(() => document.removeEventListener('click', onClick, true));
-
-        // 順便把疑似「步驟清單」的元素列出來，方便找到要點哪裡
-        const steps = [...document.querySelectorAll('[jsaction]')]
-            .filter(e => /step|direction|maneuver/i.test(e.getAttribute('jsaction') || ''))
-            .slice(0, 12);
-        log('提示', steps.length
-            ? `找到 ${steps.length} 個 jsaction 含 step/direction 的元素：\n      ` +
-              steps.map(e => (e.getAttribute('jsaction') || '').slice(0, 80)).join('\n      ')
-            : '目前找不到明顯的步驟元素，請先展開「詳細資料」再開始監控');
-
-        log('READY', '監聽就緒。點一個路線步驟，會自動記錄 4 秒內的變化。');
+        _armed = true;
+        _hits = [];
+        log('READY', '請點一個路線步驟（或任何會讓地圖平移的操作），' +
+            '然後按「停止監控」看結果。');
     }
 
     function PROBE_TEARDOWN() {
-        _watching = false;
+        _armed = false;
+        const vp = vpOf();
+        if (_hits.length) {
+            log('③誰寫入了座標', `共捕捉 ${_hits.length} 筆，列出前 5 筆：`);
+            _hits.slice(0, 5).forEach((h, i) => {
+                log(`  第 ${i + 1} 筆`,
+                    `${h.path}.${h.key}　${Number(h.from).toFixed(5)} → ${Number(h.to).toFixed(5)}\n        ${h.stack}`);
+            });
+        } else {
+            log('③誰寫入了座標', '完全沒有捕捉到寫入。');
+            // 分辨兩種可能：根本沒動，或物件被整個替換掉
+            if (vp) {
+                const again = findCameraStateObjects(vp);
+                const stillSame = again.some(a => _targets.some(t => t.obj === a.obj));
+                log('④判讀', stillSame
+                    ? '原物件仍存著最新座標，但沒觸發 setter → 可能是用內部欄位直接改寫'
+                    : '原物件已不再存著最新座標 → 物件是被整個替換的，'
+                      + '從外部裝設無效，這條路不通');
+            }
+        }
         _rrRestore.forEach(fn => { try { fn(); } catch (err) { /* 還原失敗不影響停止 */ } });
         _rrRestore = [];
         _bdpObservers.forEach(mo => mo.disconnect());
