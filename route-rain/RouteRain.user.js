@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.58.0
+// @version      0.59.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
 // @icon         https://www.google.com/maps/about/images/icons/maps_512dp.png
 // @connect      opendata.cwa.gov.tw
+// @connect      www.google.com
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -101,10 +102,14 @@
 
     // 預報資料
     const FORECAST_HORIZON_HOURS = 96;         // 「未來3天」資料集實測涵蓋 96 小時
+    const PLACE_CACHE_MAX = 600;               // 地點名稱快取的筆數上限；座標→名稱不會變，可放久
+    const PLACE_GRID = 1e4;                    // 快取以座標取整到小數第 4 位（約 10 公尺）為鍵
+    const PLACE_GAP_MS = 120;                  // 連續查詢的間隔，避免對 Google 造成突發流量
     const CACHE_TTL_MS = 30 * 60 * 1000;       // 氣象快取有效期：資料齊全且未超過此時間就直接沿用
     // 儲存鍵
     const KEY_CWA = 'cwaAuthorization';
     const KEY_CWA_CACHE = 'cwaForecastCache';
+    const KEY_PLACE_CACHE = 'placeNameCache';
 
     // ────────────────────────────────────────────────────────────────
     // 依賴 Google Maps DOM 結構的選擇器，集中一處
@@ -156,6 +161,7 @@
         originalPanelWidth: '',
         lastRouteKey: '',
         capturedDirections: null,   // 攔截到的 /maps/preview/directions 回應
+        gToken: '',                 // Google 內部端點的 session 權杖
         routePoints: null,          // 目前顯示路線的座標，用來算出離路線夠遠的按下點
         rerunTimer: null,
         panelBg: '',
@@ -465,7 +471,21 @@
      * 原本好好的那份就會被蓋掉，下次解析直接失敗。
      * 因此改成「驗證後才存」，並且永遠保留最後一份可用的。
      */
+    // Google 內部端點共用的 session 權杖，格式為 !1s{token}!7e81。
+    // 它在同一個頁面的多種請求裡都會出現（directions、place、log204…），
+    // 所以順手從攔截器取一次即可，不必另外操作。
+    const TOKEN_RE = /!1s([A-Za-z0-9_-]{16,})!7e81/;
+    function keepToken(url) {
+        if (state.gToken) return;
+        const m = String(url).match(TOKEN_RE);
+        if (m) {
+            state.gToken = m[1];
+            log('已取得 Google session 權杖，地點名稱查詢可用');
+        }
+    }
+
     function keepIfDirections(url, text) {
+        keepToken(url);
         if (!url || !DIRECTIONS_URL_RE.test(String(url))) return;
         if (!text || text.length < 1000) return;
         let alts;
@@ -631,6 +651,87 @@
             alt: best.alt,
             matchNote: `比對面板值（${selected.distanceText}）誤差 ${(best.score * 100).toFixed(1)}%`,
         };
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // 地點名稱（反向地理編碼）
+    //
+    // 用 Google 自己的 /maps/preview/reveal——就是在地圖上點一下會冒出
+    // 「崁腳里 / 207新北市萬里區」那個彈窗背後的端點。
+    //
+    // 為什麼不繼續用導航指示裡的路名：那是「某一段路的名稱」，
+    // 節點所在的段落若沒有路名就得往前後借，而容忍範圍是時間（±300 秒）；
+    // 開車五分鐘可以跑好幾公里，借來的路名常常離節點超過一個螢幕。
+    //
+    // 實測（真實路徑上 7 個取樣點）全部正確，且回應的 [0] 就是彈窗顯示的兩行：
+    //   ["北28鄉道", "207新北市萬里區溪底里"]  → 主名稱 ／ 行政區
+    // 座標可任意更換、不需要 cookie；唯一相依是 session 權杖。
+    // ════════════════════════════════════════════════════════════════
+
+    function revealUrl(lat, lon, token) {
+        // 視野參數實測不影響結果，直接填目標座標即可
+        return 'https://www.google.com/maps/preview/reveal?authuser=0&hl=zh-TW&gl=tw' +
+            `&pb=!2m9!1m3!1d9403!2d${lon}!3d${lat}!2m0!3m2!1i1658!2i1000!4f13.1` +
+            `!3m2!2d${lon}!3d${lat}!4m2!1s${encodeURIComponent(token)}!7e81` +
+            '!5m5!2m4!1i96!2i64!3i1!4i8';
+    }
+
+    /** 回傳 { title, area }；查不到就回 null，由呼叫端決定要不要退回路名 */
+    async function revealPlace(lat, lon, token) {
+        const text = await gmRequest({ url: revealUrl(lat, lon, token) });
+        const i = text.indexOf('[[');
+        if (i < 0) return null;
+        const data = JSON.parse(text.slice(i));
+        const head = (data[0] || []).filter(x => typeof x === 'string' && x);
+        if (!head.length) return null;
+        return { title: head[0], area: head[1] || null };
+    }
+
+    function placeCacheKey(lat, lon) {
+        return Math.round(lat * PLACE_GRID) + ',' + Math.round(lon * PLACE_GRID);
+    }
+
+    function loadPlaceCache() {
+        try {
+            const raw = GM_getValue(KEY_PLACE_CACHE, '');
+            const o = raw ? JSON.parse(raw) : {};
+            return (o && typeof o === 'object') ? o : {};
+        } catch (err) { return {}; }
+    }
+
+    /**
+     * 一次把所有節點的地點名稱查好。
+     *
+     * 座標到名稱的對應不會隨時間改變，所以快取可以放很久，不設有效期；
+     * 只在筆數超過上限時丟掉最舊的。這讓反覆測試同一條路線幾乎不會再發出請求。
+     */
+    async function fillPlaceNames(nodes) {
+        if (!state.gToken) {
+            log('沒有 session 權杖，略過地點名稱查詢（沿用導航指示的路名）');
+            return { hit: 0, fetched: 0 };
+        }
+        const cache = loadPlaceCache();
+        let hit = 0, fetched = 0, failed = 0;
+        for (const n of nodes) {
+            const key = placeCacheKey(n.lat, n.lon);
+            if (cache[key]) { n.place = cache[key]; hit++; continue; }
+            try {
+                const r = await revealPlace(n.lat, n.lon, state.gToken);
+                if (r) { n.place = r; cache[key] = r; fetched++; }
+                else failed++;
+            } catch (err) {
+                failed++;
+            }
+            await wait(PLACE_GAP_MS);
+        }
+        // 超量時丟掉最舊的（物件的插入順序即為新舊）
+        const keys = Object.keys(cache);
+        if (keys.length > PLACE_CACHE_MAX) {
+            for (const k of keys.slice(0, keys.length - PLACE_CACHE_MAX)) delete cache[k];
+        }
+        try { GM_setValue(KEY_PLACE_CACHE, JSON.stringify(cache)); } catch (err) { /* 寫入失敗不影響本次 */ }
+        log('地點名稱：快取命中', hit, '／新查詢', fetched, failed ? `／查不到 ${failed}` : '');
+        return { hit, fetched };
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -1817,6 +1918,11 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             const r = resolveRoadName(steps, n.sec);
             n.road = r.name;
             n.roadBorrowed = r.borrowed;
+
+        // 地點名稱用 Google 自己的反向地理編碼取得，比導航指示的路名精確得多
+        clearBody(wrap);
+        showMessage(wrap, `正在取得 ${nodes.length} 個地點的名稱…`);
+        await fillPlaceNames(nodes);
         }
 
         // 出發時間欄：從現在往後對齊到 DEPART_STEP_MIN 的整數倍，到預報上限為止
@@ -2045,10 +2151,15 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             const sevLabel = ['—', '有可能', '基本上會遇到'][sev];
             const k = s => `<span class="${PREFIX}-k">${s}</span>`;
             tip.innerHTML =
-                `<b>${n.placeName || ((n.county || '') + (n.town || '（未知區域）'))}</b>` +
+                // 顯示順序：使用者自己設的名稱 ＞ Google 反向地理編碼 ＞ 鄉鎮名。
+                // 第二行照 Google 彈窗的排法放行政區；查不到才退回導航指示的路名。
+                `<b>${n.placeName || (n.place && n.place.title) ||
+                     ((n.county || '') + (n.town || '（未知區域）'))}</b>` +
                 (n.kind ? `　【${KIND_LABEL[n.kind]}】` : '') +
-                (n.placeName && n.town ? `<br>${(n.county || '') + n.town}` : '') +
-                `${n.road ? '　' + n.road + (n.roadBorrowed ? '（附近）' : '') : ''}<br>` +
+                (n.placeName && n.town ? `<br>${(n.county || '') + n.town}`
+                    : (n.place && n.place.area ? `<br>${n.place.area}` : '')) +
+                (!n.place && n.road ? `　${n.road}${n.roadBorrowed ? '（附近）' : ''}` : '') +
+                `<br>` +
                 k('出發時間') + clockOf(dep) + '<br>' +
                 k('抵達時刻') + clockOf(arrive) + `（出發後 ${Math.round(n.sec / 60)} 分）<br>` +
                 k('降雨機率') + (row && row.pop != null ? row.pop + '%' : '無資料') + '<br>' +
