@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.60.0
+// @version      0.61.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -1504,9 +1504,10 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
 .${PREFIX}-scale{display:flex;align-items:center;gap:2px;padding-bottom:10px;font-size:11px;color:#5f6368}
 .${PREFIX}-scale i{width:16px;height:14px;display:inline-block}
 .${PREFIX}-ttl{font-size:14px;font-weight:600;color:#fff;line-height:1.35;margin-bottom:2px}
-.${PREFIX}-ttl em{display:inline-block;margin-left:6px;padding:0 6px;border-radius:8px;
-  background:rgba(138,180,248,.22);color:#8ab4f8;font-size:10.5px;font-style:normal;
-  font-weight:600;vertical-align:2px}
+/* 標籤與名稱同一行、字級相當——比內文大一圈才有醒目的效果 */
+.${PREFIX}-ttl em{display:inline-block;margin-left:7px;padding:1px 8px;border-radius:10px;
+  background:rgba(138,180,248,.25);color:#aecbfa;font-size:13px;font-style:normal;
+  font-weight:600;vertical-align:1px;white-space:nowrap}
 /* 行政區是次要資訊：字小一級、亮度降下來，才有主次之分 */
 .${PREFIX}-sub{font-size:11.5px;color:rgba(255,255,255,.62);line-height:1.4;margin-bottom:6px}
 .${PREFIX}-tip{position:fixed;z-index:2147483000;pointer-events:none;display:none;background:#202124;
@@ -1720,7 +1721,14 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
     function scheduleRerunIfRouteChanged() {
         if (!state.active || !state.container) return;
         const key = routeKeyOf(location.href);
-        if (!key || key === state.lastRouteKey) return;
+        if (!key) {
+            // 網址裡沒有路線段落了——點到景點時 Google 會導覽到該地點的頁面。
+            // 這不是「換了一條路線」，而是暫時離開路線檢視，
+            // 此時重算只會得到「讀不到路線」的錯誤畫面，把原本好好的表格洗掉。
+            if (state.lastRouteKey) log('網址暫時沒有路線段落（可能點到了景點），保留現有表格');
+            return;
+        }
+        if (key === state.lastRouteKey) return;
         log('偵測到路線改變，重新計算表格');
         state.lastRouteKey = key;
         clearTimeout(state.rerunTimer);
@@ -2195,15 +2203,31 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
                 // 顯示順序：使用者自己設的名稱 ＞ Google 反向地理編碼 ＞ 鄉鎮名。
                 // 第二行照 Google 彈窗的排法放行政區；查不到才退回導航指示的路名。
                 // 照 Google 彈窗的排法：主名稱大而亮、行政區小而暗，拉開主次
-                `<div class="${PREFIX}-ttl">` +
-                `${n.placeName || (n.place && n.place.title) ||
-                   ((n.county || '') + (n.town || '（未知區域）'))}` +
-                (n.kind ? `<em>${KIND_LABEL[n.kind]}</em>` : '') + `</div>` +
                 (() => {
-                    const sub = n.placeName ? ((n.county || '') + (n.town || ''))
-                        : (n.place && n.place.area) ? n.place.area
-                            : (n.road ? n.road + (n.roadBorrowed ? '（附近）' : '') : '');
-                    return sub ? `<div class="${PREFIX}-sub">${sub}</div>` : '';
+                    // 面板輸入框的內容是「名稱＋地址」連在一起（例如
+                    // 「乾華十八王公廟 253新北市石門區乾華里阿里磅1-1號」），
+                    // 直接整串當標題會又長又擠，還把標籤推到第二行。
+                    // 以郵遞區號為界拆開：前段當主名稱、後段當地址。
+                    let title, addr = '';
+                    if (n.placeName) {
+                        // 只在「名稱 空白 郵遞區號…」這種形式才拆。
+                        // 像「住家（103臺北市…）」的地址是包在括號裡的別名，
+                        // 拆了會變成「住家（」這種殘缺的標題。
+                        const m = /[（(]/.test(n.placeName)
+                            ? null
+                            : n.placeName.match(/^(.+?)\s+(\d{3}\s*[\u4e00-\u9fa5]{2,3}[市縣].*)$/);
+                        if (m) { title = m[1].trim(); addr = m[2].trim(); }
+                        else { title = n.placeName; addr = (n.county || '') + (n.town || ''); }
+                    } else if (n.place && n.place.title) {
+                        title = n.place.title;
+                        addr = n.place.area || '';
+                    } else {
+                        title = (n.county || '') + (n.town || '（未知區域）');
+                        addr = n.road ? n.road + (n.roadBorrowed ? '（附近）' : '') : '';
+                    }
+                    return `<div class="${PREFIX}-ttl">${title}` +
+                        (n.kind ? `<em>${KIND_LABEL[n.kind]}</em>` : '') + '</div>' +
+                        (addr ? `<div class="${PREFIX}-sub">${addr}</div>` : '');
                 })() +
                 k('出發時間') + clockOf(dep) + '<br>' +
                 k('抵達時刻') + clockOf(arrive) + `（出發後 ${Math.round(n.sec / 60)} 分）<br>` +
