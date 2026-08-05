@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.45.0
+// @version      0.46.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -2141,38 +2141,36 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
     const viewportKey = () => (location.href.match(/\/@[^/]+/) || [''])[0];
 
     /**
-     * 等到視野真的停止變動。
+     * 等到視野「確實變過、而且已經停下來」。
      *
-     * 判準是「連續兩次讀到相同的網址視野段」，而不是等固定秒數——
-     * 網址落後真實視野 0.7～1.4 秒且長短不定（跟動畫幅度、網路、機器都有關），
-     * 固定秒數必然有時等不夠。實測在探針上加了這個之後，
-     * 同一組參數的量測從「100% 和 129% 交替」變成四組全部零變異。
+     * 上一版只判斷「連續兩次讀到相同」，那是錯的：網址還沒開始更新時，
+     * 連續兩次讀到的也都是舊值，於是誤判為已停穩，把尚未更新的舊值當成真實值。
+     * 實測後果：模型明明算對了（11.04），卻被舊值 12 覆蓋，
+     * 之後每一步都用錯的層級換算，誤差一路發散到 48 公里。
+     *
+     * 正確順序是兩段：先等它跟動作前不一樣（確認已反映），再等它不再變（確認已停）。
+     *
+     * @param prevKey 動作之前的視野字串，用來確認「真的變過了」
+     * @returns true=確實變過且停穩；false=逾時（可能沒動，或延遲超過上限）
      */
-    async function waitSettled(timeoutMs) {
+    async function waitViewportSettled(prevKey) {
         const t0 = Date.now();
+        // 第一段：等它跟動作前不同
+        let changed = false;
+        while (Date.now() - t0 < SETTLE_TIMEOUT_MS) {
+            if (viewportKey() !== prevKey) { changed = true; break; }
+            await wait(SETTLE_POLL_MS);
+        }
+        if (!changed) return false;
+        // 第二段：等它停止變動
         let last = null;
-        while (Date.now() - t0 < (timeoutMs || SETTLE_TIMEOUT_MS)) {
+        while (Date.now() - t0 < SETTLE_TIMEOUT_MS) {
             const key = viewportKey();
             if (key === last) return true;
             last = key;
             await wait(SETTLE_POLL_MS);
         }
-        return false;                           // 逾時：可能還在動，但不能無限等
-    }
-
-    /** 等視野停穩後，把模型校準回真實值——避免推算誤差一路累積下去 */
-    async function syncModel(model, label) {
-        const settled = await waitSettled();
-        const vp = readViewport();
-        if (!vp) return null;
-        const drift = Math.hypot(
-            projectToPixel(model.lat, model.lon, vp.zoom).x - projectToPixel(vp.lat, vp.lon, vp.zoom).x,
-            projectToPixel(model.lat, model.lon, vp.zoom).y - projectToPixel(vp.lat, vp.lon, vp.zoom).y);
-        writeDiag({ step: 'sync-' + label, settled,
-            modelZoom: +model.zoom.toFixed(2), realZoom: vp.zoom,
-            driftPx: Math.round(drift) });
-        model.lat = vp.lat; model.lon = vp.lon; model.zoom = vp.zoom;
-        return vp;
+        return false;
     }
 
     /** 目前視野下，目標相對於畫面中心的像素位移 */
@@ -2189,15 +2187,21 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
      * 最後校正：等視野真的停穩，量實際誤差，超過門檻就修，修完再量。
      * 迴圈直到到位或次數用盡——這是「結果一定要對」的保證。
      */
-    async function correctIfNeeded(canvas, lat, lon) {
+    /**
+     * 最後校正：等視野確實反映出動作結果，量實際誤差，超過門檻才修，修完再量。
+     *
+     * @param keyBeforeMotion 整段移動開始前的視野，用來確認第一次讀值時已經反映了動作
+     */
+    async function correctIfNeeded(canvas, lat, lon, keyBeforeMotion) {
         let dist = null;
         let lastDist = Infinity;
+        let prevKey = keyBeforeMotion;
         for (let i = 0; i < PAN_MAX_ITERATIONS; i++) {
-            await waitSettled();                    // 關鍵：不是等固定秒數，是等真的不動了
+            const settled = await waitViewportSettled(prevKey);
             const off = offsetToTarget(lat, lon);
             if (!off) return dist;
             dist = Math.hypot(off.dx, off.dy);
-            writeDiag({ step: 'correct', round: i, distPx: Math.round(dist) });
+            writeDiag({ step: 'correct', round: i, settled, distPx: Math.round(dist) });
             if (dist <= PAN_TOLERANCE_PX) return dist;          // 已經夠準
             if (dist <= FINAL_FIX_PX) return dist;              // 在死區內，不為了幾十像素再動一次
             // 收斂保護：修了卻沒有顯著變好，代表再修也是白搭，只會來回橫跳
@@ -2212,20 +2216,14 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
                 Math.min(r.width * DRAG_MAX_SCREENS, off.dx));
             const dy = Math.max(-r.height * DRAG_MAX_SCREENS,
                 Math.min(r.height * DRAG_MAX_SCREENS, off.dy));
+            prevKey = viewportKey();
             await smoothPan(canvas, dx, dy, PAN_MIN_MS, findPressPoint(canvas, dx, dy));
         }
-        await waitSettled();
+        await waitViewportSettled(prevKey);
         const off = offsetToTarget(lat, lon);
         return off ? Math.hypot(off.dx, off.dy) : dist;
     }
 
-    /**
-     * 把地圖平順地移到指定座標並拉近。
-     *
-     * 長距離時走「先拉遠 → 平移 → 拉近」的弧線（地圖界稱 flyTo，源自
-     * van Wijk & Nuij 2003）。除了視覺自然，還有實際效益：
-     * 在低縮放層級平移要載入的圖磚少得多，閃爍會明顯減少。
-     */
     /**
      * 已經夠接近就什麼都不做。
      *
@@ -2259,6 +2257,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
 
         // 全程以自有模型推算，不在階段之間讀網址——那些等待會讓畫面靜止，
         // 是「一段一段」感受的主因。誤差留到最後統一校正。
+        const keyBeforeMotion = viewportKey();   // 用來確認校正時讀到的已經是動作後的值
         const model = makeViewModel(vp0);
         const off0 = model.offsetTo(lat, lon);
         const screens = Math.max(Math.abs(off0.dx) / r.width, Math.abs(off0.dy) / r.height);
@@ -2277,9 +2276,6 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         if (arcOut > 0) {
             const applied = await smoothZoom(canvas, -arcOut);
             model.applyZoom(applied);
-            // 這一步之後的殘留誤差會被最後的放大倍數放大（拉遠 5 級＝放大 32 倍），
-            // 所以這裡值得付出一次等待，把模型校準回真實值再往下走
-            await syncModel(model, 'arc-out');
         }
 
         // ② 平移。位移在「拉遠後的層級」重新算——用舊層級會差十幾倍。
@@ -2306,8 +2302,6 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             await smoothPan(canvas, dx, dy, i === 0 ? panMs : PAN_MIN_MS,
                 findPressPoint(canvas, dx, dy));
             model.applyPan(dx, dy);
-            // 每拖完一次就用真實視野校準，模型誤差不會累積到下一輪
-            await syncModel(model, 'pan' + i);
         }
 
         // ③ 拉近到目標層級（滾輪錨定畫面中心，目標會留在原地）
@@ -2316,8 +2310,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
 
         // ④ 動畫全部結束後才讀真實視野、校正累積誤差。
         //    只在這裡等一次，而不是每個階段都等。
-        const finalDist = await correctIfNeeded(canvas, lat, lon);
-        await waitSettled();          // 回報前再確認一次，避免 errorKm 是用舊值算的
+        const finalDist = await correctIfNeeded(canvas, lat, lon, keyBeforeMotion);
         const vpEnd = readViewport();
         writeDiag({
             step: 'done', target: [+lat.toFixed(5), +lon.toFixed(5)],
