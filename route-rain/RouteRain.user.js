@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.56.0
+// @version      0.57.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -581,20 +581,26 @@
         const out = [];
         for (let r = 0; r < Math.min(alts.length, geos.length); r++) {
             const summary = alts[r][0];
-            const legs = (alts[r][1] && alts[r][1][0] && alts[r][1][0][1]) || [];
+            // 這一層是「路段」陣列：沒有中途停靠點時只有一段，
+            // 每加一個停靠點就多一段。原本只取 [0]，因此加了停靠點之後
+            // 第二段以後的步驟全部漏掉——時間軸只涵蓋到第一個停靠點，
+            // 後半段的節點被壓縮進那段時間裡，目的地卻用摘要的總時程，落差就露出來。
+            const segments = (alts[r][1] || []).filter(s => Array.isArray(s));
             const steps = [];
             // 注意：leg 的分界**不是**使用者設定的停靠點。實測只有起訖兩點的路線，
             // Google 仍會切成兩個 leg（第二個只有一步、三百多公尺，是抵達前的最後一小段）。
             // 停靠點要從網址的 data= 段取得，那裡才明確區分「停靠站」與「拖曳控制點」。
-            legs.forEach((leg) => {
-                for (const st of (leg[1] || [])) {
-                    steps.push({
-                        meters: (st[0] && st[0][2] && st[0][2][0]) || 0,
-                        sec: (st[0] && st[0][3] && st[0][3][0]) || 0,
-                        roads: roadNamesOf(st),
-                    });
+            for (const seg of segments) {
+                for (const leg of (seg[1] || [])) {
+                    for (const st of (leg[1] || [])) {
+                        steps.push({
+                            meters: (st[0] && st[0][2] && st[0][2][0]) || 0,
+                            sec: (st[0] && st[0][3] && st[0][3][0]) || 0,
+                            roads: roadNamesOf(st),
+                        });
+                    }
                 }
-            });
+            }
             const lat = accumulate(geos[r][0]);
             const lon = accumulate(geos[r][1]);
             const points = new Array(lat.length);
@@ -673,36 +679,15 @@
             if (timeline[i].sec < timeline[i - 1].sec) timeline[i].sec = timeline[i - 1].sec;
         }
 
-        // 步驟資料不一定完整。抽取路徑是從「開車」路線的樣本推導出來的，
-        // 其他交通方式的巢狀結構可能不同，導致只抓到一部分步驟——
-        // 實測單車路線出現過「摘要 213 分、步驟加總只有 36 分」。
-        // 步驟一旦不完整，距離↔時間的對應就垮了，節點會全部擠在前段。
+        // 保留一道防呆：步驟與摘要若仍對不上，只記錄不臆測，
+        // 免得又用一個推估模型把真正的資料問題蓋掉。
         const stepsTotal = stepTimes[stepTimes.length - 1] || 0;
-        const stepsMeters = declared;
         const declaredTotal = alt.totalSec || stepsTotal;
-        const declaredMeters = alt.totalMeters || stepsMeters;
-        const metersOk = declaredMeters > 0 && stepsMeters >= declaredMeters * 0.9;
-        const secOk = declaredTotal > 0 && Math.abs(declaredTotal - stepsTotal) <= 60;
-
-        if (!metersOk || !secOk) {
-            warn('步驟資料與摘要不符：步驟', alt.steps.length, '個、加總',
-                Math.round(stepsMeters), '公尺 /', Math.round(stepsTotal / 60), '分；',
-                '摘要', Math.round(declaredMeters), '公尺 /', Math.round(declaredTotal / 60), '分。',
-                metersOk ? '距離相符，僅時間不符 → 依比例拉伸'
-                    : '距離也對不上，步驟可能不完整 → 改用等速模型');
-            if (metersOk) {
-                // 距離對得上，只是時間短少：依比例拉伸即可保留各段的快慢差異
-                const factor = declaredTotal / stepsTotal;
-                for (const p of timeline) p.sec *= factor;
-                for (let k = 0; k < stepTimes.length; k++) stepTimes[k] *= factor;
-            } else {
-                // 距離都對不上，表示步驟殘缺，無法據以分配時間。
-                // 退回「全程等速」：依累積距離比例分配總時程。
-                // 這會失去各路段的快慢差異，但至少整體時刻是對的。
-                for (let i = 0; i < timeline.length; i++) {
-                    timeline[i].sec = declaredTotal * (cum[i] / geoTotal);
-                }
-            }
+        const declaredMeters = alt.totalMeters || declared;
+        if (Math.abs(declaredTotal - stepsTotal) > 60 || declared < declaredMeters * 0.9) {
+            warn('步驟與摘要不一致：步驟', alt.steps.length, '個、加總',
+                Math.round(declared), '公尺 /', Math.round(stepsTotal / 60), '分；',
+                '摘要', Math.round(declaredMeters), '公尺 /', Math.round(declaredTotal / 60), '分');
         }
 
         const steps = alt.steps.map((st, k) => ({
@@ -710,8 +695,7 @@
         }));
         return {
             timeline, steps,
-            totalSec: timeline.length ? timeline[timeline.length - 1].sec : 0,
-            stepsIncomplete: !metersOk,
+            totalSec: alt.totalSec || stepTimes[stepTimes.length - 1],
         };
     }
 
@@ -1807,7 +1791,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         const alt = picked.alt;
 
         state.routePoints = alt.points;   // 供計算安全按下點
-        const { timeline, steps, totalSec, stepsIncomplete } = buildTimeline(alt);
+        const { timeline, steps, totalSec } = buildTimeline(alt);
         if (!timeline.length) throw new Error('Routes API 回傳的路徑沒有可用的座標');
         // 起點、使用者設定的停靠點、目的地——這三類是使用者自己規劃的位置，
         // 一定要出現在表格裡，不能因為「取中點」而被略過
@@ -1884,7 +1868,6 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             meta: {
                 matchNote: picked.matchNote,
                 routeDistanceMeters: alt.totalMeters,
-                stepsIncomplete,
                 capturedAt: state.capturedDirections.at,
                 mode: modeInfo,
                 selected,
@@ -1988,9 +1971,6 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             `涵蓋 ${new Set(nodes.map(n => n.county + n.town)).size} 個鄉鎮`,
             `總行程 ${Math.round(totalSec / 60)} 分`,
             `路徑資料：取自頁面本身（${Math.round((Date.now() - meta.capturedAt) / 1000)} 秒前攔截），未呼叫任何 API`,
-            ...(meta.stepsIncomplete
-                ? ['此交通方式的逐步資料不完整，時刻以全程等速推估，路名可能不準']
-                : []),
             meta.fromCache
                 ? `氣象資料：沿用快取（${Math.round((Date.now() - meta.fetchedAt) / 60000)} 分鐘前取得）`
                 : `氣象資料：本次重新取得，呼叫 ${meta.callCount} 次`,
