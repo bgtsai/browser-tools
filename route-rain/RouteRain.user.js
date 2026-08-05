@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.51.0
+// @version      0.52.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -582,28 +582,24 @@
             const summary = alts[r][0];
             const legs = (alts[r][1] && alts[r][1][0] && alts[r][1][0][1]) || [];
             const steps = [];
-            // leg 的分界就是使用者設定的停靠點。最後一個 leg 的結尾是目的地，
-            // 不列入停靠點（它由 totalSec 代表）。
-            const waypointSecs = [];
-            let acc = 0;
-            legs.forEach((leg, li) => {
+            // 注意：leg 的分界**不是**使用者設定的停靠點。實測只有起訖兩點的路線，
+            // Google 仍會切成兩個 leg（第二個只有一步、三百多公尺，是抵達前的最後一小段）。
+            // 停靠點要從網址的 data= 段取得，那裡才明確區分「停靠站」與「拖曳控制點」。
+            legs.forEach((leg) => {
                 for (const st of (leg[1] || [])) {
-                    const sec = (st[0] && st[0][3] && st[0][3][0]) || 0;
                     steps.push({
                         meters: (st[0] && st[0][2] && st[0][2][0]) || 0,
-                        sec,
+                        sec: (st[0] && st[0][3] && st[0][3][0]) || 0,
                         roads: roadNamesOf(st),
                     });
-                    acc += sec;
                 }
-                if (li < legs.length - 1) waypointSecs.push(acc);
             });
             const lat = accumulate(geos[r][0]);
             const lon = accumulate(geos[r][1]);
             const points = new Array(lat.length);
             for (let i = 0; i < lat.length; i++) points[i] = [lat[i] / 1e7, lon[i] / 1e7];
             out.push({
-                points, steps, waypointSecs,
+                points, steps,
                 totalMeters: (summary[2] && summary[2][0]) || 0,
                 totalSec: (summary[3] && summary[3][0]) || 0,
                 distanceText: (summary[2] && summary[2][1]) || '',
@@ -682,7 +678,6 @@
         return {
             timeline, steps,
             totalSec: alt.totalSec || stepTimes[stepTimes.length - 1],
-            waypointSecs: alt.waypointSecs || [],
         };
     }
 
@@ -725,6 +720,16 @@
      *
      * @param anchors [{ sec, kind }]，kind 為 origin／waypoint／destination
      */
+    /** 找出時間軸上離指定座標最近的那一點的時刻——用來把停靠站對應到行程時間 */
+    function nearestSecOnTimeline(timeline, lat, lon) {
+        let best = null, bestD = Infinity;
+        for (const p of timeline) {
+            const d = (p.lat - lat) * (p.lat - lat) + (p.lon - lon) * (p.lon - lon);
+            if (d < bestD) { bestD = d; best = p; }
+        }
+        return best ? best.sec : null;
+    }
+
     function buildNodes(timeline, totalSec, anchors) {
         const towns = loadTowns();
 
@@ -827,14 +832,25 @@
             }
         }
 
-        // 保險：落在被丟棄的鄉鎮裡、或不屬於任何鄉鎮的錨點，仍然要出現
+        // 保險：落在被丟棄的鄉鎮裡、或不屬於任何鄉鎮的錨點，仍然要出現。
+        // 起點特別容易走到這裡：出發座標常在建築物內或路網邊緣，
+        // 逐點判斷時第一個點未必落在任何鄉鎮多邊形內。
         for (const a of anchorList) {
             if (usedAnchors.has(a)) continue;
             const pos = positionAt(timeline, a.sec);
-            const t = whoAt(pos.lat, pos.lon);
+            let t = whoAt(pos.lat, pos.lon);
+            if (!t) {
+                // 往後找最近一個判得出鄉鎮的點，總比顯示「未知區域」好
+                for (const q of timeline) {
+                    if (q.sec < a.sec) continue;
+                    const cand = whoAt(q.lat, q.lon);
+                    if (cand) { t = cand; break; }
+                }
+            }
             nodes.push(makeNode(a.sec, t ? { county: t.county, town: t.town,
                 t0: a.sec, t1: a.sec, accum: 0 } : null, [1, 1], a.kind));
-            log('錨點不在任何保留的鄉鎮區段內，另外補上：', a.kind, Math.round(a.sec / 60), '分');
+            log('錨點不在任何保留的鄉鎮區段內，另外補上：', a.kind,
+                Math.round(a.sec / 60), '分', t ? `（${t.county}${t.town}）` : '（查不到鄉鎮）');
         }
 
         nodes.sort((a, b) => a.sec - b.sec);
@@ -1718,12 +1734,18 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         const alt = picked.alt;
 
         state.routePoints = alt.points;   // 供計算安全按下點
-        const { timeline, steps, totalSec, waypointSecs } = buildTimeline(alt);
+        const { timeline, steps, totalSec } = buildTimeline(alt);
         if (!timeline.length) throw new Error('Routes API 回傳的路徑沒有可用的座標');
         // 起點、使用者設定的停靠點、目的地——這三類是使用者自己規劃的位置，
         // 一定要出現在表格裡，不能因為「取中點」而被略過
         const anchors = [{ sec: 0, kind: 'origin' }];
-        for (const s of (waypointSecs || [])) anchors.push({ sec: s, kind: 'waypoint' });
+        // 中途停靠站取自網址：kind==='stop' 才是使用者加的停靠點，
+        // 'via' 是拖曳路線產生的控制點，不算。首尾兩個 stop 是起點與目的地，排除。
+        const stops = parsed.points.filter(p => p.kind === 'stop').slice(1, -1);
+        for (const s of stops) {
+            const sec = nearestSecOnTimeline(timeline, s.lat, s.lon);
+            if (sec !== null) anchors.push({ sec, kind: 'waypoint' });
+        }
         anchors.push({ sec: totalSec, kind: 'destination' });
         const nodes = buildNodes(timeline, totalSec, anchors);
         if (!nodes.length) {
