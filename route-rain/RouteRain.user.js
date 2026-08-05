@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.49.0
+// @version      0.51.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -838,6 +838,11 @@
         }
 
         nodes.sort((a, b) => a.sec - b.sec);
+        // 起點沒出現時，要能直接看出是「錨點沒傳進來」還是「配對到哪裡去了」
+        log('錨點：', (anchors || []).map(a =>
+            `${a.kind}@${Math.round(a.sec / 60)}分`).join('、') || '（無）',
+            '／已標記的節點：', nodes.filter(n => n.kind).map(n =>
+                `${n.kind}@${Math.round(n.sec / 60)}分`).join('、') || '（無）');
         log('節點數', nodes.length, '／涵蓋鄉鎮', new Set(nodes.map(n => n.county + n.town)).size,
             '／總行程', Math.round(totalSec / 60), '分');
         return nodes;
@@ -1302,10 +1307,8 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
   box-shadow:-20px 0 0 #fff}
 .${PREFIX}-rh.${PREFIX}-hl{background:#e8f0fe;box-shadow:-20px 0 0 #e8f0fe}
 .${PREFIX}-rh .${PREFIX}-t{font-weight:600;color:#202124}
-/* 使用者自己規劃的位置（出發／停靠／抵達）要一眼看得出來 */
-.${PREFIX}-kind{display:inline-block;margin-left:5px;padding:0 5px;border-radius:8px;
-  background:#1a73e8;color:#fff;font-size:10px;font-style:normal;font-weight:600;
-  vertical-align:1px}
+/* 使用者自己規劃的位置（出發／停靠／抵達）用顏色區分，不加標籤佔空間 */
+.${PREFIX}-t.${PREFIX}-key{color:#1a73e8}
 /* 固定寬度＋等寬數字：hover 時整欄標籤要在「+504分」與「05:19」之間切換，
    寬度只要有變化就會觸發回流，捲動錨定與 scroll-snap 會跟著重新對位，
    表現出來就是「滑鼠移回表格時整個跳到最上面」。寬度鎖死才不會回流。 */
@@ -1822,9 +1825,8 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             parts.push(
                 `<div class="${PREFIX}-rh" data-${PREFIX}-rh="${ri}">` +
                 `<span class="${PREFIX}-m" data-${PREFIX}-cum="${cum}">${cum}</span>` +
-                `<span class="${PREFIX}-t">${(n.county || '') + (n.town || '（未知區域）')}` +
-                (n.kind ? `<i class="${PREFIX}-kind">${KIND_LABEL[n.kind]}</i>` : '') +
-                `</span></div>`);
+                `<span class="${PREFIX}-t${n.kind ? ' ' + PREFIX + '-key' : ''}">` +
+                `${(n.county || '') + (n.town || '（未知區域）')}</span></div>`);
             for (let ci = 0; ci < departures.length; ci++) {
                 const whenMs = departures[ci].getTime() + n.sec * 1000;
                 const row = lookupForecast(forecast, n.town, whenMs);
@@ -2114,7 +2116,9 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
      * 一次連續的拖曳手勢：只按下一次、放開一次，中間持續送 move。
      * 先前每段拖曳都是完整手勢，地圖每次獨立結算慣性，才會有段落感與甩飛。
      */
+    /** 動作結束後會自行等待視野反映，呼叫端不必處理（理由同 smoothZoom） */
     async function smoothPan(canvas, dx, dy, durationMs, origin) {
+        const keyBefore = viewportKey();
         const r = canvas.getBoundingClientRect();
         const cx = origin ? origin.x : r.left + r.width / 2;
         const cy = origin ? origin.y : r.top + r.height / 2;
@@ -2124,6 +2128,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         });
         // 結尾速度已趨近零（緩動的效果），直接放開不會觸發慣性滑行
         dispatchPointer(canvas, 'pointerup', cx + dx, cy + dy, 0);
+        lastSettled = await waitViewportSettled(keyBefore);
     }
 
     /**
@@ -2137,8 +2142,15 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
      * 逐影格送，視覺上仍然是平滑推近，不像縮放按鈕那樣一級一級跳。
      * 另外它以游標位置為錨點，在畫布中心送出就不會帶偏中心。
      */
+    /**
+     * @returns 實際套用的縮放量。動作結束後會自行等待視野反映，呼叫端不必處理。
+     */
     async function smoothZoom(canvas, deltaZoom) {
         if (Math.abs(deltaZoom) < WHEEL_ZOOM_PER_EVENT / 2) return 0;
+        // 自己取動作前的 key。先前由呼叫端傳入，只要傳到舊的 key，
+        // waitViewportSettled 的第一段就會立刻通過而退化成會誤判的版本——
+        // 實測因此重複拉近、衝到 18.82 級。包進來就不可能配錯。
+        const keyBefore = viewportKey();
         const r = canvas.getBoundingClientRect();
         const cx = r.left + r.width / 2;
         const cy = r.top + r.height / 2;
@@ -2153,7 +2165,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             }));
             await wait(WHEEL_INTERVAL_MS);
         }
-        // 不等網址——改由呼叫端更新自有的視野模型，各階段才能無縫接續
+        lastSettled = await waitViewportSettled(keyBefore);
         return events * WHEEL_ZOOM_PER_EVENT * (deltaZoom > 0 ? 1 : -1);
     }
 
@@ -2209,6 +2221,10 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
 
     const viewportKey = () => (location.href.match(/\/@[^/]+/) || [''])[0];
 
+    // 最近一次動作有沒有等到視野反映。由 smoothZoom／smoothPan 自行設定，
+    // 診斷時讀它即可，不必在每個呼叫點各自處理等待。
+    let lastSettled = true;
+
     /**
      * 等到視野「確實變過、而且已經停下來」。
      *
@@ -2259,7 +2275,6 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
     /**
      * 最後校正：等視野確實反映出動作結果，量實際誤差，超過門檻才修，修完再量。
      *
-     * @param keyBeforeMotion 整段移動開始前的視野，用來確認第一次讀值時已經反映了動作
      */
     /**
      * 最後校正：確保結果一定是對的。
@@ -2269,21 +2284,19 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
      * 實測踩過：同一個誤差在 zoom 11.04 量到 727px、在 15.83 量到 20109px，
      * 收斂保護就誤判成「越修越糟」而停手，其實誤差根本沒變。
      *
-     * @param keyBeforeMotion 整段移動開始前的視野，用來確認讀到的已是動作後的值
      */
-    async function correctIfNeeded(canvas, lat, lon, keyBeforeMotion) {
-        // ── 第一步：等縮放安定，不到位就補 ──
-        let prevKey = keyBeforeMotion;
-        let settled = await waitViewportSettled(prevKey);
+    async function correctIfNeeded(canvas, lat, lon) {
+        // ── 第一步：確認縮放到位，不到就補 ──
+        // 動作本身已經等過視野反映，這裡直接讀值即可
+        let settled = lastSettled;
         for (let z = 0; z < 3; z++) {
             const vp = readViewport();
             if (!vp) break;
             const diff = MAP_FOCUS_ZOOM - vp.zoom;
             if (Math.abs(diff) <= ZOOM_TOLERANCE) break;
             writeDiag({ step: 'zoom-fix', round: z, realZoom: vp.zoom, need: +diff.toFixed(2) });
-            prevKey = viewportKey();
             await smoothZoom(canvas, diff);
-            settled = await waitViewportSettled(prevKey);
+            settled = lastSettled;
         }
 
         // ── 第二步：縮放已固定，此時的像素距離才可以互相比較 ──
@@ -2319,9 +2332,8 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             const dy = Math.max(-r.height * DRAG_MAX_SCREENS,
                 Math.min(r.height * DRAG_MAX_SCREENS, off.dy));
             lastApplied = Math.hypot(dx, dy);
-            prevKey = viewportKey();
             await smoothPan(canvas, dx, dy, PAN_MIN_MS, findPressPoint(canvas, dx, dy));
-            settled = await waitViewportSettled(prevKey);
+            settled = lastSettled;
         }
         const off = offsetToTarget(lat, lon);
         return off ? Math.hypot(off.dx, off.dy) : dist;
@@ -2360,7 +2372,6 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
 
         // 全程以自有模型推算，不在階段之間讀網址——那些等待會讓畫面靜止，
         // 是「一段一段」感受的主因。誤差留到最後統一校正。
-        const keyBeforeMotion = viewportKey();   // 用來確認校正時讀到的已經是動作後的值
         const model = makeViewModel(vp0);
         const off0 = model.offsetTo(lat, lon);
         const screens = Math.max(Math.abs(off0.dx) / r.width, Math.abs(off0.dy) / r.height);
@@ -2377,21 +2388,17 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             screens: +screens.toFixed(2), arcOut, panMs: Math.round(panMs) });
 
         if (arcOut > 0) {
-            const keyBeforeZoom = viewportKey();
             const applied = await smoothZoom(canvas, -arcOut);
             model.applyZoom(applied);
-            // 一定要等縮放動畫真的結束才平移。
-            // 送完滾輪事件時地圖還在縮放，此時拖曳的像素↔實際距離換算比例仍在變動，
-            // 實測平移只達成約 72%，殘留再被拉近放大，最終差了 8 公里。
-            const settled = await waitViewportSettled(keyBeforeZoom);
+            // smoothZoom 內部已等到視野反映，這裡的讀值可以安全採用
             const vpAfterZoom = readViewport();
-            if (settled && vpAfterZoom) {
+            if (lastSettled && vpAfterZoom) {
                 // 此時的讀值已確認反映了動作，可以安全地校準模型
                 model.lat = vpAfterZoom.lat;
                 model.lon = vpAfterZoom.lon;
                 model.zoom = vpAfterZoom.zoom;
             }
-            writeDiag({ step: 'after-arc-out', settled,
+            writeDiag({ step: 'after-arc-out', settled: lastSettled,
                 modelZoom: +model.zoom.toFixed(2),
                 realZoom: vpAfterZoom ? vpAfterZoom.zoom : null });
         }
@@ -2425,30 +2432,34 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             const dy = Math.max(-limY, Math.min(limY, off.dy));
             lastApplied = Math.hypot(dx, dy);
             pans++;
-            const keyBeforePan = viewportKey();
             await smoothPan(canvas, dx, dy, i === 0 ? panMs : PAN_MIN_MS,
                 findPressPoint(canvas, dx, dy));
             model.applyPan(dx, dy);
-            // 平移後的殘留會被接下來的拉近放大 2^N 倍，所以這裡也要確認實際位置
-            const settledPan = await waitViewportSettled(keyBeforePan);
+            // 平移後的殘留會被接下來的拉近放大 2^N 倍，所以要確認實際位置
             const vpAfterPan = readViewport();
-            if (settledPan && vpAfterPan) {
+            if (lastSettled && vpAfterPan) {
                 model.lat = vpAfterPan.lat;
                 model.lon = vpAfterPan.lon;
                 model.zoom = vpAfterPan.zoom;
             }
-            writeDiag({ step: 'after-pan', round: i, settled: settledPan,
+            writeDiag({ step: 'after-pan', round: i, settled: lastSettled,
                 remainPx: Math.round(Math.hypot(
                     model.offsetTo(lat, lon).dx, model.offsetTo(lat, lon).dy)) });
         }
 
-        // ③ 拉近到目標層級（滾輪錨定畫面中心，目標會留在原地）
+        // ③ 拉近到目標層級（滾輪錨定畫面中心，目標會留在原地）。
+        //    這裡一定要就地等它跑完：縮放動畫進行中網址不會更新，
+        //    若留到後面才用「整段開始前」的舊 key 去等，第一段比對會立刻通過，
+        //    退化成「連續兩次讀到相同」而誤判停穩——實測因此重複拉近、衝到 18.82 級。
         const applied = await smoothZoom(canvas, MAP_FOCUS_ZOOM - model.zoom);
         model.applyZoom(applied);
+        writeDiag({ step: 'after-zoom-in', settled: lastSettled,
+            modelZoom: +model.zoom.toFixed(2),
+            realZoom: (readViewport() || {}).zoom });
 
         // ④ 動畫全部結束後才讀真實視野、校正累積誤差。
         //    只在這裡等一次，而不是每個階段都等。
-        const finalDist = await correctIfNeeded(canvas, lat, lon, keyBeforeMotion);
+        const finalDist = await correctIfNeeded(canvas, lat, lon);
         const vpEnd = readViewport();
         writeDiag({
             step: 'done', target: [+lat.toFixed(5), +lon.toFixed(5)],
