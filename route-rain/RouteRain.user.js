@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.61.0
+// @version      0.62.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -262,18 +262,24 @@
     // ════════════════════════════════════════════════════════════════
 
     /**
-     * 「複製連結」網址的 data= 段裡有兩種區塊：
-     *   1m1!1s{PlaceID}!2m2!1d{lng}!2d{lat}      → 正式停靠站
-     *   3m4!1m2!1d{lng}!2d{lat}!3s{id}           → 路徑控制點（手動拖曳產生）
-     * 停靠站外層的前綴數字會浮動（1m5／1m20…），依後面掛了幾個控制點而變，
-     * 所以只抓核心模式、忽略前綴，否則會漏掉第一個停靠站（實際踩過）。
+     * data= 段裡有兩種區塊：
+     *   …!1s{PlaceID}[!2z{名稱}]!2m2!1d{lng}!2d{lat}   → 正式停靠站
+     *   3m4!1m2!1d{lng}!2d{lat}!3s{id}                 → 路徑控制點（手動拖曳產生）
+     *
+     * 停靠站的前綴數字會浮動，而且**浮動的不只一層**：
+     *   路線檢視： !1m5!1m1!1s{PlaceID}!2m2!1d…!2d…
+     *   點了景點： !1m6!1m2!1s{PlaceID}!2z{名稱}!2m2!1d…!2d…
+     * 早先只放寬了最外層（1m5／1m20），把 1m1 寫死，結果點到景點時
+     * 六個停靠站只抓到一個，等於整條路線解析失敗。
+     * 因此改為只認 1s{PlaceID} 這個核心錨點，前綴一律不管，
+     * 中間的名稱段（!2z…）可有可無。
      */
     function parseRouteFromUrl(href) {
         const m = href.match(/\/data=([^?]+)/);
         if (!m) return null;
         const data = m[1];
         const items = [];
-        const stopRe = /1m1!1s([^!]+)!2m2!1d(-?[\d.]+)!2d(-?[\d.]+)/g;
+        const stopRe = /1s(0x[0-9a-f]+:0x[0-9a-f]+)(?:!2z[^!]*)?!2m2!1d(-?[\d.]+)!2d(-?[\d.]+)/g;
         const ctrlRe = /3m4!1m2!1d(-?[\d.]+)!2d(-?[\d.]+)!3s([^!]+)/g;
         let r;
         while ((r = stopRe.exec(data)) !== null) {
@@ -1708,27 +1714,30 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
      * 因此面板每次變動都要重新套用一次。
      */
     /**
-     * 取出網址中「決定路線內容」的部分，當作重繪的判斷依據。
-     * 只看 data= 段與交通方式代碼——視野位移（/@lat,lng,zoom）不影響路線，
-     * 若把它也算進去，光是拖曳地圖就會觸發整批重算，白白打 API。
+     * 路線的簽章：停靠站與控制點的座標序列，加上交通方式。
+     *
+     * 不用整段 data= 字串比對——那會把「跟路線無關的變動」也算成換了路線。
+     * 實測：點一下地圖上的景點，Google 會導覽到該地點頁面，網址從 /maps/dir/
+     * 變成 /maps/place/、data= 也多出名稱與該景點的段落，但**路線完全沒變**。
+     * 拿字串比就會判定成換了路線而重算，然後因為解析不到而顯示錯誤，
+     * 把原本正常的表格洗掉。
+     *
+     * 改看路線本身之後，視野位移、網址尾巴多出參數、切換到地點檢視，
+     * 全都不會誤觸重算——只有真的改了起訖、停靠站、拖曳路徑或交通方式才會。
      */
-    function routeKeyOf(href) {
-        const m = href.match(/\/data=([^?]+)/);
-        return m ? m[1] : '';
+    function routeSignature(href) {
+        const parsed = parseRouteFromUrl(href);
+        if (!parsed || !parsed.points.length) return '';
+        return parsed.points
+            .map(p => `${p.kind}:${p.lat.toFixed(6)},${p.lon.toFixed(6)}`)
+            .join('|') + '|3e' + (parsed.urlTravelCode || '');
     }
 
     /** 開著表格時偵測到路線改變（例如切換交通方式）就重跑一次 */
     function scheduleRerunIfRouteChanged() {
         if (!state.active || !state.container) return;
-        const key = routeKeyOf(location.href);
-        if (!key) {
-            // 網址裡沒有路線段落了——點到景點時 Google 會導覽到該地點的頁面。
-            // 這不是「換了一條路線」，而是暫時離開路線檢視，
-            // 此時重算只會得到「讀不到路線」的錯誤畫面，把原本好好的表格洗掉。
-            if (state.lastRouteKey) log('網址暫時沒有路線段落（可能點到了景點），保留現有表格');
-            return;
-        }
-        if (key === state.lastRouteKey) return;
+        const key = routeSignature(location.href);
+        if (!key || key === state.lastRouteKey) return;
         log('偵測到路線改變，重新計算表格');
         state.lastRouteKey = key;
         clearTimeout(state.rerunTimer);
@@ -1790,7 +1799,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         const panel = findPanel();
         if (!panel) { alert('找不到路線面板，請先在 Google Maps 規劃好路線。'); return; }
 
-        state.lastRouteKey = routeKeyOf(location.href);
+        state.lastRouteKey = routeSignature(location.href);
         state.hiddenBlocks = [];
         applyHiding(panel);
         // 先前會把面板加寬到固定寬度，但實測加寬只影響某一層容器、
