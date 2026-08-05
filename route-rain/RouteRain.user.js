@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.55.0
+// @version      0.56.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -673,12 +673,45 @@
             if (timeline[i].sec < timeline[i - 1].sec) timeline[i].sec = timeline[i - 1].sec;
         }
 
+        // 步驟資料不一定完整。抽取路徑是從「開車」路線的樣本推導出來的，
+        // 其他交通方式的巢狀結構可能不同，導致只抓到一部分步驟——
+        // 實測單車路線出現過「摘要 213 分、步驟加總只有 36 分」。
+        // 步驟一旦不完整，距離↔時間的對應就垮了，節點會全部擠在前段。
+        const stepsTotal = stepTimes[stepTimes.length - 1] || 0;
+        const stepsMeters = declared;
+        const declaredTotal = alt.totalSec || stepsTotal;
+        const declaredMeters = alt.totalMeters || stepsMeters;
+        const metersOk = declaredMeters > 0 && stepsMeters >= declaredMeters * 0.9;
+        const secOk = declaredTotal > 0 && Math.abs(declaredTotal - stepsTotal) <= 60;
+
+        if (!metersOk || !secOk) {
+            warn('步驟資料與摘要不符：步驟', alt.steps.length, '個、加總',
+                Math.round(stepsMeters), '公尺 /', Math.round(stepsTotal / 60), '分；',
+                '摘要', Math.round(declaredMeters), '公尺 /', Math.round(declaredTotal / 60), '分。',
+                metersOk ? '距離相符，僅時間不符 → 依比例拉伸'
+                    : '距離也對不上，步驟可能不完整 → 改用等速模型');
+            if (metersOk) {
+                // 距離對得上，只是時間短少：依比例拉伸即可保留各段的快慢差異
+                const factor = declaredTotal / stepsTotal;
+                for (const p of timeline) p.sec *= factor;
+                for (let k = 0; k < stepTimes.length; k++) stepTimes[k] *= factor;
+            } else {
+                // 距離都對不上，表示步驟殘缺，無法據以分配時間。
+                // 退回「全程等速」：依累積距離比例分配總時程。
+                // 這會失去各路段的快慢差異，但至少整體時刻是對的。
+                for (let i = 0; i < timeline.length; i++) {
+                    timeline[i].sec = declaredTotal * (cum[i] / geoTotal);
+                }
+            }
+        }
+
         const steps = alt.steps.map((st, k) => ({
             t0: stepTimes[k], t1: stepTimes[k + 1], roads: st.roads,
         }));
         return {
             timeline, steps,
-            totalSec: alt.totalSec || stepTimes[stepTimes.length - 1],
+            totalSec: timeline.length ? timeline[timeline.length - 1].sec : 0,
+            stepsIncomplete: !metersOk,
         };
     }
 
@@ -1079,8 +1112,14 @@
             if (!(e.fromMs <= fromMs && e.toMs >= toMs)) { outOfRange.push(t); continue; }
             if (now - e.at > CACHE_TTL_MS) { stale.push(t); }
         }
-        if (missing.length) return { reason: '缺少地點：' + missing.join('、') };
-        if (outOfRange.length) return { reason: '時間範圍涵蓋不到：' + outOfRange.join('、') };
+        if (missing.length) {
+            return { reason: `快取裡沒有這 ${missing.length} 個鄉鎮：` + missing.join('、') };
+        }
+        if (outOfRange.length) {
+            const e = cache[outOfRange[0]];
+            return { reason: `時間範圍不夠（例如 ${outOfRange[0]}：快取涵蓋到 ` +
+                `${new Date(e.toMs).toLocaleString()}，本次需要到 ${new Date(toMs).toLocaleString()}）` };
+        }
         if (stale.length) {
             const age = Math.round((now - Math.min(...stale.map(t => cache[t].at))) / 60000);
             return { reason: `資料已過 ${age} 分鐘（上限 ${CACHE_TTL_MS / 60000} 分鐘）` };
@@ -1097,20 +1136,27 @@
         if (!shortfall) {
             const forecast = new Map(neededTowns.map(t => [t, cache[t].rows]));
             const oldest = Math.min(...neededTowns.map(t => cache[t].at));
-            log('沿用快取：', neededTowns.length, '個鄉鎮齊全，最舊一筆為',
+            log('【氣象】沿用快取，未呼叫中央氣象署 API。',
+                neededTowns.length, '個鄉鎮齊全，最舊一筆為',
                 Math.round((Date.now() - oldest) / 60000), '分鐘前取得');
             return {
                 forecast, failures: [], callCount: 0,
                 fetchedAt: oldest, fromCache: true,
             };
         }
-        log('快取不可用（' + shortfall.reason + '），重新取得');
+        log('【氣象】快取不可用，將呼叫中央氣象署 API。原因：' + shortfall.reason +
+            '｜本次需要 ' + neededTowns.length + ' 個鄉鎮、時間範圍 ' +
+            new Date(fromMs).toLocaleString() + ' ～ ' + new Date(toMs).toLocaleString());
 
         if (onFetchStart) onFetchStart();   // 只有確定要發請求時才通知畫面
         const res = await fetchForecast(auth, nodes, timeFrom, timeTo);
         // 只有全部成功才寫入快取，否則下次會沿用一份本來就不完整的資料
-        if (!res.failures.length) saveCache(res.forecast, fromMs, toMs);
-        else warn('本次有縣市取得失敗，不寫入快取');
+        if (!res.failures.length) {
+            saveCache(res.forecast, fromMs, toMs);
+            log('【氣象】已呼叫 API 並寫入快取');
+        } else {
+            warn('【氣象】有縣市取得失敗，不寫入快取（下次仍會重新呼叫）');
+        }
         return { ...res, fetchedAt: Date.now(), fromCache: false };
     }
 
@@ -1761,7 +1807,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         const alt = picked.alt;
 
         state.routePoints = alt.points;   // 供計算安全按下點
-        const { timeline, steps, totalSec } = buildTimeline(alt);
+        const { timeline, steps, totalSec, stepsIncomplete } = buildTimeline(alt);
         if (!timeline.length) throw new Error('Routes API 回傳的路徑沒有可用的座標');
         // 起點、使用者設定的停靠點、目的地——這三類是使用者自己規劃的位置，
         // 一定要出現在表格裡，不能因為「取中點」而被略過
@@ -1786,6 +1832,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             const sec = nearestSecOnTimeline(timeline, s.lat, s.lon);
             if (sec !== null) anchors.push({ sec, kind: 'waypoint', name: names[i + 1] || null });
         });
+        // 時間軸已在 buildTimeline 拉伸對齊，終點即為總時程
         anchors.push({
             sec: totalSec, kind: 'destination',
             name: names.length > 1 ? names[names.length - 1] : null,
@@ -1837,6 +1884,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             meta: {
                 matchNote: picked.matchNote,
                 routeDistanceMeters: alt.totalMeters,
+                stepsIncomplete,
                 capturedAt: state.capturedDirections.at,
                 mode: modeInfo,
                 selected,
@@ -1940,6 +1988,9 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             `涵蓋 ${new Set(nodes.map(n => n.county + n.town)).size} 個鄉鎮`,
             `總行程 ${Math.round(totalSec / 60)} 分`,
             `路徑資料：取自頁面本身（${Math.round((Date.now() - meta.capturedAt) / 1000)} 秒前攔截），未呼叫任何 API`,
+            ...(meta.stepsIncomplete
+                ? ['此交通方式的逐步資料不完整，時刻以全程等速推估，路名可能不準']
+                : []),
             meta.fromCache
                 ? `氣象資料：沿用快取（${Math.round((Date.now() - meta.fetchedAt) / 60000)} 分鐘前取得）`
                 : `氣象資料：本次重新取得，呼叫 ${meta.callCount} 次`,
