@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.59.0
+// @version      0.60.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -705,16 +705,21 @@
      * 座標到名稱的對應不會隨時間改變，所以快取可以放很久，不設有效期；
      * 只在筆數超過上限時丟掉最舊的。這讓反覆測試同一條路線幾乎不會再發出請求。
      */
-    async function fillPlaceNames(nodes) {
+    async function fillPlaceNames(nodes, onProgress) {
         if (!state.gToken) {
             log('沒有 session 權杖，略過地點名稱查詢（沿用導航指示的路名）');
+            if (onProgress) onProgress(nodes.length, nodes.length);
             return { hit: 0, fetched: 0 };
         }
         const cache = loadPlaceCache();
         let hit = 0, fetched = 0, failed = 0;
         for (const n of nodes) {
             const key = placeCacheKey(n.lat, n.lon);
-            if (cache[key]) { n.place = cache[key]; hit++; continue; }
+            if (cache[key]) {
+                n.place = cache[key]; hit++;
+                if (onProgress) onProgress(hit + fetched + failed, nodes.length);
+                continue;
+            }
             try {
                 const r = await revealPlace(n.lat, n.lon, state.gToken);
                 if (r) { n.place = r; cache[key] = r; fetched++; }
@@ -722,6 +727,7 @@
             } catch (err) {
                 failed++;
             }
+            if (onProgress) onProgress(hit + fetched + failed, nodes.length);
             await wait(PLACE_GAP_MS);
         }
         // 超量時丟掉最舊的（物件的插入順序即為新舊）
@@ -1428,7 +1434,16 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
   grid-auto-rows:${PITCH_PX}px;width:max-content;
   grid-template-columns:${ROWH_W_PX}px repeat(var(--${PREFIX}-cols),${PITCH_PX}px)}
 .${PREFIX}-corner{position:sticky;top:0;left:0;z-index:40;background:#fff;height:${HEADER_H_PX}px;
-  border-bottom:1px solid #e8eaed;border-right:1px solid #e8eaed}
+  border-bottom:1px solid #e8eaed;border-right:1px solid #e8eaed;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px}
+/* 地名擷取的進度。放在左上角那格——它本來就是空的，而且是 sticky，捲動時一直看得到 */
+.${PREFIX}-prog{font-size:10.5px;color:#5f6368;line-height:1.3;text-align:center;white-space:nowrap}
+.${PREFIX}-prog b{color:#1a73e8;font-weight:600}
+.${PREFIX}-bar{width:${ROWH_W_PX - 24}px;height:3px;border-radius:2px;background:#e8eaed;overflow:hidden}
+.${PREFIX}-bar i{display:block;height:100%;background:#1a73e8;border-radius:2px;
+  width:0;transition:width .2s ease}
+.${PREFIX}-corner.${PREFIX}-done{animation:${PREFIX}-fade 1.2s ease forwards}
+@keyframes ${PREFIX}-fade{0%,60%{opacity:1}100%{opacity:0}}
 /* 只吸附橫向（inline）。此元素縱向是 sticky，若連縱向也吸附，
    它的吸附區會永遠等於當下捲動位置，瀏覽器就不斷把 Y 軸對回它 → 一 hover 就跳回最上面 */
 .${PREFIX}-h{position:sticky;top:0;z-index:20;background:#fff;height:${HEADER_H_PX}px;
@@ -1488,6 +1503,12 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
   margin-right:8px;flex:0 0 auto}
 .${PREFIX}-scale{display:flex;align-items:center;gap:2px;padding-bottom:10px;font-size:11px;color:#5f6368}
 .${PREFIX}-scale i{width:16px;height:14px;display:inline-block}
+.${PREFIX}-ttl{font-size:14px;font-weight:600;color:#fff;line-height:1.35;margin-bottom:2px}
+.${PREFIX}-ttl em{display:inline-block;margin-left:6px;padding:0 6px;border-radius:8px;
+  background:rgba(138,180,248,.22);color:#8ab4f8;font-size:10.5px;font-style:normal;
+  font-weight:600;vertical-align:2px}
+/* 行政區是次要資訊：字小一級、亮度降下來，才有主次之分 */
+.${PREFIX}-sub{font-size:11.5px;color:rgba(255,255,255,.62);line-height:1.4;margin-bottom:6px}
 .${PREFIX}-tip{position:fixed;z-index:2147483000;pointer-events:none;display:none;background:#202124;
   color:#fff;border-radius:8px;padding:9px 12px;font-size:12px;line-height:1.6;
   box-shadow:0 6px 20px rgba(0,0,0,.25);max-width:280px}
@@ -1919,10 +1940,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             n.road = r.name;
             n.roadBorrowed = r.borrowed;
 
-        // 地點名稱用 Google 自己的反向地理編碼取得，比導航指示的路名精確得多
-        clearBody(wrap);
-        showMessage(wrap, `正在取得 ${nodes.length} 個地點的名稱…`);
-        await fillPlaceNames(nodes);
+
         }
 
         // 出發時間欄：從現在往後對齊到 DEPART_STEP_MIN 的整數倍，到預報上限為止
@@ -1970,6 +1988,29 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
                 altCount: alts.length,
             },
         });
+
+        // 表格先出現，地點名稱在背景陸續補上——36 個節點要十幾秒，
+        // 讓使用者盯著「處理中」等那麼久沒有必要。名稱是寫進節點物件的，
+        // tooltip 下次開啟時自然會拿到新值，不需要重繪整張表。
+        const corner = document.getElementById(PREFIX + '-corner');
+        if (corner) {
+            corner.innerHTML = `<span class="${PREFIX}-prog">地名擷取中<br><b>0</b> / ${nodes.length}</span>` +
+                `<span class="${PREFIX}-bar"><i></i></span>`;
+        }
+        fillPlaceNames(nodes, (done, total) => {
+            if (!corner || !corner.isConnected) return;
+            const num = corner.querySelector('.' + PREFIX + '-prog b');
+            const bar = corner.querySelector('.' + PREFIX + '-bar i');
+            if (num) num.textContent = String(done);
+            if (bar) bar.style.width = Math.round(done / total * 100) + '%';
+            if (done >= total) {
+                const p = corner.querySelector('.' + PREFIX + '-prog');
+                if (p) p.innerHTML = '地名已就緒';
+                corner.classList.add(PREFIX + '-done');
+                setTimeout(() => { if (corner.isConnected) corner.innerHTML = ''; }, 1300);
+            }
+        }).catch(err => warn('地點名稱查詢失敗：', err.message));
+
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -1997,7 +2038,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         grid.className = PREFIX + '-grid';
         grid.style.setProperty('--' + PREFIX + '-cols', String(departures.length));
 
-        const parts = ['<div class="' + PREFIX + '-corner"></div>'];
+        const parts = ['<div class="' + PREFIX + '-corner" id="' + PREFIX + '-corner"></div>'];
         departures.forEach((d, i) => {
             const isHour = d.getMinutes() === 0;
             const cls = [PREFIX + '-h'];
@@ -2153,13 +2194,17 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             tip.innerHTML =
                 // 顯示順序：使用者自己設的名稱 ＞ Google 反向地理編碼 ＞ 鄉鎮名。
                 // 第二行照 Google 彈窗的排法放行政區；查不到才退回導航指示的路名。
-                `<b>${n.placeName || (n.place && n.place.title) ||
-                     ((n.county || '') + (n.town || '（未知區域）'))}</b>` +
-                (n.kind ? `　【${KIND_LABEL[n.kind]}】` : '') +
-                (n.placeName && n.town ? `<br>${(n.county || '') + n.town}`
-                    : (n.place && n.place.area ? `<br>${n.place.area}` : '')) +
-                (!n.place && n.road ? `　${n.road}${n.roadBorrowed ? '（附近）' : ''}` : '') +
-                `<br>` +
+                // 照 Google 彈窗的排法：主名稱大而亮、行政區小而暗，拉開主次
+                `<div class="${PREFIX}-ttl">` +
+                `${n.placeName || (n.place && n.place.title) ||
+                   ((n.county || '') + (n.town || '（未知區域）'))}` +
+                (n.kind ? `<em>${KIND_LABEL[n.kind]}</em>` : '') + `</div>` +
+                (() => {
+                    const sub = n.placeName ? ((n.county || '') + (n.town || ''))
+                        : (n.place && n.place.area) ? n.place.area
+                            : (n.road ? n.road + (n.roadBorrowed ? '（附近）' : '') : '');
+                    return sub ? `<div class="${PREFIX}-sub">${sub}</div>` : '';
+                })() +
                 k('出發時間') + clockOf(dep) + '<br>' +
                 k('抵達時刻') + clockOf(arrive) + `（出發後 ${Math.round(n.sec / 60)} 分）<br>` +
                 k('降雨機率') + (row && row.pop != null ? row.pop + '%' : '無資料') + '<br>' +
@@ -2688,6 +2733,34 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         return ((location.href.match(/\/data=([^?]+)/) || [''])[1].match(/3m4/g) || []).length;
     }
 
+    /**
+     * 在畫面中心按一下，讓 Google 顯示它自己的地點資訊卡。
+     *
+     * 定位結束後目標就在畫面正中央，而節點本來就落在路線上，
+     * 所以中心點必定命中路線。單擊是「顯示這個點的資訊」，
+     * 與拖曳（會新增途經點）是不同的操作，不會改動路線。
+     */
+    async function revealOnMap(canvas) {
+        const r = canvas.getBoundingClientRect();
+        const x = r.left + r.width / 2;
+        const y = r.top + r.height / 2;
+        const before = routeCtrlCount();
+        dispatchPointer(canvas, 'pointerdown', x, y, 1);
+        await wait(60);                     // 停頓一下，避免被當成拖曳的起手
+        dispatchPointer(canvas, 'pointerup', x, y, 0);
+        const w = pageWindow();
+        const ME = w.MouseEvent || MouseEvent;
+        canvas.dispatchEvent(new ME('click', {
+            bubbles: true, cancelable: true, composed: true, view: w,
+            clientX: x, clientY: y, button: 0, buttons: 0, detail: 1,
+        }));
+        await wait(500);
+        const after = routeCtrlCount();
+        writeDiag({ step: 'reveal-click', at: [Math.round(x), Math.round(y)],
+            ctrlBefore: before, ctrlAfter: after });
+        if (after !== before) warn('點擊地圖後途經點數改變了', before, '→', after);
+    }
+
     function onNodeClick(node) {
         document.documentElement.removeAttribute('data-' + PREFIX + '-log');   // 每次點擊重新記錄
         const ctrlBefore = routeCtrlCount();
@@ -2708,7 +2781,9 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             hasPointerEvent: !!(w && w.PointerEvent),
         });
         log('點擊節點', node.county + node.town);
-        focusMapOn(node.lat, node.lon).then(() => {
+        focusMapOn(node.lat, node.lon).then(async () => {
+            const canvas = findMapCanvas();
+            if (canvas) await revealOnMap(canvas);      // 讓 Google 秀出該點的資訊卡
             const after = routeCtrlCount();
             if (after !== ctrlBefore) {
                 // 破壞性副作用：模擬拖曳被判定成「拖曳路線新增途經點」
