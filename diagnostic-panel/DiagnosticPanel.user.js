@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         通用診斷面板骨架
 // @namespace    browser-tools
-// @version      3.0
+// @version      3.1
 // @description  診斷面板骨架：面板 UI + 相對時間戳 + 開始/停止 + 一鍵複製；任務專屬邏輯只需替換「探針區塊」。目前任務：找出「點路線取得地點名稱」的請求格式
 // @match        https://www.google.com/maps/*
 // @grant        GM_setValue
@@ -312,25 +312,22 @@
     let _hits = [];
     let _armed = false;
 
-    /** 這個回應裡有沒有「看起來像地址」的字串 */
-    function findAddressLike(text) {
-        // 台灣地址的特徵：郵遞區號＋縣市＋區＋里/路。取最長的幾筆當代表
-        const re = /[\u4e00-\u9fa5\d]{0,6}[縣市][\u4e00-\u9fa5]{1,4}[區鄉鎮市][\u4e00-\u9fa5\d]{2,20}/g;
-        const found = [...new Set(text.match(re) || [])];
-        return found.sort((a, b) => b.length - a.length).slice(0, 5);
-    }
-
     function record(kind, url, body, text) {
         if (!_armed || _hits.length >= MAX_KEEP) return;
-        const addrs = findAddressLike(text || '');
-        if (!addrs.length) return;                    // 沒有地址樣式就不是我們要的
-        const item = { kind, url: String(url), body: body || null, text, addrs };
-        _hits.push(item);
-        const short = String(url).replace(/^https?:\/\/[^/]+/, '');
-        log(`捕捉 #${_hits.length}`,
-            `${kind}　${(text.length / 1024).toFixed(1)}KB\n` +
-            `      路徑：${short.slice(0, 150)}\n` +
-            `      疑似地址：${addrs.join('　│　')}`);
+        const u = String(url);
+        // 只看 reveal：實測那就是「點路線取得地點名稱」的端點，
+        // place 端點回傳的是店家詳情（48KB），不是我們要的
+        if (u.indexOf('/maps/preview/reveal') < 0) return;
+        _hits.push({ kind, url: u, body: body || null, text });
+        W.__rrHits = _hits;
+
+        // 捕捉當下就完整輸出。先前把結果放在「停止監控」才印，
+        // 使用者點完直接複製就一片空白，白跑一輪——同一個坑不要再踩。
+        log(`捕捉 #${_hits.length}`, `${kind}　回應 ${(text.length / 1024).toFixed(1)}KB`);
+        log('  完整網址', u);
+        log('  完整回應', text.length > 3000
+            ? text.slice(0, 3000) + `\n      …（截斷，全長 ${text.length}，完整內容在 __rrHits[${_hits.length - 1}].text）`
+            : text);
     }
 
     function armInterceptors() {
@@ -362,8 +359,8 @@
         '在地圖上找到路線（那條藍色粗線）',
         '按下方的「開始監控」',
         '用滑鼠點一下路線上的任一點，等下方彈出地點名稱',
-        '想多看幾個點可以再點幾次（最多記錄 12 筆）',
-        '按「停止監控」，再按「複製」',
+        '點 1～2 個點就夠了，內容會立刻顯示在下方',
+        '直接按「複製」貼給我（這次不必先按停止監控）',
     ]);
 
     function PROBE_SETUP() {
@@ -375,19 +372,7 @@
 
     function PROBE_TEARDOWN() {
         _armed = false;
-        if (_hits.length) {
-            // 把最有希望的那一筆完整攤開：格式看得清楚才判斷得出能不能重用
-            const best = _hits.slice().sort((a, b) => b.addrs[0].length - a.addrs[0].length)[0];
-            log('最有希望的一筆', `${best.kind}\n      完整網址：${best.url.slice(0, 600)}` +
-                (best.body ? `\n      請求內容：${String(best.body).slice(0, 400)}` : ''));
-            const idx = best.text.indexOf(best.addrs[0]);
-            log('名稱在回應中的位置', `字元位置 ${idx}／全長 ${best.text.length}\n` +
-                `      前後文：…${best.text.slice(Math.max(0, idx - 160), idx + 160)}…`);
-            log('提示', '完整內容留在 window.__rrHits，可用 __rrHits[N].text 取出');
-            W.__rrHits = _hits;
-        } else {
-            log('結果', '沒有捕捉到含地址的回應。可能是點在路線之外，或該資訊來自已載入的資料而非新請求。');
-        }
+        log('小結', `共捕捉 ${_hits.length} 筆 reveal 請求，完整內容留在 window.__rrHits`);
         _restore.forEach(fn => { try { fn(); } catch (err) { /* 還原失敗不影響停止 */ } });
         _restore = [];
         _bdpObservers.forEach(mo => mo.disconnect());
