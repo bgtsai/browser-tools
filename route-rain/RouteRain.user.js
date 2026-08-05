@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.48.0
+// @version      0.49.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -582,21 +582,28 @@
             const summary = alts[r][0];
             const legs = (alts[r][1] && alts[r][1][0] && alts[r][1][0][1]) || [];
             const steps = [];
-            for (const leg of legs) {
+            // leg 的分界就是使用者設定的停靠點。最後一個 leg 的結尾是目的地，
+            // 不列入停靠點（它由 totalSec 代表）。
+            const waypointSecs = [];
+            let acc = 0;
+            legs.forEach((leg, li) => {
                 for (const st of (leg[1] || [])) {
+                    const sec = (st[0] && st[0][3] && st[0][3][0]) || 0;
                     steps.push({
                         meters: (st[0] && st[0][2] && st[0][2][0]) || 0,
-                        sec: (st[0] && st[0][3] && st[0][3][0]) || 0,
+                        sec,
                         roads: roadNamesOf(st),
                     });
+                    acc += sec;
                 }
-            }
+                if (li < legs.length - 1) waypointSecs.push(acc);
+            });
             const lat = accumulate(geos[r][0]);
             const lon = accumulate(geos[r][1]);
             const points = new Array(lat.length);
             for (let i = 0; i < lat.length; i++) points[i] = [lat[i] / 1e7, lon[i] / 1e7];
             out.push({
-                points, steps,
+                points, steps, waypointSecs,
                 totalMeters: (summary[2] && summary[2][0]) || 0,
                 totalSec: (summary[3] && summary[3][0]) || 0,
                 distanceText: (summary[2] && summary[2][1]) || '',
@@ -672,7 +679,11 @@
         const steps = alt.steps.map((st, k) => ({
             t0: stepTimes[k], t1: stepTimes[k + 1], roads: st.roads,
         }));
-        return { timeline, steps, totalSec: alt.totalSec || stepTimes[stepTimes.length - 1] };
+        return {
+            timeline, steps,
+            totalSec: alt.totalSec || stepTimes[stepTimes.length - 1],
+            waypointSecs: alt.waypointSecs || [],
+        };
     }
 
     /** 在時間軸上精確內插出某個累積秒數對應的座標（不吸附到最近頂點——吸附會破壞等分性質） */
@@ -699,7 +710,22 @@
      *   等分取中點的數學性質：n=2 時節點落在 1/4 與 3/4，於是 a+c=b（a=進入到第一點、
      *   b=兩點之間、c=最後一點到離開）。這個等式可以當自我檢查用。
      */
-    function buildNodes(timeline, totalSec) {
+    // 使用者自己規劃的三類位置，在表格上要標示出來
+    const KIND_LABEL = { origin: '出發', waypoint: '停靠', destination: '抵達' };
+
+    /**
+     * 把時間軸切成節點。
+     *
+     * 基本規則是「同一鄉鎮取中點」，但**使用者自己規劃的點必須保留**——
+     * 起點、目的地、以及他設定的中途停靠點。那些是他刻意選的位置，
+     * 看不到就等於工具漏掉了他最在意的資訊。
+     *
+     * 因此切分時改成：某一小段裡若含有這類錨點，就**用錨點取代中點**；
+     * 一段裡有好幾個錨點就全部保留，不合併。沒有錨點的段落才取中點。
+     *
+     * @param anchors [{ sec, kind }]，kind 為 origin／waypoint／destination
+     */
+    function buildNodes(timeline, totalSec, anchors) {
         const towns = loadTowns();
 
         // 先用整條路線的 bbox 篩掉不可能命中的鄉鎮（實測 368 → 約 85 個）
@@ -765,22 +791,52 @@
         }
         kept.sort((a, b) => (a.t0 + a.t1) / 2 - (b.t0 + b.t1) / 2);
 
+        const anchorList = (anchors || []).slice().sort((a, b) => a.sec - b.sec);
+        const usedAnchors = new Set();
+        const makeNode = (sec, p, part, kind) => {
+            const pos = positionAt(timeline, sec);
+            return {
+                sec, lat: pos.lat, lon: pos.lon,
+                county: p ? p.county : null, town: p ? p.town : null,
+                enterSec: p ? p.t0 : sec, exitSec: p ? p.t1 : sec,
+                dwellSec: p ? p.accum : 0,
+                part, kind: kind || null,
+                isFlap: p ? Math.abs((p.t1 - p.t0) - p.accum) > 5 : false,
+            };
+        };
+
         const nodes = [];
         for (const p of kept) {
             const span = p.t1 - p.t0;
             const n = Math.max(1, Math.floor(span / SUBDIVIDE_SEC) + 1);
             for (let k = 0; k < n; k++) {
-                const sec = p.t0 + span * (2 * k + 1) / (2 * n);
-                const pos = positionAt(timeline, sec);
-                nodes.push({
-                    sec, lat: pos.lat, lon: pos.lon,
-                    county: p.county, town: p.town,
-                    enterSec: p.t0, exitSec: p.t1, dwellSec: p.accum,
-                    part: [k + 1, n],
-                    isFlap: Math.abs(span - p.accum) > 5,
-                });
+                const segStart = p.t0 + span * k / n;
+                const segEnd = p.t0 + span * (k + 1) / n;
+                // 這一小段裡的錨點；最後一段要含右端點，否則目的地會落在區間外
+                const inSeg = anchorList.filter(a =>
+                    a.sec >= segStart && (k === n - 1 ? a.sec <= segEnd : a.sec < segEnd));
+                if (inSeg.length) {
+                    // 錨點取代中點，而且有幾個就保留幾個——使用者規劃的位置不合併
+                    for (const a of inSeg) {
+                        nodes.push(makeNode(a.sec, p, [k + 1, n], a.kind));
+                        usedAnchors.add(a);
+                    }
+                } else {
+                    nodes.push(makeNode(p.t0 + span * (2 * k + 1) / (2 * n), p, [k + 1, n], null));
+                }
             }
         }
+
+        // 保險：落在被丟棄的鄉鎮裡、或不屬於任何鄉鎮的錨點，仍然要出現
+        for (const a of anchorList) {
+            if (usedAnchors.has(a)) continue;
+            const pos = positionAt(timeline, a.sec);
+            const t = whoAt(pos.lat, pos.lon);
+            nodes.push(makeNode(a.sec, t ? { county: t.county, town: t.town,
+                t0: a.sec, t1: a.sec, accum: 0 } : null, [1, 1], a.kind));
+            log('錨點不在任何保留的鄉鎮區段內，另外補上：', a.kind, Math.round(a.sec / 60), '分');
+        }
+
         nodes.sort((a, b) => a.sec - b.sec);
         log('節點數', nodes.length, '／涵蓋鄉鎮', new Set(nodes.map(n => n.county + n.town)).size,
             '／總行程', Math.round(totalSec / 60), '分');
@@ -1246,6 +1302,10 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
   box-shadow:-20px 0 0 #fff}
 .${PREFIX}-rh.${PREFIX}-hl{background:#e8f0fe;box-shadow:-20px 0 0 #e8f0fe}
 .${PREFIX}-rh .${PREFIX}-t{font-weight:600;color:#202124}
+/* 使用者自己規劃的位置（出發／停靠／抵達）要一眼看得出來 */
+.${PREFIX}-kind{display:inline-block;margin-left:5px;padding:0 5px;border-radius:8px;
+  background:#1a73e8;color:#fff;font-size:10px;font-style:normal;font-weight:600;
+  vertical-align:1px}
 /* 固定寬度＋等寬數字：hover 時整欄標籤要在「+504分」與「05:19」之間切換，
    寬度只要有變化就會觸發回流，捲動錨定與 scroll-snap 會跟著重新對位，
    表現出來就是「滑鼠移回表格時整個跳到最上面」。寬度鎖死才不會回流。 */
@@ -1655,9 +1715,14 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         const alt = picked.alt;
 
         state.routePoints = alt.points;   // 供計算安全按下點
-        const { timeline, steps, totalSec } = buildTimeline(alt);
+        const { timeline, steps, totalSec, waypointSecs } = buildTimeline(alt);
         if (!timeline.length) throw new Error('Routes API 回傳的路徑沒有可用的座標');
-        const nodes = buildNodes(timeline, totalSec);
+        // 起點、使用者設定的停靠點、目的地——這三類是使用者自己規劃的位置，
+        // 一定要出現在表格裡，不能因為「取中點」而被略過
+        const anchors = [{ sec: 0, kind: 'origin' }];
+        for (const s of (waypointSecs || [])) anchors.push({ sec: s, kind: 'waypoint' });
+        anchors.push({ sec: totalSec, kind: 'destination' });
+        const nodes = buildNodes(timeline, totalSec, anchors);
         if (!nodes.length) {
             clearBody(wrap);
             showMessage(wrap, '這條路線沒有落在台灣任何鄉鎮界線內，目前只支援台灣本島與外島的路線。');
@@ -1757,7 +1822,9 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             parts.push(
                 `<div class="${PREFIX}-rh" data-${PREFIX}-rh="${ri}">` +
                 `<span class="${PREFIX}-m" data-${PREFIX}-cum="${cum}">${cum}</span>` +
-                `<span class="${PREFIX}-t">${n.county}${n.town}</span></div>`);
+                `<span class="${PREFIX}-t">${(n.county || '') + (n.town || '（未知區域）')}` +
+                (n.kind ? `<i class="${PREFIX}-kind">${KIND_LABEL[n.kind]}</i>` : '') +
+                `</span></div>`);
             for (let ci = 0; ci < departures.length; ci++) {
                 const whenMs = departures[ci].getTime() + n.sec * 1000;
                 const row = lookupForecast(forecast, n.town, whenMs);
@@ -1890,7 +1957,9 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             const sevLabel = ['—', '有可能', '基本上會遇到'][sev];
             const k = s => `<span class="${PREFIX}-k">${s}</span>`;
             tip.innerHTML =
-                `<b>${n.county}${n.town}</b>${n.road ? '　' + n.road + (n.roadBorrowed ? '（附近）' : '') : ''}<br>` +
+                `<b>${(n.county || '') + (n.town || '（未知區域）')}</b>` +
+                (n.kind ? `　【${KIND_LABEL[n.kind]}】` : '') +
+                `${n.road ? '　' + n.road + (n.roadBorrowed ? '（附近）' : '') : ''}<br>` +
                 k('出發時間') + clockOf(dep) + '<br>' +
                 k('抵達時刻') + clockOf(arrive) + `（出發後 ${Math.round(n.sec / 60)} 分）<br>` +
                 k('降雨機率') + (row && row.pop != null ? row.pop + '%' : '無資料') + '<br>' +
