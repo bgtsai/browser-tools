@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.52.0
+// @version      0.53.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -720,6 +720,19 @@
      *
      * @param anchors [{ sec, kind }]，kind 為 origin／waypoint／destination
      */
+    /**
+     * 讀出使用者在路線面板上輸入的地點名稱，依 DOM 順序：起點、（停靠站…）、目的地。
+     * 網址裡只有 PlaceID 沒有名稱，而使用者認得的是自己打的那串字
+     * （例如「野柳女王頭 207新北市萬里區…」），不是鄉鎮名。
+     */
+    function readEndpointNames() {
+        const panel = findPanel();
+        if (!panel) return [];
+        return [...panel.querySelectorAll('input')]
+            .filter(el => el.value && el.value.trim() && el.offsetParent !== null)
+            .map(el => el.value.trim());
+    }
+
     /** 找出時間軸上離指定座標最近的那一點的時刻——用來把停靠站對應到行程時間 */
     function nearestSecOnTimeline(timeline, lat, lon) {
         let best = null, bestD = Infinity;
@@ -798,6 +811,7 @@
 
         const anchorList = (anchors || []).slice().sort((a, b) => a.sec - b.sec);
         const usedAnchors = new Set();
+        // kind 可傳字串或整個錨點物件（後者才帶得出使用者輸入的名稱）
         const makeNode = (sec, p, part, kind) => {
             const pos = positionAt(timeline, sec);
             return {
@@ -805,7 +819,8 @@
                 county: p ? p.county : null, town: p ? p.town : null,
                 enterSec: p ? p.t0 : sec, exitSec: p ? p.t1 : sec,
                 dwellSec: p ? p.accum : 0,
-                part, kind: kind || null,
+                part, kind: kind ? kind.kind || kind : null,
+                placeName: (kind && kind.name) || null,
                 isFlap: p ? Math.abs((p.t1 - p.t0) - p.accum) > 5 : false,
             };
         };
@@ -823,7 +838,7 @@
                 if (inSeg.length) {
                     // 錨點取代中點，而且有幾個就保留幾個——使用者規劃的位置不合併
                     for (const a of inSeg) {
-                        nodes.push(makeNode(a.sec, p, [k + 1, n], a.kind));
+                        nodes.push(makeNode(a.sec, p, [k + 1, n], a));
                         usedAnchors.add(a);
                     }
                 } else {
@@ -848,7 +863,7 @@
                 }
             }
             nodes.push(makeNode(a.sec, t ? { county: t.county, town: t.town,
-                t0: a.sec, t1: a.sec, accum: 0 } : null, [1, 1], a.kind));
+                t0: a.sec, t1: a.sec, accum: 0 } : null, [1, 1], a));
             log('錨點不在任何保留的鄉鎮區段內，另外補上：', a.kind,
                 Math.round(a.sec / 60), '分', t ? `（${t.county}${t.town}）` : '（查不到鄉鎮）');
         }
@@ -1738,15 +1753,19 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         if (!timeline.length) throw new Error('Routes API 回傳的路徑沒有可用的座標');
         // 起點、使用者設定的停靠點、目的地——這三類是使用者自己規劃的位置，
         // 一定要出現在表格裡，不能因為「取中點」而被略過
-        const anchors = [{ sec: 0, kind: 'origin' }];
+        const names = readEndpointNames();
+        const anchors = [{ sec: 0, kind: 'origin', name: names[0] || null }];
         // 中途停靠站取自網址：kind==='stop' 才是使用者加的停靠點，
         // 'via' 是拖曳路線產生的控制點，不算。首尾兩個 stop 是起點與目的地，排除。
         const stops = parsed.points.filter(p => p.kind === 'stop').slice(1, -1);
-        for (const s of stops) {
+        stops.forEach((s, i) => {
             const sec = nearestSecOnTimeline(timeline, s.lat, s.lon);
-            if (sec !== null) anchors.push({ sec, kind: 'waypoint' });
-        }
-        anchors.push({ sec: totalSec, kind: 'destination' });
+            if (sec !== null) anchors.push({ sec, kind: 'waypoint', name: names[i + 1] || null });
+        });
+        anchors.push({
+            sec: totalSec, kind: 'destination',
+            name: names.length > 1 ? names[names.length - 1] : null,
+        });
         const nodes = buildNodes(timeline, totalSec, anchors);
         if (!nodes.length) {
             clearBody(wrap);
@@ -1784,6 +1803,10 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             await getForecast(keys.cwa, nodes, departures[0], lastArrive,
                 () => { clearBody(wrap); showMessage(wrap, '正在向中央氣象署取得降雨預報…'); });
 
+        log('即將繪製的前 3 列：', nodes.slice(0, 3).map(n =>
+            `+${Math.round(n.sec / 60)}分 ${n.county || '?'}${n.town || '?'}` +
+            `${n.kind ? '[' + n.kind + ']' : ''}`).join('　│　'),
+            '／總列數', nodes.length);
         clearBody(wrap);
         render(wrap, {
             nodes, departures, forecast, totalSec,
@@ -1981,8 +2004,9 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             const sevLabel = ['—', '有可能', '基本上會遇到'][sev];
             const k = s => `<span class="${PREFIX}-k">${s}</span>`;
             tip.innerHTML =
-                `<b>${(n.county || '') + (n.town || '（未知區域）')}</b>` +
+                `<b>${n.placeName || ((n.county || '') + (n.town || '（未知區域）'))}</b>` +
                 (n.kind ? `　【${KIND_LABEL[n.kind]}】` : '') +
+                (n.placeName && n.town ? `<br>${(n.county || '') + n.town}` : '') +
                 `${n.road ? '　' + n.road + (n.roadBorrowed ? '（附近）' : '') : ''}<br>` +
                 k('出發時間') + clockOf(dep) + '<br>' +
                 k('抵達時刻') + clockOf(arrive) + `（出發後 ${Math.round(n.sec / 60)} 分）<br>` +
