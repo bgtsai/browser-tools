@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.47.0
+// @version      0.48.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -72,19 +72,18 @@
     const SAFE_PRESS_MIN_PX = 60;              // 按下點至少要離路線這麼遠，否則會被判定為拖曳路線
     const PRESS_EDGE_MARGIN_PX = 40;           // 按下點與拖曳終點都要離畫布邊緣這麼遠
     const ARC_MAX_ZOOM_OUT = 10;               // 拉遠的級數上限（台北→高雄這種極遠距離需要 9 級）
-    // ── 死區與收斂 ──
-    // 反覆點同一個節點時，若每次都為了幾十個像素再修一次，會在兩點之間來回橫跳，
-    // 看起來像程式有問題。與其追求絕對精確，不如設一個「已經夠準就完全不動」的門檻。
-    // 80px 在 1658px 寬的畫布上不到 5%，視覺上仍是置中的。
-    const DEAD_ZONE_PX = 80;                   // 已在此範圍內就完全不動作
-    const FINAL_FIX_PX = 80;                   // 整段結束後誤差超過此像素才做修正
-    const CONVERGE_RATIO = 0.7;                // 一次修正至少要把誤差降到原本的七成，
-                                               // 否則視為無法收斂，立刻停手不再嘗試
-    // 網址落後真實視野 0.7～1.4 秒（實測）。用固定秒數等待很容易讀到舊值，
-    // 而舊值算出來的誤差是假的，據以校正只會更錯。改成輪詢到「不再變動」為止。
+    // ── 收斂與死區 ──
+    // 死區不是「距離小於某個值就放棄」，而是「已經沒有縮放、而且再修也修不動」的狀態。
+    // 先前把門檻設在 80px（zoom 16 約 173 公尺），等於還沒修完就放棄。
+    // 正確的判準是：一直修到改善停滯為止，只有停滯時剩下的誤差才算死區。
+    const PAN_TOLERANCE_PX = 15;               // 到這個程度就算已經到位（zoom 16 約 32 公尺）
+    const DEAD_ZONE_PX = 50;                   // 停滯時若剩下的誤差在此範圍內，視為抖動、接受它
+                                               // 也用於「再點同一個節點」時判斷不必動作
+    const CONVERGE_MIN_EFFECT = 0.5;           // 一次修正的實際改善量，至少要有該次拖曳量的一半；
+                                               // 不能用固定比例判斷——拖曳有 0.6 畫面的上限，
+                                               // 誤差比上限大時本來就只能一次減少一個上限的量
     const SETTLE_POLL_MS = 250;                // 輪詢間隔；連續兩次相同即視為停止
     const SETTLE_TIMEOUT_MS = 3000;            // 等待上限，逾時就用當下的值繼續
-    const PAN_TOLERANCE_PX = 30;               // 修正時的收斂門檻
     const PAN_MAX_ITERATIONS = 5;              // 修正的次數上限
     const ZOOM_TOLERANCE = 0.3;                // 縮放層級與目標差距在此範圍內即可
     const MIN_WORK_ZOOM = 5;                   // 拉遠的下限
@@ -2221,25 +2220,36 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         // ── 第二步：縮放已固定，此時的像素距離才可以互相比較 ──
         let dist = null;
         let lastDist = Infinity;
+        let lastApplied = Infinity;
         for (let i = 0; i < PAN_MAX_ITERATIONS; i++) {
             const off = offsetToTarget(lat, lon);
             if (!off) return dist;
             dist = Math.hypot(off.dx, off.dy);
             writeDiag({ step: 'correct', round: i, settled,
                 zoom: off.zoom, distPx: Math.round(dist) });
-            if (dist <= PAN_TOLERANCE_PX) return dist;
-            if (i === 0 && dist <= FINAL_FIX_PX) return dist;   // 本來就在死區內，不多動一次
-            if (dist >= lastDist * CONVERGE_RATIO) {            // 真的沒有變好才停手
-                writeDiag({ step: 'correct-stop', round: i,
-                    distPx: Math.round(dist), lastPx: Math.round(lastDist) });
-                return dist;
+            if (dist <= PAN_TOLERANCE_PX) return dist;      // 已經到位
+
+            if (i > 0) {
+                // 這次拖曳「能夠」貢獻的量：要嘛是整段誤差，要嘛被單次上限夾住
+                const couldFix = Math.min(lastApplied, lastDist);
+                const improved = lastDist - dist;
+                if (improved < couldFix * CONVERGE_MIN_EFFECT) {
+                    // 改善停滯。此時才判斷是「小到修不動的抖動」還是「真的有問題」
+                    writeDiag({ step: 'correct-stall', round: i,
+                        distPx: Math.round(dist), improvedPx: Math.round(improved),
+                        couldFixPx: Math.round(couldFix),
+                        verdict: dist <= DEAD_ZONE_PX ? '抖動，接受' : '無法收斂' });
+                    return dist;
+                }
             }
             lastDist = dist;
+
             const r = canvas.getBoundingClientRect();
             const dx = Math.max(-r.width * DRAG_MAX_SCREENS,
                 Math.min(r.width * DRAG_MAX_SCREENS, off.dx));
             const dy = Math.max(-r.height * DRAG_MAX_SCREENS,
                 Math.min(r.height * DRAG_MAX_SCREENS, off.dy));
+            lastApplied = Math.hypot(dx, dy);
             prevKey = viewportKey();
             await smoothPan(canvas, dx, dy, PAN_MIN_MS, findPressPoint(canvas, dx, dy));
             settled = await waitViewportSettled(prevKey);
@@ -2298,8 +2308,23 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             screens: +screens.toFixed(2), arcOut, panMs: Math.round(panMs) });
 
         if (arcOut > 0) {
+            const keyBeforeZoom = viewportKey();
             const applied = await smoothZoom(canvas, -arcOut);
             model.applyZoom(applied);
+            // 一定要等縮放動畫真的結束才平移。
+            // 送完滾輪事件時地圖還在縮放，此時拖曳的像素↔實際距離換算比例仍在變動，
+            // 實測平移只達成約 72%，殘留再被拉近放大，最終差了 8 公里。
+            const settled = await waitViewportSettled(keyBeforeZoom);
+            const vpAfterZoom = readViewport();
+            if (settled && vpAfterZoom) {
+                // 此時的讀值已確認反映了動作，可以安全地校準模型
+                model.lat = vpAfterZoom.lat;
+                model.lon = vpAfterZoom.lon;
+                model.zoom = vpAfterZoom.zoom;
+            }
+            writeDiag({ step: 'after-arc-out', settled,
+                modelZoom: +model.zoom.toFixed(2),
+                realZoom: vpAfterZoom ? vpAfterZoom.zoom : null });
         }
 
         // ② 平移。位移在「拉遠後的層級」重新算——用舊層級會差十幾倍。
@@ -2309,23 +2334,43 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         //    一次就修得完；等到拉近後才發現，就得拖好幾次而且每次上限只有 0.6 個畫面。
         let pans = 0;
         let lastDist = Infinity;
+        let lastApplied = Infinity;
         for (let i = 0; i < PAN_MAX_ITERATIONS; i++) {
             const off = model.offsetTo(lat, lon);
             const dist = Math.hypot(off.dx, off.dy);
             if (dist <= PAN_TOLERANCE_PX) break;
-            // 收斂保護：這一輪沒有把誤差顯著降低，就不要再試了，否則會來回橫跳
-            if (dist >= lastDist * CONVERGE_RATIO) {
-                writeDiag({ step: 'pan-stop', round: i,
-                    distPx: Math.round(dist), lastPx: Math.round(lastDist) });
-                break;
+            if (i > 0) {
+                // 停滯判斷同樣看「改善量 vs 該次拖曳量」，不用固定比例——
+                // 拖曳有上限，誤差比上限大時本來就只能一次減少一個上限的量
+                const couldFix = Math.min(lastApplied, lastDist);
+                const improved = lastDist - dist;
+                if (improved < couldFix * CONVERGE_MIN_EFFECT) {
+                    writeDiag({ step: 'pan-stall', round: i,
+                        distPx: Math.round(dist), improvedPx: Math.round(improved),
+                        couldFixPx: Math.round(couldFix) });
+                    break;
+                }
             }
             lastDist = dist;
             const dx = Math.max(-limX, Math.min(limX, off.dx));
             const dy = Math.max(-limY, Math.min(limY, off.dy));
+            lastApplied = Math.hypot(dx, dy);
             pans++;
+            const keyBeforePan = viewportKey();
             await smoothPan(canvas, dx, dy, i === 0 ? panMs : PAN_MIN_MS,
                 findPressPoint(canvas, dx, dy));
             model.applyPan(dx, dy);
+            // 平移後的殘留會被接下來的拉近放大 2^N 倍，所以這裡也要確認實際位置
+            const settledPan = await waitViewportSettled(keyBeforePan);
+            const vpAfterPan = readViewport();
+            if (settledPan && vpAfterPan) {
+                model.lat = vpAfterPan.lat;
+                model.lon = vpAfterPan.lon;
+                model.zoom = vpAfterPan.zoom;
+            }
+            writeDiag({ step: 'after-pan', round: i, settled: settledPan,
+                remainPx: Math.round(Math.hypot(
+                    model.offsetTo(lat, lon).dx, model.offsetTo(lat, lon).dy)) });
         }
 
         // ③ 拉近到目標層級（滾輪錨定畫面中心，目標會留在原地）
