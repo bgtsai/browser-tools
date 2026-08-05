@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.46.0
+// @version      0.47.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -85,7 +85,8 @@
     const SETTLE_POLL_MS = 250;                // 輪詢間隔；連續兩次相同即視為停止
     const SETTLE_TIMEOUT_MS = 3000;            // 等待上限，逾時就用當下的值繼續
     const PAN_TOLERANCE_PX = 30;               // 修正時的收斂門檻
-    const PAN_MAX_ITERATIONS = 3;              // 修正的次數上限
+    const PAN_MAX_ITERATIONS = 5;              // 修正的次數上限
+    const ZOOM_TOLERANCE = 0.3;                // 縮放層級與目標差距在此範圍內即可
     const MIN_WORK_ZOOM = 5;                   // 拉遠的下限
     const ROUTE_CHANGE_DEBOUNCE_MS = 600;      // 路線改變後等它安定再重算（ms）
     const DEPART_STEP_MIN = 15;                // 出發時間欄距（分鐘）
@@ -2192,20 +2193,43 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
      *
      * @param keyBeforeMotion 整段移動開始前的視野，用來確認第一次讀值時已經反映了動作
      */
+    /**
+     * 最後校正：確保結果一定是對的。
+     *
+     * 關鍵前提是**先讓縮放到位再量位置**。像素距離會隨縮放層級改變，
+     * 在還沒縮放完的狀態下量到的數字，跟縮放完之後的數字不能相比——
+     * 實測踩過：同一個誤差在 zoom 11.04 量到 727px、在 15.83 量到 20109px，
+     * 收斂保護就誤判成「越修越糟」而停手，其實誤差根本沒變。
+     *
+     * @param keyBeforeMotion 整段移動開始前的視野，用來確認讀到的已是動作後的值
+     */
     async function correctIfNeeded(canvas, lat, lon, keyBeforeMotion) {
+        // ── 第一步：等縮放安定，不到位就補 ──
+        let prevKey = keyBeforeMotion;
+        let settled = await waitViewportSettled(prevKey);
+        for (let z = 0; z < 3; z++) {
+            const vp = readViewport();
+            if (!vp) break;
+            const diff = MAP_FOCUS_ZOOM - vp.zoom;
+            if (Math.abs(diff) <= ZOOM_TOLERANCE) break;
+            writeDiag({ step: 'zoom-fix', round: z, realZoom: vp.zoom, need: +diff.toFixed(2) });
+            prevKey = viewportKey();
+            await smoothZoom(canvas, diff);
+            settled = await waitViewportSettled(prevKey);
+        }
+
+        // ── 第二步：縮放已固定，此時的像素距離才可以互相比較 ──
         let dist = null;
         let lastDist = Infinity;
-        let prevKey = keyBeforeMotion;
         for (let i = 0; i < PAN_MAX_ITERATIONS; i++) {
-            const settled = await waitViewportSettled(prevKey);
             const off = offsetToTarget(lat, lon);
             if (!off) return dist;
             dist = Math.hypot(off.dx, off.dy);
-            writeDiag({ step: 'correct', round: i, settled, distPx: Math.round(dist) });
-            if (dist <= PAN_TOLERANCE_PX) return dist;          // 已經夠準
-            if (dist <= FINAL_FIX_PX) return dist;              // 在死區內，不為了幾十像素再動一次
-            // 收斂保護：修了卻沒有顯著變好，代表再修也是白搭，只會來回橫跳
-            if (dist >= lastDist * CONVERGE_RATIO) {
+            writeDiag({ step: 'correct', round: i, settled,
+                zoom: off.zoom, distPx: Math.round(dist) });
+            if (dist <= PAN_TOLERANCE_PX) return dist;
+            if (i === 0 && dist <= FINAL_FIX_PX) return dist;   // 本來就在死區內，不多動一次
+            if (dist >= lastDist * CONVERGE_RATIO) {            // 真的沒有變好才停手
                 writeDiag({ step: 'correct-stop', round: i,
                     distPx: Math.round(dist), lastPx: Math.round(lastDist) });
                 return dist;
@@ -2218,8 +2242,8 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
                 Math.min(r.height * DRAG_MAX_SCREENS, off.dy));
             prevKey = viewportKey();
             await smoothPan(canvas, dx, dy, PAN_MIN_MS, findPressPoint(canvas, dx, dy));
+            settled = await waitViewportSettled(prevKey);
         }
-        await waitViewportSettled(prevKey);
         const off = offsetToTarget(lat, lon);
         return off ? Math.hypot(off.dx, off.dy) : dist;
     }
