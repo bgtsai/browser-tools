@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.53.0
+// @version      0.54.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -1298,7 +1298,12 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
   scroll-padding-top:${HEADER_H_PX}px;scroll-padding-left:${ROWH_W_PX}px}
 .${PREFIX}-msg{padding:14px 12px;font-size:13px;color:#3c4043;line-height:1.7;white-space:pre-wrap}
 .${PREFIX}-msg b{color:#1a73e8}
-.${PREFIX}-grid{display:grid;grid-auto-rows:${PITCH_PX}px;width:max-content;
+/* 第一列必須明確給標頭的高度。只設 grid-auto-rows 的話，標頭那一列也只有
+   PITCH_PX 高，而標頭本身是 HEADER_H_PX——溢出的部分會往下蓋住資料列，
+   蓋掉的列數正好是 (HEADER_H_PX − PITCH_PX) ÷ PITCH_PX。
+   實測 72px 標頭配 24px 節距，前兩列完全看不到。 */
+.${PREFIX}-grid{display:grid;grid-template-rows:${HEADER_H_PX}px;
+  grid-auto-rows:${PITCH_PX}px;width:max-content;
   grid-template-columns:${ROWH_W_PX}px repeat(var(--${PREFIX}-cols),${PITCH_PX}px)}
 .${PREFIX}-corner{position:sticky;top:0;left:0;z-index:40;background:#fff;height:${HEADER_H_PX}px;
   border-bottom:1px solid #e8eaed;border-right:1px solid #e8eaed}
@@ -1754,6 +1759,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         // 起點、使用者設定的停靠點、目的地——這三類是使用者自己規劃的位置，
         // 一定要出現在表格裡，不能因為「取中點」而被略過
         const names = readEndpointNames();
+        log('面板讀到的地點名稱：', names.length ? names.join(' ／ ') : '（讀不到，tooltip 將沿用鄉鎮名）');
         const anchors = [{ sec: 0, kind: 'origin', name: names[0] || null }];
         // 中途停靠站取自網址：kind==='stop' 才是使用者加的停靠點，
         // 'via' 是拖曳路線產生的控制點，不算。首尾兩個 stop 是起點與目的地，排除。
