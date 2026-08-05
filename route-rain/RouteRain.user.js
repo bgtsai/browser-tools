@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.62.0
+// @version      0.63.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -1441,15 +1441,23 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
   grid-template-columns:${ROWH_W_PX}px repeat(var(--${PREFIX}-cols),${PITCH_PX}px)}
 .${PREFIX}-corner{position:sticky;top:0;left:0;z-index:40;background:#fff;height:${HEADER_H_PX}px;
   border-bottom:1px solid #e8eaed;border-right:1px solid #e8eaed;
-  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px}
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;
+  padding:0 8px;box-sizing:border-box}
 /* 地名擷取的進度。放在左上角那格——它本來就是空的，而且是 sticky，捲動時一直看得到 */
-.${PREFIX}-prog{font-size:10.5px;color:#5f6368;line-height:1.3;text-align:center;white-space:nowrap}
+.${PREFIX}-prog{font-size:10.5px;color:#5f6368;line-height:1.45;text-align:center;white-space:nowrap}
 .${PREFIX}-prog b{color:#1a73e8;font-weight:600}
+.${PREFIX}-cnt b{color:#1a73e8;font-weight:600}
+.${PREFIX}-cnt{font-size:11px;color:#3c4043;text-align:center;white-space:nowrap;
+  font-variant-numeric:tabular-nums}
 .${PREFIX}-bar{width:${ROWH_W_PX - 24}px;height:3px;border-radius:2px;background:#e8eaed;overflow:hidden}
 .${PREFIX}-bar i{display:block;height:100%;background:#1a73e8;border-radius:2px;
   width:0;transition:width .2s ease}
-.${PREFIX}-corner.${PREFIX}-done{animation:${PREFIX}-fade 1.2s ease forwards}
-@keyframes ${PREFIX}-fade{0%,60%{opacity:1}100%{opacity:0}}
+/* 淡出只能套在「內容」上，絕不能套在格子本身。
+   這一格是左側地名欄的遮罩：往下捲時地名會從它底下經過，
+   靠它的白底擋住。若讓格子本身 opacity 歸零（而且用了 forwards 永久保持），
+   遮罩就失效，地名會透出來跟時間軸並排——實測踩過。 */
+.${PREFIX}-corner > *{transition:opacity .5s ease}
+.${PREFIX}-corner.${PREFIX}-done > *{opacity:0}
 /* 只吸附橫向（inline）。此元素縱向是 sticky，若連縱向也吸附，
    它的吸附區會永遠等於當下捲動位置，瀏覽器就不斷把 Y 軸對回它 → 一 hover 就跳回最上面 */
 .${PREFIX}-h{position:sticky;top:0;z-index:20;background:#fff;height:${HEADER_H_PX}px;
@@ -1510,10 +1518,10 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
 .${PREFIX}-scale{display:flex;align-items:center;gap:2px;padding-bottom:10px;font-size:11px;color:#5f6368}
 .${PREFIX}-scale i{width:16px;height:14px;display:inline-block}
 .${PREFIX}-ttl{font-size:14px;font-weight:600;color:#fff;line-height:1.35;margin-bottom:2px}
-/* 標籤與名稱同一行、字級相當——比內文大一圈才有醒目的效果 */
-.${PREFIX}-ttl em{display:inline-block;margin-left:7px;padding:1px 8px;border-radius:10px;
-  background:rgba(138,180,248,.25);color:#aecbfa;font-size:13px;font-style:normal;
-  font-weight:600;vertical-align:1px;white-space:nowrap}
+/* 標籤放在名稱左側，字級與名稱相同（14px）——同級才夠醒目 */
+.${PREFIX}-ttl em{display:inline-block;margin-right:8px;padding:1px 9px;border-radius:11px;
+  background:rgba(138,180,248,.25);color:#aecbfa;font-size:14px;font-style:normal;
+  font-weight:600;white-space:nowrap}
 /* 行政區是次要資訊：字小一級、亮度降下來，才有主次之分 */
 .${PREFIX}-sub{font-size:11.5px;color:rgba(255,255,255,.62);line-height:1.4;margin-bottom:6px}
 .${PREFIX}-tip{position:fixed;z-index:2147483000;pointer-events:none;display:none;background:#202124;
@@ -2011,20 +2019,28 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         // tooltip 下次開啟時自然會拿到新值，不需要重繪整張表。
         const corner = document.getElementById(PREFIX + '-corner');
         if (corner) {
-            corner.innerHTML = `<span class="${PREFIX}-prog">地名擷取中<br><b>0</b> / ${nodes.length}</span>` +
+            corner.innerHTML =
+                `<span class="${PREFIX}-prog">地名擷取中</span>` +
+                `<span class="${PREFIX}-cnt"><b>0</b> / ${nodes.length}</span>` +
                 `<span class="${PREFIX}-bar"><i></i></span>`;
         }
         fillPlaceNames(nodes, (done, total) => {
             if (!corner || !corner.isConnected) return;
-            const num = corner.querySelector('.' + PREFIX + '-prog b');
+            const num = corner.querySelector('.' + PREFIX + '-cnt b');
             const bar = corner.querySelector('.' + PREFIX + '-bar i');
             if (num) num.textContent = String(done);
             if (bar) bar.style.width = Math.round(done / total * 100) + '%';
             if (done >= total) {
                 const p = corner.querySelector('.' + PREFIX + '-prog');
-                if (p) p.innerHTML = '地名已就緒';
+                const cnt = corner.querySelector('.' + PREFIX + '-cnt');
+                if (p) p.textContent = '地名已就緒';
+                if (cnt) cnt.remove();
                 corner.classList.add(PREFIX + '-done');
-                setTimeout(() => { if (corner.isConnected) corner.innerHTML = ''; }, 1300);
+                setTimeout(() => {
+                    if (!corner.isConnected) return;
+                    corner.innerHTML = '';
+                    corner.classList.remove(PREFIX + '-done');   // 不留殘留狀態
+                }, 1300);
             }
         }).catch(err => warn('地點名稱查詢失敗：', err.message));
 
@@ -2234,8 +2250,8 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
                         title = (n.county || '') + (n.town || '（未知區域）');
                         addr = n.road ? n.road + (n.roadBorrowed ? '（附近）' : '') : '';
                     }
-                    return `<div class="${PREFIX}-ttl">${title}` +
-                        (n.kind ? `<em>${KIND_LABEL[n.kind]}</em>` : '') + '</div>' +
+                    return `<div class="${PREFIX}-ttl">` +
+                        (n.kind ? `<em>${KIND_LABEL[n.kind]}</em>` : '') + title + '</div>' +
                         (addr ? `<div class="${PREFIX}-sub">${addr}</div>` : '');
                 })() +
                 k('出發時間') + clockOf(dep) + '<br>' +
