@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.63.0
+// @version      0.64.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -2789,10 +2789,27 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
      * 所以中心點必定命中路線。單擊是「顯示這個點的資訊」，
      * 與拖曳（會新增途經點）是不同的操作，不會改動路線。
      */
-    async function revealOnMap(canvas) {
+    async function revealOnMap(canvas, lat, lon) {
         const r = canvas.getBoundingClientRect();
-        const x = r.left + r.width / 2;
-        const y = r.top + r.height / 2;
+        // 不點畫面中心，改點「節點實際落在螢幕上的那一點」。
+        //
+        // 點中心等於要求定位必須完美：地圖偏 15px，那一點就離節點 15px，
+        // 在 zoom 16 約 32 公尺——沿路走 32 公尺可能已經過了路口、換了門牌，
+        // 若節點正好在轉彎處，甚至會落到轉彎後的另一段路上。
+        // 而節點的螢幕位置是算得出來的（最終視野＋節點座標），精度是次像素等級，
+        // 這樣就把「定位精度」與「點擊精度」解耦，定位的容差也不必為此收緊。
+        const off = offsetToTarget(lat, lon);
+        let x = r.left + r.width / 2;
+        let y = r.top + r.height / 2;
+        if (off) {
+            x -= off.dx;
+            y -= off.dy;
+        }
+        // 夾在畫布內，避免定位嚴重失敗時點到畫布外
+        const M = 4;
+        x = Math.max(r.left + M, Math.min(r.right - M, x));
+        y = Math.max(r.top + M, Math.min(r.bottom - M, y));
+
         const before = routeCtrlCount();
         dispatchPointer(canvas, 'pointerdown', x, y, 1);
         await wait(60);                     // 停頓一下，避免被當成拖曳的起手
@@ -2805,7 +2822,9 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         }));
         await wait(500);
         const after = routeCtrlCount();
-        writeDiag({ step: 'reveal-click', at: [Math.round(x), Math.round(y)],
+        writeDiag({ step: 'reveal-click',
+            at: [Math.round(x), Math.round(y)],
+            offsetFromCentre: off ? [Math.round(-off.dx), Math.round(-off.dy)] : null,
             ctrlBefore: before, ctrlAfter: after });
         if (after !== before) warn('點擊地圖後途經點數改變了', before, '→', after);
     }
@@ -2832,7 +2851,8 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         log('點擊節點', node.county + node.town);
         focusMapOn(node.lat, node.lon).then(async () => {
             const canvas = findMapCanvas();
-            if (canvas) await revealOnMap(canvas);      // 讓 Google 秀出該點的資訊卡
+            // 讓 Google 秀出該點的資訊卡；點在節點的實際螢幕位置，不是畫面中心
+            if (canvas) await revealOnMap(canvas, node.lat, node.lon);
             const after = routeCtrlCount();
             if (after !== ctrlBefore) {
                 // 破壞性副作用：模擬拖曳被判定成「拖曳路線新增途經點」
