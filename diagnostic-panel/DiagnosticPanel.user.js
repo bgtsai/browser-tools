@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         通用診斷面板骨架
 // @namespace    browser-tools
-// @version      2.3
-// @description  診斷面板骨架：面板 UI + 相對時間戳 + 開始/停止 + 一鍵複製；任務專屬邏輯只需替換「探針區塊」。目前任務：找出讓拖曳穩定到位的參數組合
+// @version      3.0
+// @description  診斷面板骨架：面板 UI + 相對時間戳 + 開始/停止 + 一鍵複製；任務專屬邏輯只需替換「探針區塊」。目前任務：找出「點路線取得地點名稱」的請求格式
 // @match        https://www.google.com/maps/*
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -293,180 +293,103 @@
     // ─────────────────────────────────────────────────────────────────────
 
     let _bdpObservers = [];
+    let _restore = [];
 
-    // ── 目前任務：找出讓拖曳「穩定」到位的參數組合 ──
+    // ── 目前任務：點路線會冒出「111臺北市士林區福志里福林路」那種名稱，
+    //            找出背後的請求，看能不能改成用我們自己的座標直接呼叫 ──
     //
-    // 已確立：第一格的位移不被套用，補償公式 S = dx × N/(N−1) 在成功時精準到個位數
-    //         （400/400、150/150、700/700），所以公式本身是對的。
+    // 目的不是「能不能點得動」，而是要看清楚請求的格式：
+    //   ・網址與參數長什麼樣、座標放在哪一段
+    //   ・是否只換座標就能重用（若綁了 session 或簽章就不通）
+    //   ・回應裡那串名稱在哪個位置
     //
-    // 但同樣 16 格，有時 100%、有時 129% ——有東西間歇性地「多加」了位移，
-    // 最可能是**慣性滑行**：放開瞬間若仍有速度，地圖會繼續滑。
-    //
-    // 上一輪的測試有個方法錯誤：探針用**等速**直線拖曳，
-    // 而 route-rain 實際用 **easeInOutCubic 緩動**——兩者放開瞬間的速度完全不同。
-    // 測試的動作曲線與真實實作不一致，結果本來就不能直接套用。
-    // （與先前「Console 環境 vs 沙箱環境」是同一類錯誤：驗證條件必須與實際一致。）
-    //
-    // 本輪對照四組：{等速, 緩動} × {結尾 1 個零速樣本, 結尾 3 個}
-    // 每組重複三次，看的不只是平均，更是**變異**——穩定比準確更重要，
-    // 因為只要穩定，剩下的偏差都可以用係數補掉。
+    // 攔截器裝在 unsafeWindow 上：本腳本用了 GM_* 授權而跑在沙箱，
+    // 改沙箱的 fetch/XHR 只會動到副本，攔不到網頁真正發出的請求。
 
     const W = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
-    const POINTER_ID = 10088;
-    const FRAME_MS = 16;
-    const FRAMES = 16;
-    const DIST = 400;
-    const REPEATS = 3;
     const sleep = ms => new Promise(r => setTimeout(r, ms));
+    const MAX_KEEP = 12;
+    let _hits = [];
+    let _armed = false;
 
-    function viewport() {
-        const m = location.href.match(/\/@(-?[\d.]+),(-?[\d.]+),([\d.]+)z/);
-        return m ? { lat: +m[1], lon: +m[2], zoom: +m[3] } : null;
-    }
-    const vpKey = () => (location.href.match(/\/@[^/]+/) || [''])[0];
-    function ctrlPoints() {
-        return ((location.href.match(/\/data=([^?]+)/) || [''])[1].match(/3m4/g) || []).length;
-    }
-    function projectPx(lat, lon, zoom) {
-        const world = 256 * Math.pow(2, zoom);
-        const s = Math.sin(lat * Math.PI / 180);
-        return { x: (lon + 180) / 360 * world,
-                 y: (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * world };
-    }
-    function shiftPx(a, b) {
-        if (!a || !b) return 0;
-        const p1 = projectPx(a.lat, a.lon, a.zoom);
-        const p2 = projectPx(b.lat, b.lon, a.zoom);
-        return Math.round(Math.hypot(p2.x - p1.x, p2.y - p1.y));
-    }
-    async function waitUrlChange(prevKey, timeoutMs) {
-        const t0 = performance.now();
-        while (performance.now() - t0 < (timeoutMs || 5000)) {
-            if (vpKey() !== prevKey) { await sleep(300); return Math.round(performance.now() - t0); }
-            await sleep(60);
-        }
-        return -1;
-    }
-    /** 等到視野連續兩次讀值相同才算真的停下——避免慣性還沒結束就開始下一輪 */
-    async function waitSettled(timeoutMs) {
-        const t0 = performance.now();
-        let last = null;
-        while (performance.now() - t0 < (timeoutMs || 3000)) {
-            const k = vpKey();
-            if (k === last) return;
-            last = k;
-            await sleep(250);
-        }
-    }
-    function mapCanvas() {
-        return [...document.querySelectorAll('canvas')]
-            .map(el => ({ el, r: el.getBoundingClientRect() }))
-            .filter(o => o.r.width > 200 && o.r.height > 200)
-            .sort((a, b) => b.r.width * b.r.height - a.r.width * a.r.height)[0] || null;
-    }
-    function fire(target, mouseType, pointerType, opts) {
-        const ME = W.MouseEvent || MouseEvent;
-        const PE = W.PointerEvent || PointerEvent;
-        target.dispatchEvent(new ME(mouseType, opts));
-        target.dispatchEvent(new PE(pointerType, Object.assign(
-            { pointerId: POINTER_ID, isPrimary: true, pointerType: 'mouse' }, opts)));
+    /** 這個回應裡有沒有「看起來像地址」的字串 */
+    function findAddressLike(text) {
+        // 台灣地址的特徵：郵遞區號＋縣市＋區＋里/路。取最長的幾筆當代表
+        const re = /[\u4e00-\u9fa5\d]{0,6}[縣市][\u4e00-\u9fa5]{1,4}[區鄉鎮市][\u4e00-\u9fa5\d]{2,20}/g;
+        const found = [...new Set(text.match(re) || [])];
+        return found.sort((a, b) => b.length - a.length).slice(0, 5);
     }
 
-    const easeInOutCubic = t => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
-
-    /**
-     * @param eased      true=easeInOutCubic（與 route-rain 相同），false=等速
-     * @param tailFrames 結尾在終點原地補送幾次 move，用來把速度樣本填成零
-     */
-    async function drag(canvas, dx, eased, tailFrames) {
-        const sx = dx * FRAMES / (FRAMES - 1);      // 補償「第一格不被套用」
-        const r = canvas.getBoundingClientRect();
-        const x = r.left + r.width * (sx < 0 ? 0.78 : 0.22);
-        const y = r.top + r.height * 0.5;
-        const base = { bubbles: true, cancelable: true, view: W, button: 0, buttons: 1 };
-        const move = (cx) => fire(canvas, 'mousemove', 'pointermove',
-            Object.assign({}, base, { cancelable: false, detail: 88, clientX: cx, clientY: y }));
-
-        fire(canvas, 'mousedown', 'pointerdown',
-            Object.assign({}, base, { detail: 1, clientX: x, clientY: y }));
-        for (let i = 1; i <= FRAMES; i++) {
-            const t = i / FRAMES;
-            move(x + sx * (eased ? easeInOutCubic(t) : t));
-            await sleep(FRAME_MS);
-        }
-        const ex = x + sx;
-        for (let k = 0; k < tailFrames; k++) { move(ex); await sleep(FRAME_MS); }
-        fire(canvas, 'mouseup', 'pointerup',
-            Object.assign({}, base, { detail: 1, buttons: 0, clientX: ex, clientY: y }));
+    function record(kind, url, body, text) {
+        if (!_armed || _hits.length >= MAX_KEEP) return;
+        const addrs = findAddressLike(text || '');
+        if (!addrs.length) return;                    // 沒有地址樣式就不是我們要的
+        const item = { kind, url: String(url), body: body || null, text, addrs };
+        _hits.push(item);
+        const short = String(url).replace(/^https?:\/\/[^/]+/, '');
+        log(`捕捉 #${_hits.length}`,
+            `${kind}　${(text.length / 1024).toFixed(1)}KB\n` +
+            `      路徑：${short.slice(0, 150)}\n` +
+            `      疑似地址：${addrs.join('　│　')}`);
     }
 
-    async function measureOnce(canvas, eased, tailFrames) {
-        await waitSettled(3000);
-        const v0 = viewport(), key0 = vpKey();
-        await drag(canvas, -DIST, eased, tailFrames);
-        await waitUrlChange(key0, 5000);
-        await waitSettled(3000);
-        const moved = shiftPx(v0, viewport());
-        // 拖回原位，同樣等它完全停下
-        const keyBack = vpKey();
-        await drag(canvas, DIST, eased, tailFrames);
-        await waitUrlChange(keyBack, 5000);
-        await waitSettled(3000);
-        return Math.round(moved / DIST * 1000) / 10;
-    }
+    function armInterceptors() {
+        const XHR = W.XMLHttpRequest;
+        const origOpen = XHR.prototype.open;
+        const origSend = XHR.prototype.send;
+        XHR.prototype.open = function (m, u) { this.__u = u; this.__m = m; return origOpen.apply(this, arguments); };
+        XHR.prototype.send = function (b) {
+            this.addEventListener('load', () => {
+                try { record('XHR ' + (this.__m || ''), this.__u, b, this.responseText); } catch (err) { /* 非文字回應 */ }
+            });
+            return origSend.apply(this, arguments);
+        };
+        _restore.push(() => { XHR.prototype.open = origOpen; XHR.prototype.send = origSend; });
 
-    async function runGroup(canvas, label, eased, tailFrames) {
-        const pcts = [];
-        for (let i = 0; i < REPEATS; i++) pcts.push(await measureOnce(canvas, eased, tailFrames));
-        const avg = Math.round(pcts.reduce((a, b) => a + b, 0) / pcts.length * 10) / 10;
-        const spread = Math.round((Math.max(...pcts) - Math.min(...pcts)) * 10) / 10;
-        // 穩定優先：變異小就算平均偏離，也能用固定係數補掉
-        const stable = spread <= 3;
-        const accurate = Math.abs(avg - 100) <= 2;
-        log(label, `三次 ${pcts.join('%, ')}%　平均 ${avg}%　變異 ${spread}%　` +
-            (stable && accurate ? '✅ 穩定且準確'
-                : stable ? `⚠️ 穩定但偏離 ${Math.round((avg - 100) * 10) / 10}%（可用係數補）`
-                    : '❌ 不穩定'));
-        return { label, avg, spread, stable, accurate };
-    }
-
-    async function runAll() {
-        const canvas = mapCanvas();
-        if (!canvas) { log('錯誤', '找不到地圖畫布'); return; }
-        log('環境', `畫布 ${Math.round(canvas.r.width)}x${Math.round(canvas.r.height)}　` +
-            `視野 ${JSON.stringify(viewport())}　控制點 ${ctrlPoints()} 個　` +
-            `固定 ${FRAMES} 格、${DIST}px、已補償`);
-
-        const groups = [];
-        groups.push(await runGroup(canvas.el, '①等速＋結尾 1 格', false, 1));
-        groups.push(await runGroup(canvas.el, '②等速＋結尾 3 格', false, 3));
-        groups.push(await runGroup(canvas.el, '③緩動＋結尾 1 格', true, 1));
-        groups.push(await runGroup(canvas.el, '④緩動＋結尾 3 格', true, 3));
-
-        const best = groups.slice().sort((a, b) =>
-            (a.spread - b.spread) || (Math.abs(a.avg - 100) - Math.abs(b.avg - 100)))[0];
-        log('總結', `最穩定的是「${best.label}」：平均 ${best.avg}%、變異 ${best.spread}%\n` +
-            '      ' + (best.stable
-                ? (best.accurate ? '→ 直接採用這組參數'
-                    : `→ 採用這組，並在補償公式再乘上 ${Math.round(100 / best.avg * 1000) / 1000}`)
-                : '→ 四組都不穩定，慣性不是唯一原因，需再找變數'));
-        log('④副作用', ctrlPoints() === 0 ? '路線未被改動 ✅' : '⚠️ 路線的途經點數改變了');
-        log('DONE', '測試完成，請按「停止監控」後複製。');
+        const origFetch = W.fetch;
+        W.fetch = function (...a) {
+            const url = (a[0] && a[0].url) || a[0];
+            const body = a[1] && a[1].body;
+            return origFetch.apply(this, a).then(res => {
+                res.clone().text().then(t => record('fetch', url, body, t)).catch(() => {});
+                return res;
+            });
+        };
+        _restore.push(() => { W.fetch = origFetch; });
     }
 
     guide([
-        '確認頁面上已經規劃好一條路線',
+        '在地圖上找到路線（那條藍色粗線）',
         '按下方的「開始監控」',
-        '等約 2 分鐘，期間不要操作頁面或把滑鼠移到地圖上',
-        '看到 DONE 之後按「停止監控」，再按「複製」',
+        '用滑鼠點一下路線上的任一點，等下方彈出地點名稱',
+        '想多看幾個點可以再點幾次（最多記錄 12 筆）',
+        '按「停止監控」，再按「複製」',
     ]);
 
     function PROBE_SETUP() {
-        log('START', '開始測試四組參數，全程約 2 分鐘，請勿操作頁面。');
-        runAll().catch(err => log('錯誤', err.message + '\n      ' + String(err.stack || '').slice(0, 200)));
+        _hits = [];
+        _armed = true;
+        armInterceptors();
+        log('START', '攔截器已就位。請點一下地圖上的路線，只會記錄「回應裡含台灣地址樣式」的請求。');
     }
 
     function PROBE_TEARDOWN() {
+        _armed = false;
+        if (_hits.length) {
+            // 把最有希望的那一筆完整攤開：格式看得清楚才判斷得出能不能重用
+            const best = _hits.slice().sort((a, b) => b.addrs[0].length - a.addrs[0].length)[0];
+            log('最有希望的一筆', `${best.kind}\n      完整網址：${best.url.slice(0, 600)}` +
+                (best.body ? `\n      請求內容：${String(best.body).slice(0, 400)}` : ''));
+            const idx = best.text.indexOf(best.addrs[0]);
+            log('名稱在回應中的位置', `字元位置 ${idx}／全長 ${best.text.length}\n` +
+                `      前後文：…${best.text.slice(Math.max(0, idx - 160), idx + 160)}…`);
+            log('提示', '完整內容留在 window.__rrHits，可用 __rrHits[N].text 取出');
+            W.__rrHits = _hits;
+        } else {
+            log('結果', '沒有捕捉到含地址的回應。可能是點在路線之外，或該資訊來自已載入的資料而非新請求。');
+        }
+        _restore.forEach(fn => { try { fn(); } catch (err) { /* 還原失敗不影響停止 */ } });
+        _restore = [];
         _bdpObservers.forEach(mo => mo.disconnect());
         _bdpObservers = [];
         log('STOP', '監控停止');
