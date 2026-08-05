@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.54.0
+// @version      0.55.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -95,6 +95,7 @@
     const TIMELINE_AXIS_Y_PX = 27;             // 時間軸線距標頭頂端的距離
     const HEADER_H_PX = 72;                    // 標頭列高度；要容得下整點圓與其下方的時間標籤，
                                                // 太矮的話標籤會壓到第一列資料
+    const SIDEBAR_MAX_X_PX = 520;              // 左側面板的寬度上限；用來篩掉地圖上的搜尋框
     const HOUR_DOT_PX = 20;                    // 整點圓直徑；加上 2px 外環後為 24px，
                                                // 剛好等於欄節距，不會溢出到鄰欄被蓋掉
 
@@ -726,11 +727,15 @@
      * （例如「野柳女王頭 207新北市萬里區…」），不是鄉鎮名。
      */
     function readEndpointNames() {
-        const panel = findPanel();
-        if (!panel) return [];
-        return [...panel.querySelectorAll('input')]
-            .filter(el => el.value && el.value.trim() && el.offsetParent !== null)
-            .map(el => el.value.trim());
+        // 輸入框不在 findPanel() 找到的那個容器裡——那是「路線清單」面板，
+        // 起點/目的地的搜尋框在它上方，屬於另一個容器。所以改為全頁掃描，
+        // 再用「可見、有值、位於左側面板寬度內」篩選，並依畫面上的位置排序。
+        const cands = [...document.querySelectorAll('input')]
+            .map(el => ({ el, r: el.getBoundingClientRect(), v: (el.value || '').trim() }))
+            .filter(o => o.v && o.r.width > 60 && o.r.height > 10 &&
+                o.r.left < SIDEBAR_MAX_X_PX && o.el.offsetParent !== null);
+        cands.sort((a, b) => a.r.top - b.r.top || a.r.left - b.r.left);
+        return cands.map(o => o.v);
     }
 
     /** 找出時間軸上離指定座標最近的那一點的時刻——用來把停靠站對應到行程時間 */
@@ -1330,7 +1335,9 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
 /* 用 visibility 而非 display 切換：display 會改變版面，一改就觸發回流，
    scroll-snap 隨即重新對位——這正是「滑鼠一離開表格就跳回最上面」的來源。
    visibility 不影響版面，切換時不會回流。 */
-.${PREFIX}-tl{position:absolute;top:${TIMELINE_AXIS_Y_PX + 16}px;left:50%;transform:translateX(-50%);
+/* 距離要算 hover 放大後的尺寸：圓放大 1.15 倍再加 5px 光暈，底緣在軸心 +16.5px。
+   原本設 +16，標籤的白底正好切掉光暈最下緣。 */
+.${PREFIX}-tl{position:absolute;top:${TIMELINE_AXIS_Y_PX + 22}px;left:50%;transform:translateX(-50%);
   font-size:11px;font-weight:700;color:#1a73e8;white-space:nowrap;background:#fff;
   padding:1px 4px;border-radius:3px;visibility:hidden}
 .${PREFIX}-h.${PREFIX}-hl .${PREFIX}-tl{visibility:visible}
@@ -1759,7 +1766,18 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         // 起點、使用者設定的停靠點、目的地——這三類是使用者自己規劃的位置，
         // 一定要出現在表格裡，不能因為「取中點」而被略過
         const names = readEndpointNames();
-        log('面板讀到的地點名稱：', names.length ? names.join(' ／ ') : '（讀不到，tooltip 將沿用鄉鎮名）');
+        if (names.length) {
+            log('面板讀到的地點名稱：', names.join(' ／ '));
+        } else {
+            log('讀不到地點名稱。頁面上所有可見輸入框：',
+                [...document.querySelectorAll('input')]
+                    .filter(el => el.offsetParent !== null)
+                    .map(el => {
+                        const r = el.getBoundingClientRect();
+                        return `[${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x` +
+                            `${Math.round(r.height)}] "${(el.value || '').slice(0, 20)}"`;
+                    }).join('　') || '（一個都沒有）');
+        }
         const anchors = [{ sec: 0, kind: 'origin', name: names[0] || null }];
         // 中途停靠站取自網址：kind==='stop' 才是使用者加的停靠點，
         // 'via' 是拖曳路線產生的控制點，不算。首尾兩個 stop 是起點與目的地，排除。
