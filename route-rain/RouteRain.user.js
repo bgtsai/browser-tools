@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.44.0
+// @version      0.45.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -11,6 +11,7 @@
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_registerMenuCommand
+// @grant        GM_setClipboard
 // @grant        GM_getResourceText
 // @grant        unsafeWindow
 // @resource     twTowns https://raw.githubusercontent.com/bgtsai/browser-tools/main/route-rain/tw_town_boundaries_encoded.json
@@ -71,7 +72,14 @@
     const SAFE_PRESS_MIN_PX = 60;              // 按下點至少要離路線這麼遠，否則會被判定為拖曳路線
     const PRESS_EDGE_MARGIN_PX = 40;           // 按下點與拖曳終點都要離畫布邊緣這麼遠
     const ARC_MAX_ZOOM_OUT = 10;               // 拉遠的級數上限（台北→高雄這種極遠距離需要 9 級）
-    const FINAL_FIX_PX = 60;                   // 整段結束後誤差超過此像素才做修正
+    // ── 死區與收斂 ──
+    // 反覆點同一個節點時，若每次都為了幾十個像素再修一次，會在兩點之間來回橫跳，
+    // 看起來像程式有問題。與其追求絕對精確，不如設一個「已經夠準就完全不動」的門檻。
+    // 80px 在 1658px 寬的畫布上不到 5%，視覺上仍是置中的。
+    const DEAD_ZONE_PX = 80;                   // 已在此範圍內就完全不動作
+    const FINAL_FIX_PX = 80;                   // 整段結束後誤差超過此像素才做修正
+    const CONVERGE_RATIO = 0.7;                // 一次修正至少要把誤差降到原本的七成，
+                                               // 否則視為無法收斂，立刻停手不再嘗試
     // 網址落後真實視野 0.7～1.4 秒（實測）。用固定秒數等待很容易讀到舊值，
     // 而舊值算出來的誤差是假的，據以校正只會更錯。改成輪詢到「不再變動」為止。
     const SETTLE_POLL_MS = 250;                // 輪詢間隔；連續兩次相同即視為停止
@@ -1112,6 +1120,28 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
     }
 
     GM_registerMenuCommand('設定 API 金鑰', openSettings);
+
+    // 診斷做在腳本自己身上，不透過另一支腳本去讀 DOM 屬性——
+    // 那樣多一層依賴，而那層依賴出過事（面板的探針被換掉，資料就沒人讀了）。
+    GM_registerMenuCommand('複製上次定位診斷', () => {
+        const logText = document.documentElement.getAttribute('data-' + PREFIX + '-log') || '';
+        const lines = logText.trim().split('\n').filter(Boolean);
+        const text = lines.length
+            ? '=== route-rain 定位診斷 ===\n' + lines.join('\n')
+            : '（還沒有診斷資料，請先點一次表格中的格子）';
+        try {
+            GM_setClipboard(text);
+            log('診斷已複製到剪貼簿，共', lines.length, '筆');
+        } catch (err) {
+            // GM_setClipboard 不可用時退回可全選的視窗
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.cssText = 'position:fixed;top:10%;left:10%;width:80%;height:60%;z-index:2147483647';
+            document.body.appendChild(ta);
+            ta.select();
+            warn('自動複製失敗，請手動 Ctrl+C 後關閉：', err.message);
+        }
+    });
 
     // ════════════════════════════════════════════════════════════════
     // 樣式
@@ -2161,6 +2191,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
      */
     async function correctIfNeeded(canvas, lat, lon) {
         let dist = null;
+        let lastDist = Infinity;
         for (let i = 0; i < PAN_MAX_ITERATIONS; i++) {
             await waitSettled();                    // 關鍵：不是等固定秒數，是等真的不動了
             const off = offsetToTarget(lat, lon);
@@ -2168,7 +2199,14 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             dist = Math.hypot(off.dx, off.dy);
             writeDiag({ step: 'correct', round: i, distPx: Math.round(dist) });
             if (dist <= PAN_TOLERANCE_PX) return dist;          // 已經夠準
-            if (i === 0 && dist <= FINAL_FIX_PX) return dist;   // 誤差不大就不動，避免多一次跳動
+            if (dist <= FINAL_FIX_PX) return dist;              // 在死區內，不為了幾十像素再動一次
+            // 收斂保護：修了卻沒有顯著變好，代表再修也是白搭，只會來回橫跳
+            if (dist >= lastDist * CONVERGE_RATIO) {
+                writeDiag({ step: 'correct-stop', round: i,
+                    distPx: Math.round(dist), lastPx: Math.round(lastDist) });
+                return dist;
+            }
+            lastDist = dist;
             const r = canvas.getBoundingClientRect();
             const dx = Math.max(-r.width * DRAG_MAX_SCREENS,
                 Math.min(r.width * DRAG_MAX_SCREENS, off.dx));
@@ -2188,7 +2226,27 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
      * van Wijk & Nuij 2003）。除了視覺自然，還有實際效益：
      * 在低縮放層級平移要載入的圖磚少得多，閃爍會明顯減少。
      */
+    /**
+     * 已經夠接近就什麼都不做。
+     *
+     * 沒有這道判斷的話，反覆點同一個節點會在兩個位置之間來回橫跳：
+     * 每次都為了幾十像素的誤差再拖一次，而那次拖曳自己又留下差不多的誤差。
+     * 對使用者來說那就是「程式有問題」，而不是「更精確」。
+     */
+    function withinDeadZone(lat, lon) {
+        const vp = readViewport();
+        if (!vp) return false;
+        if (Math.abs(vp.zoom - MAP_FOCUS_ZOOM) > 0.3) return false;   // 縮放層級還不對
+        const off = offsetToTarget(lat, lon);
+        return off ? Math.hypot(off.dx, off.dy) <= DEAD_ZONE_PX : false;
+    }
+
     async function focusMapOn(lat, lon) {
+        if (withinDeadZone(lat, lon)) {
+            writeDiag({ step: 'skip', reason: '已在死區內，不動作' });
+            log('已經夠接近目標，不動作');
+            return;
+        }
         const canvas = findMapCanvas();
         const vp0 = readViewport();
         if (!canvas || !vp0) {
@@ -2224,17 +2282,32 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             await syncModel(model, 'arc-out');
         }
 
-        // ② 平移。位移在「拉遠後的層級」重新算——用舊層級會差十幾倍
+        // ② 平移。位移在「拉遠後的層級」重新算——用舊層級會差十幾倍。
+        //
+        //    最後一輪之後一定要驗證實際位置：**殘留誤差會被接下來的拉近放大 2^N 倍**
+        //    （拉近 5 級＝32 倍）。在低縮放層級修，同樣的角度誤差只對應少少的像素，
+        //    一次就修得完；等到拉近後才發現，就得拖好幾次而且每次上限只有 0.6 個畫面。
         let pans = 0;
+        let lastDist = Infinity;
         for (let i = 0; i < PAN_MAX_ITERATIONS; i++) {
             const off = model.offsetTo(lat, lon);
-            if (Math.hypot(off.dx, off.dy) <= PAN_TOLERANCE_PX) break;
+            const dist = Math.hypot(off.dx, off.dy);
+            if (dist <= PAN_TOLERANCE_PX) break;
+            // 收斂保護：這一輪沒有把誤差顯著降低，就不要再試了，否則會來回橫跳
+            if (dist >= lastDist * CONVERGE_RATIO) {
+                writeDiag({ step: 'pan-stop', round: i,
+                    distPx: Math.round(dist), lastPx: Math.round(lastDist) });
+                break;
+            }
+            lastDist = dist;
             const dx = Math.max(-limX, Math.min(limX, off.dx));
             const dy = Math.max(-limY, Math.min(limY, off.dy));
             pans++;
             await smoothPan(canvas, dx, dy, i === 0 ? panMs : PAN_MIN_MS,
                 findPressPoint(canvas, dx, dy));
             model.applyPan(dx, dy);
+            // 每拖完一次就用真實視野校準，模型誤差不會累積到下一輪
+            await syncModel(model, 'pan' + i);
         }
 
         // ③ 拉近到目標層級（滾輪錨定畫面中心，目標會留在原地）
