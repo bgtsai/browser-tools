@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.65.0
+// @version      0.66.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -48,7 +48,13 @@
     const ROWH_W_PX = 126;                     // 左側地點欄寬度
     const INFO_MAX_W_PX = 860;                 // 資訊區的最大寬度（面板本身不再加寬）
     const HOVER_SETTLE_MS = 160;               // 送出移動事件後，等命中判定跑完再點擊
-    const MAP_FOCUS_ZOOM = 16;                 // 點擊節點時要拉近到的縮放層級
+    // 與 Google 自己一致：實測點路線節點時，它一律縮放到整數 17.00
+    //（18.03→17.00、16.17→17.00，一個往下一個往上都精準落在 17）
+    const MAP_FOCUS_ZOOM = 17;                 // 點擊節點時要拉近到的縮放層級
+    // 離 step 邊界多近就要避開。實測：≤26 公尺的點擊全部得不到地點卡，
+    // ≥126 公尺的全部成功；中間沒有樣本，取 80 公尺——比已知失敗值高三倍，
+    // 又遠低於已知成功值，兩邊都有餘裕。
+    const NODE_AVOID_M = 80;
 
     // ── 動畫參數 ──
     // 目標是接近原生的滑順度。先前卡頓的四個成因與對策：
@@ -876,6 +882,52 @@
             if (d < bestD) { bestD = d; best = p; }
         }
         return best ? best.sec : null;
+    }
+
+    /**
+     * 把太靠近 Google 節點的中途節點沿路線挪開。
+     *
+     * Google 在路線上畫的白色圓點就是 step 邊界（實測確認：離邊界 ≤26 公尺的點擊
+     * 全部得不到地點卡，≥126 公尺的全部成功）。點在那些位置上會觸發它自己的行為
+     * （縮放到 17、顯示轉彎卡），而不是我們要的地點卡。
+     *
+     * 起點／停靠／目的地不挪——那是使用者指定的位置，而且我們本來就不點它們。
+     */
+    function avoidGoogleNodes(nodes, timeline, steps) {
+        if (!steps || steps.length < 2) return 0;
+        const bounds = steps.slice(1).map(s => s.t0);      // 內部邊界，不含起訖
+        if (!bounds.length) return 0;
+        let moved = 0;
+        for (const n of nodes) {
+            if (n.kind) continue;                          // 錨點不挪
+            let nearest = null, best = Infinity;
+            for (const b of bounds) {
+                const p = positionAt(timeline, b);
+                const d = haversine(n.lat, n.lon, p.lat, p.lon);
+                if (d < best) { best = d; nearest = b; }
+            }
+            if (best >= NODE_AVOID_M) continue;
+            // 沿時間軸往兩側找，取第一個離所有邊界都夠遠、且仍在同一鄉鎮內的位置
+            let fixed = null;
+            for (let step = 5; step <= 300 && !fixed; step += 5) {
+                for (const cand of [n.sec + step, n.sec - step]) {
+                    if (cand < n.enterSec || cand > n.exitSec) continue;
+                    const p = positionAt(timeline, cand);
+                    let ok = true;
+                    for (const b of bounds) {
+                        const q = positionAt(timeline, b);
+                        if (haversine(p.lat, p.lon, q.lat, q.lon) < NODE_AVOID_M) { ok = false; break; }
+                    }
+                    if (ok) { fixed = { sec: cand, lat: p.lat, lon: p.lon }; break; }
+                }
+            }
+            if (fixed) {
+                n.sec = fixed.sec; n.lat = fixed.lat; n.lon = fixed.lon;
+                moved++;
+            }
+            // 找不到就維持原位——該鄉鎮區段可能整段都靠近節點，挪出去反而更糟
+        }
+        return moved;
     }
 
     function buildNodes(timeline, totalSec, anchors) {
@@ -1956,6 +2008,11 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             name: names.length > 1 ? names[names.length - 1] : null,
         });
         const nodes = buildNodes(timeline, totalSec, anchors);
+        const movedAway = avoidGoogleNodes(nodes, timeline, steps);
+        if (movedAway) {
+            log('避開 Google 節點：', movedAway, '個中途節點已沿路線挪開',
+                NODE_AVOID_M, '公尺以上');
+        }
         if (!nodes.length) {
             clearBody(wrap);
             showMessage(wrap, '這條路線沒有落在台灣任何鄉鎮界線內，目前只支援台灣本島與外島的路線。');
@@ -2869,8 +2926,14 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         log('點擊節點', node.county + node.town);
         focusMapOn(node.lat, node.lon).then(async () => {
             const canvas = findMapCanvas();
-            // 讓 Google 秀出該點的資訊卡；點在節點的實際螢幕位置，不是畫面中心
-            if (canvas) await revealOnMap(canvas, node.lat, node.lon);
+            // 讓 Google 秀出該點的資訊卡；點在節點的實際螢幕位置，不是畫面中心。
+            //
+            // 起點／停靠／目的地不點：那是使用者指定的位置，在地圖上多半有
+            // Google 自己的標記（甚至本身就是景點），點下去會觸發它自己的行為——
+            // 導覽到該地點頁面，把路線檢視換掉。而且那三類的名稱使用者本來就設定了，
+            // 我們已經顯示在 tooltip 上，不需要再查。
+            if (canvas && !node.kind) await revealOnMap(canvas, node.lat, node.lon);
+            else if (node.kind) log('這是使用者指定的位置，不做點擊：', KIND_LABEL[node.kind]);
             const after = routeCtrlCount();
             if (after !== ctrlBefore) {
                 // 破壞性副作用：模擬拖曳被判定成「拖曳路線新增途經點」
