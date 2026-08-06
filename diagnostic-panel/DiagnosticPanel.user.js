@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         通用診斷面板骨架
 // @namespace    browser-tools
-// @version      3.1
-// @description  診斷面板骨架：面板 UI + 相對時間戳 + 開始/停止 + 一鍵複製；任務專屬邏輯只需替換「探針區塊」。目前任務：找出「點路線取得地點名稱」的請求格式
+// @version      4.0
+// @description  診斷面板骨架：面板 UI + 相對時間戳 + 開始/停止 + 一鍵複製；任務專屬邏輯只需替換「探針區塊」。目前任務：對照真實點擊與合成點擊，找出合成點擊為何沒作用
 // @match        https://www.google.com/maps/*
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -295,84 +295,179 @@
     let _bdpObservers = [];
     let _restore = [];
 
-    // ── 目前任務：點路線會冒出「111臺北市士林區福志里福林路」那種名稱，
-    //            找出背後的請求，看能不能改成用我們自己的座標直接呼叫 ──
+    // ── 目前任務：合成的點擊送出了、卻沒有冒出地點卡 ──
     //
-    // 目的不是「能不能點得動」，而是要看清楚請求的格式：
-    //   ・網址與參數長什麼樣、座標放在哪一段
-    //   ・是否只換座標就能重用（若綁了 session 或簽章就不通）
-    //   ・回應裡那串名稱在哪個位置
+    // 現有的診斷只記了「我們做了什麼」，完全沒有記「Google 有沒有反應」。
+    // 這支腳本補上另一半，並且用**對照**的方式呈現：
+    // 先請使用者真的用滑鼠點一次，再讓程式點一次，把兩者並排比較。
+    // 真實點擊做了什麼、合成點擊少了什麼，一比就知道。
     //
-    // 攔截器裝在 unsafeWindow 上：本腳本用了 GM_* 授權而跑在沙箱，
-    // 改沙箱的 fetch/XHR 只會動到副本，攔不到網頁真正發出的請求。
+    // 監看四件事：
+    //   ① reveal 請求——最決定性的訊號。手動點路線時一定會發出，
+    //      合成點擊若沒發出，就代表事件根本沒被當成「點到地圖上的東西」
+    //   ② DOM 新增節點——地點卡有沒有被建立
+    //   ③ 畫布收到的事件序列（含 isTrusted）——我們送的有沒有真的送達
+    //   ④ 點擊座標上的元素堆疊——有沒有東西擋在畫布上面
 
     const W = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
     const sleep = ms => new Promise(r => setTimeout(r, ms));
-    const MAX_KEEP = 12;
-    let _hits = [];
-    let _armed = false;
+    let _session = null;          // 目前這一輪的紀錄
 
-    function record(kind, url, body, text) {
-        if (!_armed || _hits.length >= MAX_KEEP) return;
-        const u = String(url);
-        // 只看 reveal：實測那就是「點路線取得地點名稱」的端點，
-        // place 端點回傳的是店家詳情（48KB），不是我們要的
-        if (u.indexOf('/maps/preview/reveal') < 0) return;
-        _hits.push({ kind, url: u, body: body || null, text });
-        W.__rrHits = _hits;
+    function newSession(kind) {
+        _session = { kind, t0: performance.now(), events: [], reveals: 0, added: [], at: null };
+        return _session;
+    }
+    const rel = () => Math.round(performance.now() - _session.t0);
 
-        // 捕捉當下就完整輸出。先前把結果放在「停止監控」才印，
-        // 使用者點完直接複製就一片空白，白跑一輪——同一個坑不要再踩。
-        log(`捕捉 #${_hits.length}`, `${kind}　回應 ${(text.length / 1024).toFixed(1)}KB`);
-        log('  完整網址', u);
-        log('  完整回應', text.length > 3000
-            ? text.slice(0, 3000) + `\n      …（截斷，全長 ${text.length}，完整內容在 __rrHits[${_hits.length - 1}].text）`
-            : text);
+    function summarise() {
+        if (!_session) return;
+        const s = _session;
+        const seq = s.events.map(e => `${e.t}ms ${e.type}${e.trusted ? '(真)' : '(合成)'}`).join('　');
+        log(`【${s.kind}】事件序列`, seq || '（畫布沒有收到任何事件）');
+        log(`【${s.kind}】reveal 請求`, s.reveals
+            ? `✅ 發出 ${s.reveals} 次 → Google 有處理這次點擊`
+            : '❌ 完全沒有發出 → 沒被當成「點到地圖上的東西」');
+        log(`【${s.kind}】新增的 DOM`, s.added.length
+            ? s.added.slice(0, 6).join('\n      ')
+            : '（沒有明顯的新增節點）');
+        if (s.at) {
+            const stack = document.elementsFromPoint(s.at[0], s.at[1]).slice(0, 4)
+                .map(el => `<${el.tagName.toLowerCase()}>.${String(el.className).trim().split(/\s+/)[0] || '-'}`)
+                .join(' > ');
+            log(`【${s.kind}】座標上的堆疊`, `(${s.at[0]}, ${s.at[1]})　${stack}`);
+        }
+        log('──', '');
     }
 
-    function armInterceptors() {
-        const XHR = W.XMLHttpRequest;
-        const origOpen = XHR.prototype.open;
-        const origSend = XHR.prototype.send;
-        XHR.prototype.open = function (m, u) { this.__u = u; this.__m = m; return origOpen.apply(this, arguments); };
-        XHR.prototype.send = function (b) {
-            this.addEventListener('load', () => {
-                try { record('XHR ' + (this.__m || ''), this.__u, b, this.responseText); } catch (err) { /* 非文字回應 */ }
-            });
-            return origSend.apply(this, arguments);
-        };
-        _restore.push(() => { XHR.prototype.open = origOpen; XHR.prototype.send = origSend; });
+    function mapCanvas() {
+        return [...document.querySelectorAll('canvas')]
+            .map(el => ({ el, r: el.getBoundingClientRect() }))
+            .filter(o => o.r.width > 200 && o.r.height > 200)
+            .sort((a, b) => b.r.width * b.r.height - a.r.width * a.r.height)[0] || null;
+    }
 
-        const origFetch = W.fetch;
-        W.fetch = function (...a) {
-            const url = (a[0] && a[0].url) || a[0];
-            const body = a[1] && a[1].body;
-            return origFetch.apply(this, a).then(res => {
-                res.clone().text().then(t => record('fetch', url, body, t)).catch(() => {});
-                return res;
-            });
+    function armWatchers() {
+        // ① reveal 請求
+        const XHR = W.XMLHttpRequest;
+        const oOpen = XHR.prototype.open;
+        XHR.prototype.open = function (m, u) {
+            if (_session && String(u).indexOf('/maps/preview/reveal') >= 0) {
+                _session.reveals++;
+                log('　→ 偵測到 reveal 請求', `於 ${rel()}ms`);
+            }
+            return oOpen.apply(this, arguments);
         };
-        _restore.push(() => { W.fetch = origFetch; });
+        _restore.push(() => { XHR.prototype.open = oOpen; });
+        const oFetch = W.fetch;
+        W.fetch = function (...a) {
+            const u = (a[0] && a[0].url) || a[0];
+            if (_session && String(u).indexOf('/maps/preview/reveal') >= 0) {
+                _session.reveals++;
+                log('　→ 偵測到 reveal 請求', `於 ${rel()}ms（fetch）`);
+            }
+            return oFetch.apply(this, a);
+        };
+        _restore.push(() => { W.fetch = oFetch; });
+
+        // ③ 畫布收到的事件
+        const types = ['pointermove', 'pointerdown', 'pointerup', 'mousemove', 'mousedown', 'mouseup', 'click'];
+        const onEv = (ev) => {
+            if (!_session || !ev.target || ev.target.tagName !== 'CANVAS') return;
+            if (ev.type === 'pointermove' || ev.type === 'mousemove') {
+                // move 太多，只留最後一筆免得洗版
+                const last = _session.events[_session.events.length - 1];
+                if (last && last.type === ev.type) { last.t = rel(); return; }
+            }
+            _session.events.push({ t: rel(), type: ev.type, trusted: ev.isTrusted });
+        };
+        types.forEach(t => {
+            document.addEventListener(t, onEv, true);
+            _restore.push(() => document.removeEventListener(t, onEv, true));
+        });
+
+        // ② 新增的 DOM
+        const mo = new MutationObserver(muts => {
+            if (!_session) return;
+            for (const m of muts) {
+                for (const n of m.addedNodes) {
+                    if (n.nodeType !== 1) continue;
+                    const txt = (n.textContent || '').trim().slice(0, 40);
+                    if (!txt) continue;
+                    const cls = String(n.className || '').trim().split(/\s+/)[0] || '-';
+                    _session.added.push(`${rel()}ms <${n.tagName.toLowerCase()}>.${cls} 「${txt}」`);
+                }
+            }
+        });
+        mo.observe(document.body, { childList: true, subtree: true });
+        _bdpObservers.push(mo);
+    }
+
+    /** 真人點擊：靠使用者自己動手，我們只負責記錄 */
+    function watchRealClick() {
+        const onDown = (ev) => {
+            if (!ev.isTrusted || !ev.target || ev.target.tagName !== 'CANVAS') return;
+            newSession('真實點擊');
+            _session.at = [Math.round(ev.clientX), Math.round(ev.clientY)];
+            log('【真實點擊】開始', `座標 (${_session.at[0]}, ${_session.at[1]})，記錄 2.5 秒…`);
+            setTimeout(summarise, 2500);
+        };
+        document.addEventListener('pointerdown', onDown, true);
+        _restore.push(() => document.removeEventListener('pointerdown', onDown, true));
+    }
+
+    /** 合成點擊：完全照 route-rain v0.65 的流程重現 */
+    async function synthClick() {
+        const cv = mapCanvas();
+        if (!cv) { log('錯誤', '找不到地圖畫布'); return; }
+        const x = Math.round(cv.r.left + cv.r.width / 2);
+        const y = Math.round(cv.r.top + cv.r.height / 2);
+        newSession('合成點擊');
+        _session.at = [x, y];
+        log('【合成點擊】開始', `座標 (${x}, ${y})，流程與 route-rain 相同`);
+
+        const PE = W.PointerEvent || PointerEvent;
+        const ME = W.MouseEvent || MouseEvent;
+        const fire = (type, buttons) => {
+            const init = {
+                bubbles: true, cancelable: true, composed: true, view: W,
+                clientX: x, clientY: y, screenX: x, screenY: y,
+                button: 0, buttons, pointerId: 1, pointerType: 'mouse', isPrimary: true,
+            };
+            cv.el.dispatchEvent(new PE(type, init));
+            cv.el.dispatchEvent(new ME(type.replace('pointer', 'mouse'), init));
+        };
+        fire('pointermove', 0); await sleep(160);
+        fire('pointermove', 0); await sleep(160);
+        fire('pointerdown', 1); await sleep(60);
+        fire('pointerup', 0);
+        cv.el.dispatchEvent(new ME('click', {
+            bubbles: true, cancelable: true, composed: true, view: W,
+            clientX: x, clientY: y, button: 0, buttons: 0, detail: 1,
+        }));
+        setTimeout(summarise, 2500);
     }
 
     guide([
-        '在地圖上找到路線（那條藍色粗線）',
-        '按下方的「開始監控」',
-        '用滑鼠點一下路線上的任一點，等下方彈出地點名稱',
-        '點 1～2 個點就夠了，內容會立刻顯示在下方',
-        '直接按「複製」貼給我（這次不必先按停止監控）',
+        '把地圖移到有路線的地方，讓畫面中心壓在路線上',
+        '按「開始監控」',
+        '先用滑鼠「真的點一下」路線，等 2.5 秒讓它記錄完',
+        '再從 Tampermonkey 選單點「觸發合成點擊」',
+        '兩份紀錄都出來後，按「複製」貼回',
     ]);
 
+    GM_registerMenuCommand('觸發合成點擊', () => {
+        if (!_session && !_restore.length) { alert('請先按面板上的「開始監控」'); return; }
+        synthClick();
+    });
+
     function PROBE_SETUP() {
-        _hits = [];
-        _armed = true;
-        armInterceptors();
-        log('START', '攔截器已就位。請點一下地圖上的路線，只會記錄「回應裡含台灣地址樣式」的請求。');
+        armWatchers();
+        watchRealClick();
+        log('START', '監看就緒。請先真的點一下路線，再用選單觸發合成點擊。');
     }
 
     function PROBE_TEARDOWN() {
-        _armed = false;
-        log('小結', `共捕捉 ${_hits.length} 筆 reveal 請求，完整內容留在 window.__rrHits`);
+        _session = null;
         _restore.forEach(fn => { try { fn(); } catch (err) { /* 還原失敗不影響停止 */ } });
         _restore = [];
         _bdpObservers.forEach(mo => mo.disconnect());
