@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         通用診斷面板骨架
 // @namespace    browser-tools
-// @version      4.0
-// @description  診斷面板骨架：面板 UI + 相對時間戳 + 開始/停止 + 一鍵複製；任務專屬邏輯只需替換「探針區塊」。目前任務：對照真實點擊與合成點擊，找出合成點擊為何沒作用
+// @version      5.0
+// @description  診斷面板骨架：面板 UI + 相對時間戳 + 開始/停止 + 一鍵複製；任務專屬邏輯只需替換「探針區塊」。目前任務：量出 Google 節點的位置與它點擊後的縮放層級
 // @match        https://www.google.com/maps/*
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -295,179 +295,171 @@
     let _bdpObservers = [];
     let _restore = [];
 
-    // ── 目前任務：合成的點擊送出了、卻沒有冒出地點卡 ──
+    // ── 要量兩件事 ──
     //
-    // 現有的診斷只記了「我們做了什麼」，完全沒有記「Google 有沒有反應」。
-    // 這支腳本補上另一半，並且用**對照**的方式呈現：
-    // 先請使用者真的用滑鼠點一次，再讓程式點一次，把兩者並排比較。
-    // 真實點擊做了什麼、合成點擊少了什麼，一比就知道。
+    // ① 地圖上那些白色圓點，跟我們解析出來的 step 邊界是不是同一組？
+    //    我先前一律說成「轉彎處」，但 step 的切分原因不只轉彎——匯流、
+    //    道路改名、進出匝道都可能切一段。而「地圖上畫的點」與「資料裡的 step 邊界」
+    //    是否一一對應，我從來沒有驗證過。對不上的話，用 step 邊界去避開就是無效的。
     //
-    // 監看四件事：
-    //   ① reveal 請求——最決定性的訊號。手動點路線時一定會發出，
-    //      合成點擊若沒發出，就代表事件根本沒被當成「點到地圖上的東西」
-    //   ② DOM 新增節點——地點卡有沒有被建立
-    //   ③ 畫布收到的事件序列（含 isTrusted）——我們送的有沒有真的送達
-    //   ④ 點擊座標上的元素堆疊——有沒有東西擋在畫布上面
+    // ② 點到那種節點時，Google 自動縮放到哪一級？
+    //    量出來就有客觀依據可以決定我們的最終層級，不必憑感覺猜。
+    //
+    // 做法：攔截 directions 取得 step 邊界的座標（與 route-rain 同一套解析），
+    // 再請使用者手動點幾個節點，記錄每次的縮放變化與該點離最近 step 邊界多遠。
 
     const W = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
     const sleep = ms => new Promise(r => setTimeout(r, ms));
-    let _session = null;          // 目前這一輪的紀錄
+    let _boundaries = null;     // step 邊界的 [lat, lon] 陣列
+    let _pending = null;
 
-    function newSession(kind) {
-        _session = { kind, t0: performance.now(), events: [], reveals: 0, added: [], at: null };
-        return _session;
+    function viewport() {
+        const m = location.href.match(/\/@(-?[\d.]+),(-?[\d.]+),([\d.]+)z/);
+        return m ? { lat: +m[1], lon: +m[2], zoom: +m[3] } : null;
     }
-    const rel = () => Math.round(performance.now() - _session.t0);
-
-    function summarise() {
-        if (!_session) return;
-        const s = _session;
-        const seq = s.events.map(e => `${e.t}ms ${e.type}${e.trusted ? '(真)' : '(合成)'}`).join('　');
-        log(`【${s.kind}】事件序列`, seq || '（畫布沒有收到任何事件）');
-        log(`【${s.kind}】reveal 請求`, s.reveals
-            ? `✅ 發出 ${s.reveals} 次 → Google 有處理這次點擊`
-            : '❌ 完全沒有發出 → 沒被當成「點到地圖上的東西」');
-        log(`【${s.kind}】新增的 DOM`, s.added.length
-            ? s.added.slice(0, 6).join('\n      ')
-            : '（沒有明顯的新增節點）');
-        if (s.at) {
-            const stack = document.elementsFromPoint(s.at[0], s.at[1]).slice(0, 4)
-                .map(el => `<${el.tagName.toLowerCase()}>.${String(el.className).trim().split(/\s+/)[0] || '-'}`)
-                .join(' > ');
-            log(`【${s.kind}】座標上的堆疊`, `(${s.at[0]}, ${s.at[1]})　${stack}`);
-        }
-        log('──', '');
+    function metres(a, b, c, d) {
+        const R = 6371000, p = Math.PI / 180;
+        const dla = (c - a) * p, dlo = (d - b) * p;
+        const h = Math.sin(dla / 2) ** 2 + Math.cos(a * p) * Math.cos(c * p) * Math.sin(dlo / 2) ** 2;
+        return 2 * R * Math.asin(Math.sqrt(h));
     }
 
-    function mapCanvas() {
-        return [...document.querySelectorAll('canvas')]
-            .map(el => ({ el, r: el.getBoundingClientRect() }))
-            .filter(o => o.r.width > 200 && o.r.height > 200)
-            .sort((a, b) => b.r.width * b.r.height - a.r.width * a.r.height)[0] || null;
-    }
-
-    function armWatchers() {
-        // ① reveal 請求
-        const XHR = W.XMLHttpRequest;
-        const oOpen = XHR.prototype.open;
-        XHR.prototype.open = function (m, u) {
-            if (_session && String(u).indexOf('/maps/preview/reveal') >= 0) {
-                _session.reveals++;
-                log('　→ 偵測到 reveal 請求', `於 ${rel()}ms`);
+    /** 與 route-rain 相同的解析：累加差分座標，並依 step 的公尺數切出邊界 */
+    function parseBoundaries(text) {
+        const root = JSON.parse(text.replace(/^\)\]\}'\n?/, ''));
+        const alts = root[0] && root[0][1], geos = root[0] && root[0][7];
+        if (!Array.isArray(alts) || !Array.isArray(geos) || !alts.length) return null;
+        const segments = (alts[0][1] || []).filter(s => Array.isArray(s));
+        const steps = [];
+        for (const seg of segments) {
+            for (const leg of (seg[1] || [])) {
+                for (const st of (leg[1] || [])) {
+                    steps.push((st[0] && st[0][2] && st[0][2][0]) || 0);
+                }
             }
-            return oOpen.apply(this, arguments);
+        }
+        const acc = a => { let s = 0; return a.map(v => (s += v)); };
+        const lat = acc(geos[0][0]).map(v => v / 1e7);
+        const lon = acc(geos[0][1]).map(v => v / 1e7);
+        // 每個點的累積距離
+        const cum = [0];
+        for (let i = 1; i < lat.length; i++) {
+            cum.push(cum[i - 1] + metres(lat[i - 1], lon[i - 1], lat[i], lon[i]));
+        }
+        const total = cum[cum.length - 1] || 1;
+        const declared = steps.reduce((s, v) => s + v, 0) || total;
+        const scale = total / declared;
+        // step 邊界 → 對應到座標
+        const out = [];
+        let target = 0, k = 0;
+        for (const m of steps) {
+            target += m * scale;
+            while (k < cum.length - 1 && cum[k] < target) k++;
+            out.push([lat[k], lon[k]]);
+        }
+        return { boundaries: out, stepCount: steps.length, points: lat.length };
+    }
+
+    function armCapture() {
+        const XHR = W.XMLHttpRequest;
+        const oOpen = XHR.prototype.open, oSend = XHR.prototype.send;
+        XHR.prototype.open = function (m, u) { this.__u = u; return oOpen.apply(this, arguments); };
+        XHR.prototype.send = function () {
+            this.addEventListener('load', () => {
+                try { onResponse(this.__u, this.responseText); } catch (err) { /* 非文字回應 */ }
+            });
+            return oSend.apply(this, arguments);
         };
-        _restore.push(() => { XHR.prototype.open = oOpen; });
+        _restore.push(() => { XHR.prototype.open = oOpen; XHR.prototype.send = oSend; });
         const oFetch = W.fetch;
         W.fetch = function (...a) {
             const u = (a[0] && a[0].url) || a[0];
-            if (_session && String(u).indexOf('/maps/preview/reveal') >= 0) {
-                _session.reveals++;
-                log('　→ 偵測到 reveal 請求', `於 ${rel()}ms（fetch）`);
-            }
-            return oFetch.apply(this, a);
+            return oFetch.apply(this, a).then(r => {
+                r.clone().text().then(t => onResponse(u, t)).catch(() => {});
+                return r;
+            });
         };
         _restore.push(() => { W.fetch = oFetch; });
-
-        // ③ 畫布收到的事件
-        const types = ['pointermove', 'pointerdown', 'pointerup', 'mousemove', 'mousedown', 'mouseup', 'click'];
-        const onEv = (ev) => {
-            if (!_session || !ev.target || ev.target.tagName !== 'CANVAS') return;
-            if (ev.type === 'pointermove' || ev.type === 'mousemove') {
-                // move 太多，只留最後一筆免得洗版
-                const last = _session.events[_session.events.length - 1];
-                if (last && last.type === ev.type) { last.t = rel(); return; }
-            }
-            _session.events.push({ t: rel(), type: ev.type, trusted: ev.isTrusted });
-        };
-        types.forEach(t => {
-            document.addEventListener(t, onEv, true);
-            _restore.push(() => document.removeEventListener(t, onEv, true));
-        });
-
-        // ② 新增的 DOM
-        const mo = new MutationObserver(muts => {
-            if (!_session) return;
-            for (const m of muts) {
-                for (const n of m.addedNodes) {
-                    if (n.nodeType !== 1) continue;
-                    const txt = (n.textContent || '').trim().slice(0, 40);
-                    if (!txt) continue;
-                    const cls = String(n.className || '').trim().split(/\s+/)[0] || '-';
-                    _session.added.push(`${rel()}ms <${n.tagName.toLowerCase()}>.${cls} 「${txt}」`);
-                }
-            }
-        });
-        mo.observe(document.body, { childList: true, subtree: true });
-        _bdpObservers.push(mo);
     }
 
-    /** 真人點擊：靠使用者自己動手，我們只負責記錄 */
-    function watchRealClick() {
+    function onResponse(url, text) {
+        const u = String(url);
+        if (u.indexOf('/maps/preview/directions') >= 0 && !_boundaries && text && text.length > 1000) {
+            const r = parseBoundaries(text);
+            if (r) {
+                _boundaries = r.boundaries;
+                log('①已取得 step 邊界', `${r.stepCount} 個 step、路徑 ${r.points} 點　` +
+                    '接下來請手動點地圖上的白色圓點');
+            }
+        }
+        if (_pending && u.indexOf('/maps/preview/reveal') >= 0) _pending.reveal = true;
+    }
+
+    /** 使用者按下時記錄，2.5 秒後比對縮放與距離 */
+    function watchClicks() {
         const onDown = (ev) => {
             if (!ev.isTrusted || !ev.target || ev.target.tagName !== 'CANVAS') return;
-            newSession('真實點擊');
-            _session.at = [Math.round(ev.clientX), Math.round(ev.clientY)];
-            log('【真實點擊】開始', `座標 (${_session.at[0]}, ${_session.at[1]})，記錄 2.5 秒…`);
-            setTimeout(summarise, 2500);
+            const vp0 = viewport();
+            const r = ev.target.getBoundingClientRect();
+            _pending = { vp0, x: ev.clientX, y: ev.clientY, rect: r, reveal: false };
+            setTimeout(report, 2500);
         };
         document.addEventListener('pointerdown', onDown, true);
         _restore.push(() => document.removeEventListener('pointerdown', onDown, true));
     }
 
-    /** 合成點擊：完全照 route-rain v0.65 的流程重現 */
-    async function synthClick() {
-        const cv = mapCanvas();
-        if (!cv) { log('錯誤', '找不到地圖畫布'); return; }
-        const x = Math.round(cv.r.left + cv.r.width / 2);
-        const y = Math.round(cv.r.top + cv.r.height / 2);
-        newSession('合成點擊');
-        _session.at = [x, y];
-        log('【合成點擊】開始', `座標 (${x}, ${y})，流程與 route-rain 相同`);
+    function report() {
+        if (!_pending) return;
+        const p = _pending; _pending = null;
+        const vp1 = viewport();
+        if (!p.vp0 || !vp1) { log('量測', '讀不到視野'); return; }
 
-        const PE = W.PointerEvent || PointerEvent;
-        const ME = W.MouseEvent || MouseEvent;
-        const fire = (type, buttons) => {
-            const init = {
-                bubbles: true, cancelable: true, composed: true, view: W,
-                clientX: x, clientY: y, screenX: x, screenY: y,
-                button: 0, buttons, pointerId: 1, pointerType: 'mouse', isPrimary: true,
-            };
-            cv.el.dispatchEvent(new PE(type, init));
-            cv.el.dispatchEvent(new ME(type.replace('pointer', 'mouse'), init));
-        };
-        fire('pointermove', 0); await sleep(160);
-        fire('pointermove', 0); await sleep(160);
-        fire('pointerdown', 1); await sleep(60);
-        fire('pointerup', 0);
-        cv.el.dispatchEvent(new ME('click', {
-            bubbles: true, cancelable: true, composed: true, view: W,
-            clientX: x, clientY: y, button: 0, buttons: 0, detail: 1,
-        }));
-        setTimeout(summarise, 2500);
+        // 由點擊的螢幕位置反推經緯度（以點擊當下的視野換算）
+        const world = 256 * Math.pow(2, p.vp0.zoom);
+        const cx = (p.vp0.lon + 180) / 360 * world;
+        const s = Math.sin(p.vp0.lat * Math.PI / 180);
+        const cy = (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * world;
+        const px = cx + (p.x - (p.rect.left + p.rect.width / 2));
+        const py = cy + (p.y - (p.rect.top + p.rect.height / 2));
+        const lon = px / world * 360 - 180;
+        const n = Math.PI - 2 * Math.PI * py / world;
+        const lat = 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+
+        let near = '（尚未取得 step 邊界）';
+        if (_boundaries) {
+            let best = Infinity, idx = -1;
+            _boundaries.forEach((b, i) => {
+                const d = metres(lat, lon, b[0], b[1]);
+                if (d < best) { best = d; idx = i; }
+            });
+            near = `離最近的 step 邊界 ${best.toFixed(0)} 公尺（第 ${idx + 1} 個）`;
+        }
+        const dz = +(vp1.zoom - p.vp0.zoom).toFixed(2);
+        log('量測結果',
+            `點擊處 ${lat.toFixed(6)}, ${lon.toFixed(6)}\n` +
+            `      ${near}\n` +
+            `      縮放 ${p.vp0.zoom} → ${vp1.zoom}（${dz >= 0 ? '+' : ''}${dz} 級）` +
+            (Math.abs(dz) > 0.05 ? '　←自動縮放了' : '　←沒有縮放') + '\n' +
+            `      reveal 請求：${p.reveal ? '有（出現地點卡）' : '無（沒有出現地點卡）'}`);
     }
 
     guide([
-        '把地圖移到有路線的地方，讓畫面中心壓在路線上',
+        '先切換一次交通方式，讓頁面重新要一次路線資料（才拿得到 step 邊界）',
         '按「開始監控」',
-        '先用滑鼠「真的點一下」路線，等 2.5 秒讓它記錄完',
-        '再從 Tampermonkey 選單點「觸發合成點擊」',
-        '兩份紀錄都出來後，按「複製」貼回',
+        '在地圖上找路線的白色圓點，點它，等 2.5 秒看結果',
+        '再點幾個「不是圓點」的路線位置作為對照',
+        '至少各點 3 次後按「複製」貼回',
     ]);
 
-    GM_registerMenuCommand('觸發合成點擊', () => {
-        if (!_session && !_restore.length) { alert('請先按面板上的「開始監控」'); return; }
-        synthClick();
-    });
-
     function PROBE_SETUP() {
-        armWatchers();
-        watchRealClick();
-        log('START', '監看就緒。請先真的點一下路線，再用選單觸發合成點擊。');
+        _boundaries = null; _pending = null;
+        armCapture();
+        watchClicks();
+        log('START', '已就緒。若下方沒出現「已取得 step 邊界」，請切換一次交通方式。');
     }
 
     function PROBE_TEARDOWN() {
-        _session = null;
+        _pending = null;
         _restore.forEach(fn => { try { fn(); } catch (err) { /* 還原失敗不影響停止 */ } });
         _restore = [];
         _bdpObservers.forEach(mo => mo.disconnect());
