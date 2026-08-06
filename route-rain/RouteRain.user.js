@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.68.1
+// @version      0.69.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -15,7 +15,7 @@
 // @grant        GM_setClipboard
 // @grant        GM_getResourceText
 // @grant        unsafeWindow
-// @resource     twTowns https://raw.githubusercontent.com/bgtsai/browser-tools/main/route-rain/tw_town_boundaries_encoded.json
+// @resource     twTowns https://raw.githubusercontent.com/bgtsai/browser-tools/main/route-rain/tw_town_boundaries_moi1140318.json
 // @downloadURL  https://raw.githubusercontent.com/bgtsai/browser-tools/main/route-rain/RouteRain.user.js
 // @updateURL    https://raw.githubusercontent.com/bgtsai/browser-tools/main/route-rain/RouteRain.user.js
 // @run-at       document-start
@@ -259,6 +259,13 @@
             throw new Error('讀不到內建的鄉鎮界線資料（@resource twTowns）：' + err.message);
         }
         const doc = JSON.parse(raw);
+        // 把資料版本印出來。檔名要翻目錄才看得到，這樣每次執行都看得見，
+        // 想確認「這份對應內政部哪一版」時不必去找檔案。
+        const meta = doc._meta || {};
+        log('界線資料：', meta.moi_version || '（未標版本）',
+            meta.moi_date ? `（內政部 ${meta.moi_date} ／ ${meta.moi_date_roc}）` : '',
+            meta.built_at ? `，${meta.built_at} 轉出` : '',
+            '，', (doc.towns || []).length, '個鄉鎮');
         state.townCache = doc.towns.map(t => ({
             county: t.c,
             town: t.t,
