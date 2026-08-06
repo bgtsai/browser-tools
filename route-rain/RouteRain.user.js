@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.64.0
+// @version      0.65.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -47,6 +47,7 @@
     const PITCH_PX = CELL_PX + GAP_PX;         // 每欄節距
     const ROWH_W_PX = 126;                     // 左側地點欄寬度
     const INFO_MAX_W_PX = 860;                 // 資訊區的最大寬度（面板本身不再加寬）
+    const HOVER_SETTLE_MS = 160;               // 送出移動事件後，等命中判定跑完再點擊
     const MAP_FOCUS_ZOOM = 16;                 // 點擊節點時要拉近到的縮放層級
 
     // ── 動畫參數 ──
@@ -2811,6 +2812,23 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         y = Math.max(r.top + M, Math.min(r.bottom - M, y));
 
         const before = routeCtrlCount();
+
+        // 點擊之前一定要先「把游標移過去」。
+        //
+        // Google 的命中判定是在滑鼠移動時做的，結果記在內部狀態裡，
+        // 後續的點擊是拿那個狀態決定「點到了什麼」。
+        // 我們的流程是「拖曳（一連串 move）→ 縮放（沒有 move）→ 直接按下」，
+        // 所以它記著的還是拖曳結束時那個位置的判定結果，
+        // 而地圖在那之後又縮放了好幾級，該螢幕位置早已不對應路線——
+        // 於是點擊有送出、卻什麼都沒選到。
+        //
+        // 症狀上看得見：路線上那個「懸停指示點」停在舊位置不動，
+        // 縮放後就跑到道路外面去了。
+        dispatchPointer(canvas, 'pointermove', x, y, 0);
+        await wait(HOVER_SETTLE_MS);
+        dispatchPointer(canvas, 'pointermove', x, y, 0);   // 再送一次，確保判定跑完
+        await wait(HOVER_SETTLE_MS);
+
         dispatchPointer(canvas, 'pointerdown', x, y, 1);
         await wait(60);                     // 停頓一下，避免被當成拖曳的起手
         dispatchPointer(canvas, 'pointerup', x, y, 0);
