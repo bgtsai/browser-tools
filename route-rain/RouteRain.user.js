@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.68.0
+// @version      0.68.1
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -904,7 +904,7 @@
      *
      * 使用者指定的起點／停靠／目的地不動。
      */
-    function snapToGoogleNodes(nodes, timeline, steps) {
+    function snapToGoogleNodes(nodes, timeline, steps, townAt) {
         if (!steps || steps.length < 2) return { snapped: 0, removed: 0 };
         const bounds = steps.slice(1).map(s => s.t0);      // 內部邊界，不含起訖
         if (!bounds.length) return { snapped: 0, removed: 0 };
@@ -922,8 +922,10 @@
             }
             if (bestSec === null || best > NODE_SNAP_M) continue;
             const p = positionAt(timeline, bestSec);
-            const t = whoAt(p.lat, p.lon);
-            // 同鄉鎮是硬條件：吸過去卻換了鄉鎮，天氣就取錯了
+            // 同鄉鎮是硬條件：吸過去卻換了鄉鎮，天氣就取錯了。
+            // townAt 由呼叫端傳入——鄉鎮查詢的資料只在 buildNodes 內建立，
+            // 這裡不能直接用（先前寫成直接呼叫，執行時報 whoAt is not defined）
+            const t = townAt ? townAt(p.lat, p.lon) : null;
             if (!t || t.county !== n.county || t.town !== n.town) continue;
             n.sec = bestSec;
             n.lat = p.lat;
@@ -1075,6 +1077,7 @@
         }
 
         nodes.sort((a, b) => a.sec - b.sec);
+        nodes.townAt = whoAt;          // 供 snapToGoogleNodes 判斷吸附後是否仍在同鄉鎮
         // 起點沒出現時，要能直接看出是「錨點沒傳進來」還是「配對到哪裡去了」
         log('錨點：', (anchors || []).map(a =>
             `${a.kind}@${Math.round(a.sec / 60)}分`).join('、') || '（無）',
@@ -2027,7 +2030,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             name: names.length > 1 ? names[names.length - 1] : null,
         });
         const nodes = buildNodes(timeline, totalSec, anchors);
-        const snap = snapToGoogleNodes(nodes, timeline, steps);
+        const snap = snapToGoogleNodes(nodes, timeline, steps, nodes.townAt);
         if (snap.snapped || snap.removed) {
             log('吸附到 Google 節點：', snap.snapped, '個中途節點改用 Google 的節點' +
                 (snap.removed ? `，並移除 ${snap.removed} 個重複` : ''));
