@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.66.0
+// @version      0.67.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -2847,27 +2847,55 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
      * 所以中心點必定命中路線。單擊是「顯示這個點的資訊」，
      * 與拖曳（會新增途經點）是不同的操作，不會改動路線。
      */
+    /**
+     * 算出節點實際落在螢幕上的哪一點。
+     *
+     * 不用畫面中心：地圖偏 15px，那一點就離節點 15px，在 zoom 17 約 16 公尺——
+     * 沿路走這段距離可能已經過了路口、換了門牌；節點若在轉彎處，
+     * 甚至會落到轉彎後的另一段路上。節點的螢幕位置是算得出來的
+     * （最終視野＋節點座標），精度是次像素等級。
+     */
+    function nodeScreenPoint(canvas, lat, lon) {
+        const r = canvas.getBoundingClientRect();
+        const off = offsetToTarget(lat, lon);
+        let x = r.left + r.width / 2;
+        let y = r.top + r.height / 2;
+        if (off) { x -= off.dx; y -= off.dy; }
+        const M = 4;                                    // 夾在畫布內，避免定位嚴重失敗時落到畫布外
+        return {
+            x: Math.max(r.left + M, Math.min(r.right - M, x)),
+            y: Math.max(r.top + M, Math.min(r.bottom - M, y)),
+        };
+    }
+
+    /**
+     * 只把游標移到節點位置，不點擊——用於使用者自己指定的位置。
+     *
+     * 那些點在地圖上有 Google 自己的標記，正確的互動方式是「懸停」：
+     * 移過去它就會自己冒出資訊卡。點下去反而會觸發它自己的行為
+     * （縮放到 17、顯示轉彎卡，或導覽到該地點頁面）。
+     *
+     * 注意：合成事件不會移動實體游標，只是把事件交給網頁，
+     * 所以表格的 tooltip 不會因此關閉——那是預期行為，不是失敗。
+     */
+    async function hoverOnMap(canvas, lat, lon) {
+        const { x, y } = nodeScreenPoint(canvas, lat, lon);
+        dispatchPointer(canvas, 'pointermove', x, y, 0);
+        await wait(HOVER_SETTLE_MS);
+        dispatchPointer(canvas, 'pointermove', x, y, 0);   // 再送一次，確保判定跑完
+        writeDiag({ step: 'hover', at: [Math.round(x), Math.round(y)] });
+    }
+
     async function revealOnMap(canvas, lat, lon) {
         const r = canvas.getBoundingClientRect();
-        // 不點畫面中心，改點「節點實際落在螢幕上的那一點」。
         //
         // 點中心等於要求定位必須完美：地圖偏 15px，那一點就離節點 15px，
         // 在 zoom 16 約 32 公尺——沿路走 32 公尺可能已經過了路口、換了門牌，
         // 若節點正好在轉彎處，甚至會落到轉彎後的另一段路上。
         // 而節點的螢幕位置是算得出來的（最終視野＋節點座標），精度是次像素等級，
         // 這樣就把「定位精度」與「點擊精度」解耦，定位的容差也不必為此收緊。
+        const { x, y } = nodeScreenPoint(canvas, lat, lon);
         const off = offsetToTarget(lat, lon);
-        let x = r.left + r.width / 2;
-        let y = r.top + r.height / 2;
-        if (off) {
-            x -= off.dx;
-            y -= off.dy;
-        }
-        // 夾在畫布內，避免定位嚴重失敗時點到畫布外
-        const M = 4;
-        x = Math.max(r.left + M, Math.min(r.right - M, x));
-        y = Math.max(r.top + M, Math.min(r.bottom - M, y));
-
         const before = routeCtrlCount();
 
         // 點擊之前一定要先「把游標移過去」。
@@ -2932,8 +2960,13 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             // Google 自己的標記（甚至本身就是景點），點下去會觸發它自己的行為——
             // 導覽到該地點頁面，把路線檢視換掉。而且那三類的名稱使用者本來就設定了，
             // 我們已經顯示在 tooltip 上，不需要再查。
-            if (canvas && !node.kind) await revealOnMap(canvas, node.lat, node.lon);
-            else if (node.kind) log('這是使用者指定的位置，不做點擊：', KIND_LABEL[node.kind]);
+            if (canvas && !node.kind) {
+                await revealOnMap(canvas, node.lat, node.lon);
+            } else if (canvas && node.kind) {
+                // 使用者指定的位置：只懸停，讓 Google 自己冒出資訊卡
+                await hoverOnMap(canvas, node.lat, node.lon);
+                log('使用者指定的位置，只做懸停不點擊：', KIND_LABEL[node.kind]);
+            }
             const after = routeCtrlCount();
             if (after !== ctrlBefore) {
                 // 破壞性副作用：模擬拖曳被判定成「拖曳路線新增途經點」
