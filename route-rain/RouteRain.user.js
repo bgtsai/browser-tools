@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.67.0
+// @version      0.68.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps/*
@@ -51,10 +51,16 @@
     // 與 Google 自己一致：實測點路線節點時，它一律縮放到整數 17.00
     //（18.03→17.00、16.17→17.00，一個往下一個往上都精準落在 17）
     const MAP_FOCUS_ZOOM = 17;                 // 點擊節點時要拉近到的縮放層級
-    // 離 step 邊界多近就要避開。實測：≤26 公尺的點擊全部得不到地點卡，
-    // ≥126 公尺的全部成功；中間沒有樣本，取 80 公尺——比已知失敗值高三倍，
-    // 又遠低於已知成功值，兩邊都有餘裕。
-    const NODE_AVOID_M = 80;
+    // 離 Google 節點多近就吸附過去。
+    //
+    // 原本的做法是「避開」，現在反過來：Google 的節點是轉彎、匯流這類
+    // 行車動作點，對使用者比我們中間插的取樣點更有意義，所以靠得夠近就直接改用它。
+    //
+    // 距離可以放得寬，因為看天氣不在乎幾百公尺——氣象資料是 3 小時一格，
+    // 500 公尺就算用走的也才偏 6 分鐘，遠不足以跨格。
+    // 真正的硬限制是**不能跨到別的鄉鎮**，否則會取到另一個鄉鎮的天氣，
+    // 那是實質錯誤；因此同鄉鎮是必要條件，距離只是次要的門檻。
+    const NODE_SNAP_M = 500;
 
     // ── 動畫參數 ──
     // 目標是接近原生的滑順度。先前卡頓的四個成因與對策：
@@ -885,49 +891,62 @@
     }
 
     /**
-     * 把太靠近 Google 節點的中途節點沿路線挪開。
+     * 把靠近 Google 節點的中途節點吸附過去，改用 Google 的節點。
      *
-     * Google 在路線上畫的白色圓點就是 step 邊界（實測確認：離邊界 ≤26 公尺的點擊
-     * 全部得不到地點卡，≥126 公尺的全部成功）。點在那些位置上會觸發它自己的行為
-     * （縮放到 17、顯示轉彎卡），而不是我們要的地點卡。
+     * Google 在路線上畫的白色圓點就是 step 邊界（實測確認），它們是轉彎、
+     * 匯流這類行車動作點，對使用者是「記憶點」；我們中間插的取樣點只是
+     * 為了取天氣而等分出來的位置，本身沒有意義。靠得夠近時改用它更好，
+     * 而且點下去的行為也一致（懸停就會冒出 Google 自己的資訊卡）。
      *
-     * 起點／停靠／目的地不挪——那是使用者指定的位置，而且我們本來就不點它們。
+     * 兩個限制：
+     *   ・必須同一個鄉鎮——跨了就會取到別的鄉鎮的天氣，那是實質錯誤
+     *   ・多個節點吸到同一個 Google 節點時要去重，否則表格會出現重複列
+     *
+     * 使用者指定的起點／停靠／目的地不動。
      */
-    function avoidGoogleNodes(nodes, timeline, steps) {
-        if (!steps || steps.length < 2) return 0;
+    function snapToGoogleNodes(nodes, timeline, steps) {
+        if (!steps || steps.length < 2) return { snapped: 0, removed: 0 };
         const bounds = steps.slice(1).map(s => s.t0);      // 內部邊界，不含起訖
-        if (!bounds.length) return 0;
-        let moved = 0;
+        if (!bounds.length) return { snapped: 0, removed: 0 };
+
+        const used = new Set();
+        let snapped = 0;
         for (const n of nodes) {
-            if (n.kind) continue;                          // 錨點不挪
-            let nearest = null, best = Infinity;
+            if (n.kind) continue;                          // 使用者指定的位置不動
+            let bestSec = null, best = Infinity;
             for (const b of bounds) {
+                if (b < n.enterSec || b > n.exitSec) continue;   // 超出本鄉鎮區段就不考慮
                 const p = positionAt(timeline, b);
                 const d = haversine(n.lat, n.lon, p.lat, p.lon);
-                if (d < best) { best = d; nearest = b; }
+                if (d < best) { best = d; bestSec = b; }
             }
-            if (best >= NODE_AVOID_M) continue;
-            // 沿時間軸往兩側找，取第一個離所有邊界都夠遠、且仍在同一鄉鎮內的位置
-            let fixed = null;
-            for (let step = 5; step <= 300 && !fixed; step += 5) {
-                for (const cand of [n.sec + step, n.sec - step]) {
-                    if (cand < n.enterSec || cand > n.exitSec) continue;
-                    const p = positionAt(timeline, cand);
-                    let ok = true;
-                    for (const b of bounds) {
-                        const q = positionAt(timeline, b);
-                        if (haversine(p.lat, p.lon, q.lat, q.lon) < NODE_AVOID_M) { ok = false; break; }
-                    }
-                    if (ok) { fixed = { sec: cand, lat: p.lat, lon: p.lon }; break; }
-                }
-            }
-            if (fixed) {
-                n.sec = fixed.sec; n.lat = fixed.lat; n.lon = fixed.lon;
-                moved++;
-            }
-            // 找不到就維持原位——該鄉鎮區段可能整段都靠近節點，挪出去反而更糟
+            if (bestSec === null || best > NODE_SNAP_M) continue;
+            const p = positionAt(timeline, bestSec);
+            const t = whoAt(p.lat, p.lon);
+            // 同鄉鎮是硬條件：吸過去卻換了鄉鎮，天氣就取錯了
+            if (!t || t.county !== n.county || t.town !== n.town) continue;
+            n.sec = bestSec;
+            n.lat = p.lat;
+            n.lon = p.lon;
+            n.isGoogleNode = true;                         // 之後只懸停、不點擊
+            n.snappedFrom = Math.round(best);
+            snapped++;
         }
-        return moved;
+
+        // 去重：多個節點可能吸到同一個 Google 節點
+        const kept = [];
+        let removed = 0;
+        for (const n of nodes) {
+            if (n.isGoogleNode) {
+                const key = Math.round(n.sec);
+                if (used.has(key)) { removed++; continue; }
+                used.add(key);
+            }
+            kept.push(n);
+        }
+        nodes.length = 0;
+        nodes.push(...kept);
+        return { snapped, removed };
     }
 
     function buildNodes(timeline, totalSec, anchors) {
@@ -2008,10 +2027,10 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             name: names.length > 1 ? names[names.length - 1] : null,
         });
         const nodes = buildNodes(timeline, totalSec, anchors);
-        const movedAway = avoidGoogleNodes(nodes, timeline, steps);
-        if (movedAway) {
-            log('避開 Google 節點：', movedAway, '個中途節點已沿路線挪開',
-                NODE_AVOID_M, '公尺以上');
+        const snap = snapToGoogleNodes(nodes, timeline, steps);
+        if (snap.snapped || snap.removed) {
+            log('吸附到 Google 節點：', snap.snapped, '個中途節點改用 Google 的節點' +
+                (snap.removed ? `，並移除 ${snap.removed} 個重複` : ''));
         }
         if (!nodes.length) {
             clearBody(wrap);
@@ -2960,12 +2979,17 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             // Google 自己的標記（甚至本身就是景點），點下去會觸發它自己的行為——
             // 導覽到該地點頁面，把路線檢視換掉。而且那三類的名稱使用者本來就設定了，
             // 我們已經顯示在 tooltip 上，不需要再查。
-            if (canvas && !node.kind) {
-                await revealOnMap(canvas, node.lat, node.lon);
-            } else if (canvas && node.kind) {
-                // 使用者指定的位置：只懸停，讓 Google 自己冒出資訊卡
+            if (!canvas) {
+                // 沒有畫布就什麼都不做
+            } else if (node.kind || node.isGoogleNode) {
+                // 這兩類都是 Google 自己的節點（使用者指定的位置、或吸附過去的行車動作點），
+                // 正確的互動是懸停——移過去它就會冒出自己的資訊卡；
+                // 點下去反而會觸發它自己的行為（縮放、轉彎卡、或導覽到該地點頁面）
                 await hoverOnMap(canvas, node.lat, node.lon);
-                log('使用者指定的位置，只做懸停不點擊：', KIND_LABEL[node.kind]);
+                log('Google 節點，只做懸停不點擊：',
+                    node.kind ? KIND_LABEL[node.kind] : '行車動作點');
+            } else {
+                await revealOnMap(canvas, node.lat, node.lon);
             }
             const after = routeCtrlCount();
             if (after !== ctrlBefore) {
