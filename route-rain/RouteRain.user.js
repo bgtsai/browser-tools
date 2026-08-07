@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.74.0
+// @version      0.74.1
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -1469,7 +1469,7 @@
 <div class="${PREFIX}-info-zone">
   <div class="${PREFIX}-source-desc">
     <div class="${PREFIX}-source-desc-title">GitHub 快取</div>
-    <div class="${PREFIX}-source-desc-body">讀取每小時更新的快取，較快也省 API 額度；失敗時自動改走直連 API。</div>
+    <div class="${PREFIX}-source-desc-body">讀取每小時更新的快取，減緩氣象署主機壓力；失敗時自動改走直連 API。</div>
   </div>
   <div class="${PREFIX}-source-desc">
     <div class="${PREFIX}-source-desc-title">直連中央氣象署 API</div>
@@ -1478,7 +1478,7 @@
 </div>
 ${field('API 授權碼',
     `於中央氣象署 <a href="https://opendata.cwa.gov.tw/" target="_blank" rel="noopener">opendata.cwa.gov.tw</a> ` +
-    `註冊帳號即可取得 API 授權碼（格式為 <b>CWA-</b> 開頭）`,
+    `註冊帳號即可取得 API 授權碼<br>（格式為 <b>CWA-</b> 開頭）`,
     cur.cwa, 'cwa')}
 <div class="${PREFIX}-danger-zone">
   <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" class="${PREFIX}-danger-icon">
