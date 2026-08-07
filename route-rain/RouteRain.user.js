@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.75.0
+// @version      0.76.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -3206,6 +3206,20 @@ ${field('API 授權碼',
                 pending = false;
                 ensureButton();
                 if (!state.active) return;
+
+                // 「選項」按鈕在整個文件裡都找不到了，代表 Google 原生路線面板
+                // 已經整個被關掉（例如使用者按了 Google 自己最上面的 X，而不是
+                // 我們的關閉按鈕）——不是「面板重繪出新元素」，是路線面板真的不在了。
+                // 這種情況下絕對不能把孤兒表格重新掛回任何看起來像面板的容器：
+                // findPanel() 只用 class／高度判斷，之後使用者點了別的地點跳出
+                // 「地點詳情」面板時，也會被誤判成同一種面板，孤兒表格就會被
+                // 錯誤地裝到不相關的面板裡冒出來。偵測到就直接視同按了關閉。
+                if (!findOptionsButton()) {
+                    log('偵測到「選項」按鈕消失，判定路線面板已被關閉，自動收起表格');
+                    deactivate();
+                    return;
+                }
+
                 const panel = findPanel();
                 if (!panel) return;
                 // 重繪會產生新的區塊，要重新隱藏；我們的內容若被移除也要放回去
