@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.70.0
+// @version      0.71.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps*
 // @icon         https://www.google.com/maps/about/images/icons/maps_512dp.png
 // @connect      opendata.cwa.gov.tw
+// @connect      raw.githubusercontent.com
 // @connect      www.google.com
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
@@ -129,6 +130,12 @@
     const KEY_CWA = 'cwaAuthorization';
     const KEY_CWA_CACHE = 'cwaForecastCache';
     const KEY_PLACE_CACHE = 'placeNameCache';
+    const KEY_SOURCE_MODE = 'forecastSourceMode';   // 'github'（預設）｜'api'
+
+    function getSourceMode() {
+        const v = GM_getValue(KEY_SOURCE_MODE, 'github');
+        return v === 'api' ? 'api' : 'github';
+    }
 
     // ────────────────────────────────────────────────────────────────
     // 依賴 Google Maps DOM 結構的選擇器，集中一處
@@ -1223,7 +1230,9 @@
                             if (v.WeatherCode != null) slot.code = v.WeatherCode;
                         }
                     }
-                    forecast.set(loc.LocationName, [...merged.values()].sort((a, b) => a.startMs - b.startMs));
+                    // key 用「縣市|鄉鎮」複合字串，避免跨縣市同名鄉鎮（中山區、中正區等）互相覆蓋，
+                    // 與第 1003 行 runs 分組時使用的複合 key 格式一致。
+                    forecast.set(county + '|' + loc.LocationName, [...merged.values()].sort((a, b) => a.startMs - b.startMs));
                 }
             } catch (err) {
                 failures.push(`${county}（${err.message}）`);
@@ -1232,6 +1241,44 @@
         log('CWA 呼叫', byCounty.size, '次，取得', forecast.size, '個鄉鎮的預報');
         if (SEEN_WEATHER_CODES.size) log('本次出現的天氣現象代碼：', [...SEEN_WEATHER_CODES].join(','));
         return { forecast, failures, callCount: byCounty.size };
+    }
+
+    const GITHUB_CACHE_URL =
+        'https://raw.githubusercontent.com/bgtsai/browser-tools/main/route-rain/cwa_cache.json';
+
+    /**
+     * 從 NAS/Huginn 端維護的 GitHub 快取抓整份資料。
+     * towns 的 key 已經是「縣市/鄉鎮」，轉成內部統一使用的「縣市|鄉鎮」格式。
+     * 不篩選路線目前用到的鄉鎮——整份抓下來存進本機快取，往後切換/調整路線
+     * 只是換一次 Map 查詢，不必為了新鄉鎮再打一次 GitHub。
+     */
+    async function fetchForecastFromGitHub(nodes) {
+        const raw = await gmRequest({ url: GITHUB_CACHE_URL });
+        const json = JSON.parse(raw);
+        if (!json || typeof json.towns !== 'object') {
+            throw new Error('GitHub 快取格式非預期（缺少 towns）');
+        }
+        const forecast = new Map();
+        for (const [compositeName, rows] of Object.entries(json.towns)) {
+            const key = compositeName.replace('/', '|');
+            forecast.set(key, rows.map(([startIso, pop, weather]) => {
+                const startMs = Date.parse(startIso);
+                return {
+                    startMs,
+                    endMs: startMs + 3 * 3600 * 1000,
+                    pop: pop == null ? null : +pop,
+                    weather: weather ?? null,
+                    code: null,
+                };
+            }));
+        }
+        const staleList = (json._meta && json._meta.stale_this_run) || [];
+        log('GitHub 快取抓取完成，', forecast.size, '個鄉鎮，最後更新於',
+            json._meta && json._meta.fetched_at_tw,
+            staleList.length ? `（其中 ${staleList.length} 個鄉鎮 NAS 端沿用舊資料）` : '');
+        // stale_this_run 只代表 NAS 端該鄉鎮這次抓取失敗、沿用舊值，資料仍存在，
+        // 不算「整體取得失敗」，不觸發 fallback 到直連 API。
+        return { forecast, failures: [], callCount: 1, fetchedAtRemote: json._meta && json._meta.fetched_at_tw };
     }
 
     // ── 快取 ──
@@ -1286,10 +1333,10 @@
      * 但實際上同一個 3 小時格內的資料完全相同，重取毫無意義。
      * 全取讓快取一次涵蓋 96 小時，這個條件就不需要存在了。
      */
-    function cacheShortfall(cache, neededTowns) {
+    function cacheShortfall(cache, neededKeys) {
         const now = Date.now();
         const missing = [], stale = [];
-        for (const t of neededTowns) {
+        for (const t of neededKeys) {
             const e = cache[t];
             if (!e || !e.rows || !e.rows.length) { missing.push(t); continue; }
             if (now - e.at > CACHE_TTL_MS) stale.push(t);
@@ -1305,34 +1352,51 @@
     }
 
     async function getForecast(auth, nodes, onFetchStart) {
-        const neededTowns = [...new Set(nodes.map(n => n.town))];
+        const neededKeys = [...new Set(nodes.map(n => n.county + '|' + n.town))];
         const cache = loadCache();
-        const shortfall = cacheShortfall(cache, neededTowns);
+        const shortfall = cacheShortfall(cache, neededKeys);
 
         if (!shortfall) {
-            const forecast = new Map(neededTowns.map(t => [t, cache[t].rows]));
-            const oldest = Math.min(...neededTowns.map(t => cache[t].at));
-            log('【氣象】沿用快取，未呼叫中央氣象署 API。',
-                neededTowns.length, '個鄉鎮齊全，最舊一筆為',
+            const forecast = new Map(neededKeys.map(k => [k, cache[k].rows]));
+            const oldest = Math.min(...neededKeys.map(k => cache[k].at));
+            log('【氣象】沿用快取，未呼叫資料來源。',
+                neededKeys.length, '個鄉鎮齊全，最舊一筆為',
                 Math.round((Date.now() - oldest) / 60000), '分鐘前取得');
-            return { forecast, failures: [], callCount: 0, fetchedAt: oldest, fromCache: true };
+            return { forecast, failures: [], callCount: 0, fetchedAt: oldest, fromCache: true, source: 'cache' };
         }
-        log('【氣象】快取不可用，將呼叫中央氣象署 API。原因：' + shortfall.reason +
-            '｜本次需要 ' + neededTowns.length + ' 個鄉鎮');
+        log('【氣象】快取不可用，將重新取得資料。原因：' + shortfall.reason +
+            '｜本次需要 ' + neededKeys.length + ' 個鄉鎮');
 
         if (onFetchStart) onFetchStart();
-        const res = await fetchForecast(auth, nodes);
+
+        const mode = getSourceMode();
+        let res, source;
+        if (mode === 'github') {
+            try {
+                res = await fetchForecastFromGitHub(nodes);
+                source = 'github';
+                if (res.failures.length) throw new Error(res.failures.join('；'));
+            } catch (err) {
+                warn('【氣象】GitHub 來源失敗，改用直連中央氣象署 API。原因：' + err.message);
+                res = await fetchForecast(auth, nodes);
+                source = 'api-fallback';
+            }
+        } else {
+            res = await fetchForecast(auth, nodes);
+            source = 'api';
+        }
+
         if (!res.failures.length) {
             saveCache(res.forecast);
-            log('【氣象】已呼叫 API 並寫入快取（每個縣市完整 96 小時）');
+            log('【氣象】已取得資料並寫入快取（來源：' + source + '）');
         } else {
             warn('【氣象】有縣市取得失敗，不寫入快取（下次仍會重新呼叫）');
         }
-        return { ...res, fetchedAt: Date.now(), fromCache: false };
+        return { ...res, fetchedAt: Date.now(), fromCache: false, source };
     }
 
-    function lookupForecast(forecast, town, whenMs) {
-        const rows = forecast.get(town);
+    function lookupForecast(forecast, county, town, whenMs) {
+        const rows = forecast.get(county + '|' + town);
         if (!rows) return null;
         for (const r of rows) {
             if (r.startMs <= whenMs && whenMs < r.endMs) return r;
@@ -1388,10 +1452,19 @@
   </span>
 </label>`;
 
+        const curMode = getSourceMode();
         box.innerHTML = `
 <div class="${PREFIX}-mtitle">API 金鑰設定</div>
 <div class="${PREFIX}-mdesc">授權碼只存在你自己的瀏覽器，不會上傳，也不在腳本原始碼中。</div>
 ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取得，格式為 CWA-…', cur.cwa, 'cwa')}
+<label class="${PREFIX}-f">
+  <span class="${PREFIX}-flabel">降雨資料來源</span>
+  <span class="${PREFIX}-hint">GitHub：讀取每小時更新的快取，較快也省 API 額度；失敗時自動改走直連 API。</span>
+  <select name="sourceMode">
+    <option value="github" ${curMode === 'github' ? 'selected' : ''}>GitHub 快取（推薦，失敗自動改直連）</option>
+    <option value="api" ${curMode === 'api' ? 'selected' : ''}>直連中央氣象署 API</option>
+  </select>
+</label>
 <div class="${PREFIX}-mact">
   <button type="button" class="${PREFIX}-mbtn" data-${PREFIX}-cancel>取消</button>
   <button type="button" class="${PREFIX}-mbtn ${PREFIX}-primary" data-${PREFIX}-save>儲存</button>
@@ -1415,6 +1488,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             if (ev.target.closest('[data-' + PREFIX + '-save]')) {
                 const get = n => box.querySelector(`input[name="${n}"]`).value.trim();
                 GM_setValue(KEY_CWA, get('cwa'));
+                GM_setValue(KEY_SOURCE_MODE, box.querySelector('select[name="sourceMode"]').value);
                 back.remove();
                 log('金鑰已儲存');
                 if (state.active && state.container) {
@@ -2203,7 +2277,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
                 `${(n.county || '') + (n.town || '（未知區域）')}</span></div>`);
             for (let ci = 0; ci < departures.length; ci++) {
                 const whenMs = departures[ci].getTime() + n.sec * 1000;
-                const row = lookupForecast(forecast, n.town, whenMs);
+                const row = lookupForecast(forecast, n.county, n.town, whenMs);
                 let cls;
                 if (!row || row.pop == null) {
                     cls = `${PREFIX}-c ${PREFIX}-na`;
@@ -2328,7 +2402,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
 
             const n = nodes[ri];
             const arrive = new Date(dep.getTime() + n.sec * 1000);
-            const row = lookupForecast(forecast, n.town, arrive.getTime());
+            const row = lookupForecast(forecast, n.county, n.town, arrive.getTime());
             const sev = row ? severityOf(row.weather, row.code) : 0;
             const sevLabel = ['—', '有可能', '基本上會遇到'][sev];
             const k = s => `<span class="${PREFIX}-k">${s}</span>`;
