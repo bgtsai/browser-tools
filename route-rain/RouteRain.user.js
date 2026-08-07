@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.71.0
+// @version      0.72.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -1367,9 +1367,10 @@
         log('【氣象】快取不可用，將重新取得資料。原因：' + shortfall.reason +
             '｜本次需要 ' + neededKeys.length + ' 個鄉鎮');
 
-        if (onFetchStart) onFetchStart();
-
         const mode = getSourceMode();
+        const sourceLabel = { github: 'GitHub 快取', api: '中央氣象署 API' };
+        if (onFetchStart) onFetchStart(sourceLabel[mode]);
+
         let res, source;
         if (mode === 'github') {
             try {
@@ -1378,6 +1379,7 @@
                 if (res.failures.length) throw new Error(res.failures.join('；'));
             } catch (err) {
                 warn('【氣象】GitHub 來源失敗，改用直連中央氣象署 API。原因：' + err.message);
+                if (onFetchStart) onFetchStart('中央氣象署 API（GitHub 失敗，改直連）');
                 res = await fetchForecast(auth, nodes);
                 source = 'api-fallback';
             }
@@ -1452,19 +1454,22 @@
   </span>
 </label>`;
 
+        const CWA_KEY_PATTERN = /^CWA-[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/;
+
         const curMode = getSourceMode();
         box.innerHTML = `
-<div class="${PREFIX}-mtitle">API 金鑰設定</div>
+<div class="${PREFIX}-mtitle">設定</div>
 <div class="${PREFIX}-mdesc">授權碼只存在你自己的瀏覽器，不會上傳，也不在腳本原始碼中。</div>
-${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取得，格式為 CWA-…', cur.cwa, 'cwa')}
 <label class="${PREFIX}-f">
   <span class="${PREFIX}-flabel">降雨資料來源</span>
-  <span class="${PREFIX}-hint">GitHub：讀取每小時更新的快取，較快也省 API 額度；失敗時自動改走直連 API。</span>
+  <span class="${PREFIX}-hint">GitHub：讀取每小時更新的快取，較快也省 API 額度；失敗時自動改走直連 API。選「直連 API」需先在下方填妥授權碼。</span>
   <select name="sourceMode">
     <option value="github" ${curMode === 'github' ? 'selected' : ''}>GitHub 快取（推薦，失敗自動改直連）</option>
     <option value="api" ${curMode === 'api' ? 'selected' : ''}>直連中央氣象署 API</option>
   </select>
 </label>
+${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取得，格式為 CWA-…（僅在選擇「直連 API」，或 GitHub 來源失敗需要備援時使用）', cur.cwa, 'cwa')}
+<div class="${PREFIX}-modal-warn" data-${PREFIX}-warn style="display:none"></div>
 <div class="${PREFIX}-mact">
   <button type="button" class="${PREFIX}-mbtn" data-${PREFIX}-cancel>取消</button>
   <button type="button" class="${PREFIX}-mbtn ${PREFIX}-primary" data-${PREFIX}-save>儲存</button>
@@ -1473,6 +1478,28 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         back.appendChild(box);
         document.body.appendChild(back);
         box.querySelector('input')?.focus();
+
+        const warnBox = box.querySelector(`[data-${PREFIX}-warn]`);
+        const showWarn = msg => {
+            warnBox.textContent = msg;
+            warnBox.style.display = '';
+        };
+        const hideWarn = () => { warnBox.style.display = 'none'; };
+
+        const selectEl = box.querySelector('select[name="sourceMode"]');
+        let lastValidMode = curMode;
+        selectEl.addEventListener('change', () => {
+            if (selectEl.value === 'api') {
+                const key = box.querySelector('input[name="cwa"]').value.trim();
+                if (!CWA_KEY_PATTERN.test(key)) {
+                    showWarn('選擇「直連 API」前，請先在下方填入正確格式的中央氣象署授權碼（CWA-…）。');
+                    selectEl.value = lastValidMode;
+                    return;
+                }
+            }
+            hideWarn();
+            lastValidMode = selectEl.value;
+        });
 
         box.addEventListener('click', ev => {
             const eye = ev.target.closest('[data-' + PREFIX + '-eye]');
@@ -1487,10 +1514,18 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             if (ev.target.closest('[data-' + PREFIX + '-cancel]')) { back.remove(); return; }
             if (ev.target.closest('[data-' + PREFIX + '-save]')) {
                 const get = n => box.querySelector(`input[name="${n}"]`).value.trim();
-                GM_setValue(KEY_CWA, get('cwa'));
-                GM_setValue(KEY_SOURCE_MODE, box.querySelector('select[name="sourceMode"]').value);
+                const cwaValue = get('cwa');
+                const modeValue = selectEl.value;
+                if (modeValue === 'api' && !CWA_KEY_PATTERN.test(cwaValue)) {
+                    showWarn(cwaValue
+                        ? '授權碼格式不正確（應為 CWA- 開頭的完整格式），無法儲存。'
+                        : '已選擇「直連 API」，但尚未填入授權碼，無法儲存。');
+                    return;
+                }
+                GM_setValue(KEY_CWA, cwaValue);
+                GM_setValue(KEY_SOURCE_MODE, modeValue);
                 back.remove();
-                log('金鑰已儲存');
+                log('設定已儲存');
                 if (state.active && state.container) {
                     clearBody(state.container);
                     run(state.container).catch(err => {
@@ -1507,11 +1542,11 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         });
     }
 
-    GM_registerMenuCommand('設定 API 金鑰', openSettings);
+    GM_registerMenuCommand('設定', openSettings);
 
     // 診斷做在腳本自己身上，不透過另一支腳本去讀 DOM 屬性——
     // 那樣多一層依賴，而那層依賴出過事（面板的探針被換掉，資料就沒人讀了）。
-    GM_registerMenuCommand('複製上次定位診斷', () => {
+    GM_registerMenuCommand('複製上次定位診斷（debug）', () => {
         const logText = document.documentElement.getAttribute('data-' + PREFIX + '-log') || '';
         const lines = logText.trim().split('\n').filter(Boolean);
         const text = lines.length
@@ -1567,6 +1602,8 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
 .${PREFIX}-f{display:block;margin-bottom:16px}
 .${PREFIX}-flabel{display:block;font-size:13px;font-weight:600;margin-bottom:2px}
 .${PREFIX}-hint{display:block;font-size:11.5px;color:#80868b;margin-bottom:6px;line-height:1.5}
+.${PREFIX}-modal-warn{font-size:12.5px;color:#c5221f;background:#fce8e6;border-radius:6px;
+  padding:8px 10px;margin-bottom:14px;line-height:1.5}
 /* 膠囊形輸入框，右側嵌眼睛按鈕、以細分隔線隔開 */
 .${PREFIX}-inwrap{display:flex;align-items:stretch;border:1px solid #dadce0;border-radius:8px;
   overflow:hidden;background:#fff}
@@ -2042,16 +2079,17 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
 
     async function run(wrap) {
         const keys = getKeys();
-        if (!keys.cwa) {
+        const sourceMode = getSourceMode();
+        if (sourceMode === 'api' && !keys.cwa) {
             showMessage(wrap,
-                '還沒設定中央氣象署授權碼。<br><br>' +
+                '目前設定為「直連中央氣象署 API」，但還沒設定授權碼。<br><br>' +
                 '到 opendata.cwa.gov.tw 免費註冊即可取得，格式為 <b>CWA-…</b><br>' +
                 '路線資料直接取自頁面，不需要 Google 金鑰。<br><br>' +
                 '授權碼只會存在你自己的瀏覽器裡，不會出現在腳本原始碼中。<br><br>' +
-                '請從 Tampermonkey 選單的「設定 API 金鑰」填入，或按下方按鈕。');
+                '請從 Tampermonkey 選單的「設定」填入，或按下方按鈕；也可以改選 GitHub 快取來源，不需要授權碼。');
             const openBtn = document.createElement('button');
             openBtn.className = PREFIX + '-mbtn ' + PREFIX + '-primary';
-            openBtn.textContent = '開啟金鑰設定';
+            openBtn.textContent = '開啟設定';
             openBtn.style.margin = '0 12px';
             openBtn.addEventListener('click', () => { injectStyle(); openSettings(); });
             wrap.appendChild(openBtn);
@@ -2171,9 +2209,9 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
 
         clearBody(wrap);
         const lastArrive = new Date(departures[departures.length - 1].getTime() + totalSec * 1000);
-        const { forecast, failures, callCount, fetchedAt, fromCache } =
+        const { forecast, failures, callCount, fetchedAt, fromCache, source } =
             await getForecast(keys.cwa, nodes,
-                () => { clearBody(wrap); showMessage(wrap, '正在向中央氣象署取得降雨預報…'); });
+                (sourceLabel) => { clearBody(wrap); showMessage(wrap, `正在向${sourceLabel}取得降雨預報…`); });
 
         log('即將繪製的前 3 列：', nodes.slice(0, 3).map(n =>
             `+${Math.round(n.sec / 60)}分 ${n.county || '?'}${n.town || '?'}` +
@@ -2192,6 +2230,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
                 failures,
                 fetchedAt,
                 fromCache,
+                source,
                 altCount: alts.length,
             },
         });
@@ -2320,8 +2359,12 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             `總行程 ${Math.round(totalSec / 60)} 分`,
             `路徑資料：取自頁面本身（${Math.round((Date.now() - meta.capturedAt) / 1000)} 秒前攔截），未呼叫任何 API`,
             meta.fromCache
-                ? `氣象資料：沿用快取（${Math.round((Date.now() - meta.fetchedAt) / 60000)} 分鐘前取得）`
-                : `氣象資料：本次重新取得，呼叫 ${meta.callCount} 次`,
+                ? `氣象資料：沿用本機快取（${Math.round((Date.now() - meta.fetchedAt) / 60000)} 分鐘前取得）`
+                : `氣象資料：從${{
+                    github: 'GitHub 快取',
+                    api: '中央氣象署 API（直連）',
+                    'api-fallback': '中央氣象署 API（GitHub 失敗，改直連）',
+                }[meta.source] || meta.source || '未知來源'}取得，呼叫 ${meta.callCount} 次`,
             `交通方式 ${meta.mode.mode}（判斷依據：${meta.mode.via}）`,
             `路線比對：${meta.matchNote}`,
         ];
