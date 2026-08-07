@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.69.0
+// @version      0.70.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
-// @match        https://www.google.com/maps/*
+// @match        https://www.google.com/maps*
 // @icon         https://www.google.com/maps/about/images/icons/maps_512dp.png
 // @connect      opendata.cwa.gov.tw
 // @connect      www.google.com
@@ -24,6 +24,12 @@
 /* eslint-disable no-unused-vars */
 (function () {
     'use strict';
+
+    // @match 用 /maps* 而不是 /maps/*：後者要求路徑必須以「/maps/」開頭（含斜線），
+    // 因此 https://www.google.com/maps 與 .../maps?entry=… 都不會注入。
+    // 而「先開 Google Maps、再規劃路線」的起點常常正是這兩種——
+    // 一開始沒被注入，後面再怎麼改網址都沒用，因為 SPA 不會重新載入頁面，
+    // @match 只在載入時判斷一次。
 
     // ────────────────────────────────────────────────────────────────
     // 設定常數
@@ -1670,6 +1676,21 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
         btn.style.setProperty('display', 'inline-flex', 'important');
         btn.style.setProperty('top', Math.round(r.top) + 'px', 'important');
         btn.style.setProperty('height', Math.round(r.height) + 'px', 'important');
+
+        // 面板往下捲時「選項」會往上跑，按鈕跟著上去就會疊到搜尋框那一區。
+        // 按鈕掛在 document.body、與 Google 面板是不同的堆疊脈絡，
+        // 調 z-index 不保險（而且當初移到 body 正是為了避開它的渲染範圍）；
+        // 改成把超出面板內容區上緣的部分裁掉，視覺上就是滑進上面那塊的下方。
+        const panel = findPanel();
+        const limit = panel ? panel.getBoundingClientRect().top : 0;
+        const over = limit - r.top;
+        if (over >= r.height) {
+            // 整顆都在上緣之外，直接收起來
+            btn.style.setProperty('display', 'none', 'important');
+            return;
+        }
+        btn.style.setProperty('clip-path',
+            over > 0 ? `inset(${Math.ceil(over)}px 0 0 0)` : 'none', 'important');
         if (state.active) {
             // 開啟後沒有其他選項可按，按鈕改成「關閉」並移到「選項」的位置蓋住它，
             // 行為與 Google 自己的面板一致（按下去展開、原位變成關閉）
