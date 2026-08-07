@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.72.0
+// @version      0.73.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -1436,10 +1436,10 @@
         const box = document.createElement('div');
         box.className = PREFIX + '-modal';
 
-        const field = (labelText, hintText, value, name) => `
+        const field = (labelText, hintHtml, value, name) => `
 <label class="${PREFIX}-f">
   <span class="${PREFIX}-flabel">${labelText}</span>
-  <span class="${PREFIX}-hint">${hintText}</span>
+  <span class="${PREFIX}-hint">${hintHtml}</span>
   <span class="${PREFIX}-inwrap">
     <input type="password" name="${name}" value="${(value || '').replace(/"/g, '&quot;')}"
            autocomplete="off" spellcheck="false">
@@ -1459,16 +1459,31 @@
         const curMode = getSourceMode();
         box.innerHTML = `
 <div class="${PREFIX}-mtitle">設定</div>
-<div class="${PREFIX}-mdesc">授權碼只存在你自己的瀏覽器，不會上傳，也不在腳本原始碼中。</div>
 <label class="${PREFIX}-f">
   <span class="${PREFIX}-flabel">降雨資料來源</span>
-  <span class="${PREFIX}-hint">GitHub：讀取每小時更新的快取，較快也省 API 額度；失敗時自動改走直連 API。選「直連 API」需先在下方填妥授權碼。</span>
   <select name="sourceMode">
     <option value="github" ${curMode === 'github' ? 'selected' : ''}>GitHub 快取（推薦，失敗自動改直連）</option>
     <option value="api" ${curMode === 'api' ? 'selected' : ''}>直連中央氣象署 API</option>
   </select>
 </label>
-${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取得，格式為 CWA-…（僅在選擇「直連 API」，或 GitHub 來源失敗需要備援時使用）', cur.cwa, 'cwa')}
+<div class="${PREFIX}-source-desc">
+  <div class="${PREFIX}-source-desc-title">GitHub 快取</div>
+  <div class="${PREFIX}-source-desc-body">讀取每小時更新的快取，較快也省 API 額度；失敗時自動改走直連 API。</div>
+</div>
+<div class="${PREFIX}-source-desc" style="margin-bottom:20px">
+  <div class="${PREFIX}-source-desc-title">直連中央氣象署 API</div>
+  <div class="${PREFIX}-source-desc-body">即時查詢，需先在下方填妥授權碼。</div>
+</div>
+${field('API 授權碼',
+    `於中央氣象署 <a href="https://opendata.cwa.gov.tw/" target="_blank" rel="noopener">opendata.cwa.gov.tw</a> ` +
+    `註冊帳號即可取得 API 授權碼（格式為 <b>CWA-</b> 開頭）`,
+    cur.cwa, 'cwa')}
+<div class="${PREFIX}-danger-zone">
+  <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" class="${PREFIX}-danger-icon">
+    <path fill="currentColor" d="M12 3.2 1.6 21h20.8L12 3.2Zm0 4.4 7.6 12.2H4.4L12 7.6Zm-.9 4.4h1.8v4.4h-1.8v-4.4Zm0 5.6h1.8v1.8h-1.8v-1.8Z"/>
+  </svg>
+  <div class="${PREFIX}-danger-text">授權碼只存在你自己的瀏覽器，不會上傳，也不會出現在腳本原始碼中。</div>
+</div>
 <div class="${PREFIX}-modal-warn" data-${PREFIX}-warn style="display:none"></div>
 <div class="${PREFIX}-mact">
   <button type="button" class="${PREFIX}-mbtn" data-${PREFIX}-cancel>取消</button>
@@ -1492,7 +1507,7 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
             if (selectEl.value === 'api') {
                 const key = box.querySelector('input[name="cwa"]').value.trim();
                 if (!CWA_KEY_PATTERN.test(key)) {
-                    showWarn('選擇「直連 API」前，請先在下方填入正確格式的中央氣象署授權碼（CWA-…）。');
+                    showWarn('選擇「直連 API」前，請先在下方填入正確格式的 API 授權碼（CWA-…）。');
                     selectEl.value = lastValidMode;
                     return;
                 }
@@ -1597,11 +1612,18 @@ ${field('中央氣象署授權碼', 'opendata.cwa.gov.tw 免費註冊即可取�
   display:flex;align-items:center;justify-content:center}
 .${PREFIX}-modal{background:#fff;border-radius:12px;padding:22px 24px;width:420px;max-width:92vw;
   box-shadow:0 12px 40px rgba(0,0,0,.3);font-family:inherit;color:#202124}
-.${PREFIX}-mtitle{font-size:17px;font-weight:600;margin-bottom:4px}
-.${PREFIX}-mdesc{font-size:12.5px;color:#5f6368;line-height:1.6;margin-bottom:18px}
+.${PREFIX}-mtitle{font-size:17px;font-weight:600;margin-bottom:16px}
 .${PREFIX}-f{display:block;margin-bottom:16px}
 .${PREFIX}-flabel{display:block;font-size:13px;font-weight:600;margin-bottom:2px}
 .${PREFIX}-hint{display:block;font-size:11.5px;color:#80868b;margin-bottom:6px;line-height:1.5}
+.${PREFIX}-hint a{color:#1a73e8;text-decoration:underline}
+.${PREFIX}-source-desc{margin-bottom:6px}
+.${PREFIX}-source-desc-title{font-size:12px;font-weight:600;color:#202124}
+.${PREFIX}-source-desc-body{font-size:11px;color:#80868b;line-height:1.6}
+.${PREFIX}-danger-zone{display:flex;gap:8px;align-items:flex-start;border:1px solid rgba(180,40,40,.25);
+  border-radius:8px;background:rgba(180,40,40,.04);padding:10px 12px;margin-bottom:20px}
+.${PREFIX}-danger-icon{color:rgba(160,40,40,.6);flex-shrink:0;margin-top:1px}
+.${PREFIX}-danger-text{font-size:10.5px;color:rgba(140,60,60,.75);line-height:1.5}
 .${PREFIX}-modal-warn{font-size:12.5px;color:#c5221f;background:#fce8e6;border-radius:6px;
   padding:8px 10px;margin-bottom:14px;line-height:1.5}
 /* 膠囊形輸入框，右側嵌眼睛按鈕、以細分隔線隔開 */
