@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.73.1
+// @version      0.74.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -1466,13 +1466,15 @@
     <option value="api" ${curMode === 'api' ? 'selected' : ''}>直連中央氣象署 API</option>
   </select>
 </label>
-<div class="${PREFIX}-source-desc">
-  <div class="${PREFIX}-source-desc-title">GitHub 快取</div>
-  <div class="${PREFIX}-source-desc-body">讀取每小時更新的快取，較快也省 API 額度；失敗時自動改走直連 API。</div>
-</div>
-<div class="${PREFIX}-source-desc" style="margin-bottom:20px">
-  <div class="${PREFIX}-source-desc-title">直連中央氣象署 API</div>
-  <div class="${PREFIX}-source-desc-body">即時查詢，需先在下方填妥授權碼。</div>
+<div class="${PREFIX}-info-zone">
+  <div class="${PREFIX}-source-desc">
+    <div class="${PREFIX}-source-desc-title">GitHub 快取</div>
+    <div class="${PREFIX}-source-desc-body">讀取每小時更新的快取，較快也省 API 額度；失敗時自動改走直連 API。</div>
+  </div>
+  <div class="${PREFIX}-source-desc">
+    <div class="${PREFIX}-source-desc-title">直連中央氣象署 API</div>
+    <div class="${PREFIX}-source-desc-body">即時查詢，需先在下方填妥授權碼。</div>
+  </div>
 </div>
 ${field('API 授權碼',
     `於中央氣象署 <a href="https://opendata.cwa.gov.tw/" target="_blank" rel="noopener">opendata.cwa.gov.tw</a> ` +
@@ -1617,11 +1619,14 @@ ${field('API 授權碼',
 .${PREFIX}-flabel{display:block;font-size:14px;font-weight:600;margin-bottom:2px}
 .${PREFIX}-f select{font-size:13px;padding:8px 10px;border-radius:6px;border:1px solid #dadce0;
   width:100%;background:#fff;color:#202124;font-family:inherit}
-.${PREFIX}-hint{display:block;font-size:11.5px;color:#80868b;margin-bottom:6px;line-height:1.5}
+.${PREFIX}-hint{display:block;font-size:11.5px;color:#5f6368;margin-bottom:6px;line-height:1.6;padding-left:10px}
 .${PREFIX}-hint a{color:#1a73e8;text-decoration:underline}
-.${PREFIX}-source-desc{margin-bottom:6px}
-.${PREFIX}-source-desc-title{font-size:12px;font-weight:600;color:#202124}
-.${PREFIX}-source-desc-body{font-size:11px;color:#80868b;line-height:1.6}
+.${PREFIX}-info-zone{border:1px solid rgba(26,115,232,.18);border-radius:8px;
+  background:rgba(26,115,232,.05);padding:10px 12px;margin-bottom:20px}
+.${PREFIX}-source-desc{padding-left:2px;margin-bottom:8px}
+.${PREFIX}-source-desc:last-child{margin-bottom:0}
+.${PREFIX}-source-desc-title{font-size:12px;font-weight:600;color:#202124;margin-bottom:1px}
+.${PREFIX}-source-desc-body{font-size:11.5px;color:#5f6368;line-height:1.6;padding-left:10px}
 .${PREFIX}-danger-zone{display:flex;gap:8px;align-items:flex-start;border:1px solid rgba(180,40,40,.25);
   border-radius:8px;background:rgba(180,40,40,.04);padding:10px 12px;margin-bottom:20px}
 .${PREFIX}-danger-icon{color:rgba(160,40,40,.6);flex-shrink:0;margin-top:1px}
