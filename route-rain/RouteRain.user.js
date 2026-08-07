@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.74.1
+// @version      0.75.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -190,7 +190,7 @@
         gToken: '',                 // Google 內部端點的 session 權杖
         routePoints: null,          // 目前顯示路線的座標，用來算出離路線夠遠的按下點
         rerunTimer: null,
-        panelBg: '',
+        panelOriginalOverflow: undefined,
         optionsClickHandler: null,
         townCache: null,
     };
@@ -1656,7 +1656,7 @@ ${field('API 授權碼',
 /* overflow-anchor:none 關掉瀏覽器的捲動錨定——內容一有變動它就會自行調整捲動位置，
    跟 scroll-snap 疊在一起會互相打架、造成畫面亂跳 */
 .${PREFIX}-scroll{overflow:auto;max-height:calc(100vh - 300px);overflow-anchor:none;
-  scroll-snap-type:both proximity;
+  scroll-snap-type:both mandatory;overscroll-behavior:contain;
   scroll-padding-top:${HEADER_H_PX}px;scroll-padding-left:${ROWH_W_PX}px}
 .${PREFIX}-msg{padding:14px 12px;font-size:13px;color:#3c4043;line-height:1.7;white-space:pre-wrap}
 .${PREFIX}-msg b{color:#1a73e8}
@@ -1788,25 +1788,6 @@ ${field('API 授權碼',
      * 因此改成：按鈕掛在 document.body、用 fixed 定位貼齊「選項」左側，
      * 完全不進入 Google 的渲染範圍，它就無從接管。代價是位置要自己維護。
      */
-    /**
-     * 沿祖先鏈往上找第一個「真正不透明」的背景色。
-     * 直接用 getComputedStyle(el).backgroundColor 有個陷阱：多數容器是 rgba(0,0,0,0)，
-     * 那是一個非空字串，`|| '#fff'` 這種保護擋不住——「有值」不等於「不透明」。
-     * 蓋住底下的「選項」需要真正不透明的底色，否則文字會透出來，看起來就像按鈕沒出現。
-     */
-    function resolveOpaqueBackground(el) {
-        for (let n = el; n && n !== document.documentElement; n = n.parentElement) {
-            const bg = getComputedStyle(n).backgroundColor;
-            if (!bg) continue;
-            const m = bg.match(/rgba?\(([^)]+)\)/);
-            if (!m) continue;
-            const parts = m[1].split(',').map(s => parseFloat(s));
-            const alpha = parts.length > 3 ? parts[3] : 1;
-            if (alpha > 0.95) return bg;
-        }
-        return '#fff';
-    }
-
     function positionButton(btn, optionsBtn) {
         const r = optionsBtn.getBoundingClientRect();
         if (r.width === 0 && r.height === 0) {
@@ -1831,23 +1812,13 @@ ${field('API 授權碼',
         }
         btn.style.setProperty('clip-path',
             over > 0 ? `inset(${Math.ceil(over)}px 0 0 0)` : 'none', 'important');
-        if (state.active) {
-            // 開啟後沒有其他選項可按，按鈕改成「關閉」並移到「選項」的位置蓋住它，
-            // 行為與 Google 自己的面板一致（按下去展開、原位變成關閉）
-            // 文字比「選項」長，若沿用它的左緣會往右溢出面板；
-            // 改成對齊右緣、往左延伸，剛好把「選項」整個蓋住
-            btn.style.setProperty('min-width', Math.round(r.width) + 'px', 'important');
-            btn.style.setProperty('left',
-                Math.round(r.right - Math.max(btn.offsetWidth, r.width)) + 'px', 'important');
-            btn.style.setProperty('background', state.panelBg || '#fff', 'important');
-            log('關閉按鈕定位：left=', Math.round(r.left), 'top=', Math.round(r.top),
-                'w>=', Math.round(r.width), '底色=', state.panelBg);
-        } else {
-            btn.style.removeProperty('min-width');
-            btn.style.setProperty('background', 'transparent', 'important');
-            btn.style.setProperty('left',
-                Math.round(r.left - btn.offsetWidth - BUTTON_GAP_PX) + 'px', 'important');
-        }
+        // 開啟或關閉都固定在「選項」左邊，不蓋住它——使用者隨時能點「選項」修改路線，
+        // 不需要先關掉我們的表格才能碰到它。（先前開啟時會蓋住選項模仿 Google 的
+        // 「按下展開、原位變關閉」效果，但那樣使用者臨時想改路線就必須先關表格。）
+        btn.style.removeProperty('min-width');
+        btn.style.setProperty('background', 'transparent', 'important');
+        btn.style.setProperty('left',
+            Math.round(r.left - btn.offsetWidth - BUTTON_GAP_PX) + 'px', 'important');
     }
 
     /**
@@ -2024,6 +1995,39 @@ ${field('API 授權碼',
         }
     }
 
+    // 量出「選項」以上到我們表格開始之間的高度（Google 自己的標頭），
+    // 把 panel 本身的捲動鎖住、固定在剛好露出表格頂端的位置，讓標頭（含「選項」）
+    // 永遠留在畫面上、不再隨捲動移動；真正的捲動全部交給表格自己的 .rr-scroll 處理。
+    // PANEL_BOTTOM_PADDING_PX 是給 Google 自己面板下緣留的緩衝，避免算太滿。
+    const PANEL_BOTTOM_PADDING_PX = 16;
+    const MIN_SCROLL_HEIGHT_PX = 200;   // 可視窗過矮時的下限，避免表格被壓成看不出東西
+
+    function lockPanelScroll(panel, wrap) {
+        if (!panel || !wrap) return;
+        const scrollEl = wrap.querySelector('.' + PREFIX + '-scroll');
+        if (!scrollEl) return;   // 資料還沒渲染出表格（例如還在顯示「處理中」訊息）
+
+        if (state.panelOriginalOverflow === undefined) {
+            state.panelOriginalOverflow = panel.style.overflow;
+        }
+        const headerHeight = wrap.offsetTop;
+        const available = window.innerHeight - headerHeight - PANEL_BOTTOM_PADDING_PX;
+        scrollEl.style.maxHeight = Math.max(available, MIN_SCROLL_HEIGHT_PX) + 'px';
+
+        panel.scrollTop = headerHeight;
+        panel.style.setProperty('overflow', 'hidden', 'important');
+    }
+
+    function unlockPanelScroll(panel) {
+        if (!panel) return;
+        if (state.panelOriginalOverflow !== undefined) {
+            if (state.panelOriginalOverflow) panel.style.overflow = state.panelOriginalOverflow;
+            else panel.style.removeProperty('overflow');
+            state.panelOriginalOverflow = undefined;
+        }
+        panel.scrollTop = 0;
+    }
+
     function deactivate() {
         if (state.optionsClickHandler) {
             document.removeEventListener('click', state.optionsClickHandler, true);
@@ -2035,6 +2039,7 @@ ${field('API 授權碼',
         state.hiddenBlocks = [];
         if (state.container) { state.container.remove(); state.container = null; }
         const panel = findPanel();
+        unlockPanelScroll(panel);
         if (panel && state.originalPanelWidth !== undefined) {
             panel.style.width = state.originalPanelWidth;
         }
@@ -2065,7 +2070,6 @@ ${field('API 授權碼',
         panel.appendChild(wrap);
         state.container = wrap;
         state.active = true;
-        state.panelBg = resolveOpaqueBackground(panel);
         const btn = document.querySelector('[data-' + PREFIX + '-btn]');
         if (btn) btn.setAttribute('data-' + PREFIX + '-on', '1');
         ensureButton();
@@ -2263,6 +2267,9 @@ ${field('API 授權碼',
                 altCount: alts.length,
             },
         });
+        // 表格結構剛出來，量出實際高度、把 Google 的面板捲動鎖住。
+        // 用 rAF 等這輪排版真的定案，量到的高度才準確。
+        requestAnimationFrame(() => lockPanelScroll(findPanel(), wrap));
 
         // 表格先出現，地點名稱在背景陸續補上——36 個節點要十幾秒，
         // 讓使用者盯著「處理中」等那麼久沒有必要。名稱是寫進節點物件的，
@@ -3212,6 +3219,14 @@ ${field('API 授權碼',
         new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
         window.addEventListener('resize', schedule);
         window.addEventListener('scroll', schedule, true);
+
+        // 視窗尺寸變動時，重新量測可用高度並鎖回去——跟上面的 schedule 分開，
+        // 因為 schedule 也會被表格自己內部的捲動觸發（scroll 監聽用了 capture），
+        // 若把量測邏輯放進 schedule，使用者在表格裡捲動時每一影格都會多做一次
+        // getBoundingClientRect／reflow，沒有必要。resize 頻率低得多，獨立處理即可。
+        window.addEventListener('resize', () => {
+            if (state.active && state.container) lockPanelScroll(findPanel(), state.container);
+        });
 
         // Google Maps 是 SPA，換路線只改網址不重新載入頁面。
         // MutationObserver 多半也會被觸發，但直接監看網址變化比較直接可靠：
