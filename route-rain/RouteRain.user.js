@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.73.0
+// @version      0.73.1
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -1614,7 +1614,9 @@ ${field('API 授權碼',
   box-shadow:0 12px 40px rgba(0,0,0,.3);font-family:inherit;color:#202124}
 .${PREFIX}-mtitle{font-size:17px;font-weight:600;margin-bottom:16px}
 .${PREFIX}-f{display:block;margin-bottom:16px}
-.${PREFIX}-flabel{display:block;font-size:13px;font-weight:600;margin-bottom:2px}
+.${PREFIX}-flabel{display:block;font-size:14px;font-weight:600;margin-bottom:2px}
+.${PREFIX}-f select{font-size:13px;padding:8px 10px;border-radius:6px;border:1px solid #dadce0;
+  width:100%;background:#fff;color:#202124;font-family:inherit}
 .${PREFIX}-hint{display:block;font-size:11.5px;color:#80868b;margin-bottom:6px;line-height:1.5}
 .${PREFIX}-hint a{color:#1a73e8;text-decoration:underline}
 .${PREFIX}-source-desc{margin-bottom:6px}
@@ -1623,7 +1625,7 @@ ${field('API 授權碼',
 .${PREFIX}-danger-zone{display:flex;gap:8px;align-items:flex-start;border:1px solid rgba(180,40,40,.25);
   border-radius:8px;background:rgba(180,40,40,.04);padding:10px 12px;margin-bottom:20px}
 .${PREFIX}-danger-icon{color:rgba(160,40,40,.6);flex-shrink:0;margin-top:1px}
-.${PREFIX}-danger-text{font-size:10.5px;color:rgba(140,60,60,.75);line-height:1.5}
+.${PREFIX}-danger-text{font-size:11.5px;color:rgba(140,60,60,.75);line-height:1.5}
 .${PREFIX}-modal-warn{font-size:12.5px;color:#c5221f;background:#fce8e6;border-radius:6px;
   padding:8px 10px;margin-bottom:14px;line-height:1.5}
 /* 膠囊形輸入框，右側嵌眼睛按鈕、以細分隔線隔開 */
