@@ -8,7 +8,7 @@ SLEEP_BETWEEN=2
 CONNECT_TIMEOUT=5
 MAX_TIME=20
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(pwd)"
 DATA_FILE="${REPO_ROOT}/route-rain/cwa_cache.json"
 RSS_FILE="${REPO_ROOT}/route-rain/route_rain_status.xml"
 
