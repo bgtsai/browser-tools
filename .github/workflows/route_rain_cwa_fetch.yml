@@ -1,0 +1,33 @@
+name: Route Rain CWA Fetch
+
+on:
+  schedule:
+    - cron: '30 * * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch CWA data and build RSS
+        env:
+          CWA_API_TOKEN: ${{ secrets.CWA_API_TOKEN }}
+        run: bash route-rain/scripts/fetch_cwa.sh
+
+      - name: Commit and push
+        run: |
+          git config user.name "route-rain-bot"
+          git config user.email "actions@github.com"
+          git add route-rain/cwa_cache.json route-rain/route_rain_status.xml
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "RouteRain cwa_cache update $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            git push
+          fi
