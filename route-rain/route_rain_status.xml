@@ -3,6 +3,15 @@
 <title>Route Rain 氣象快取更新狀態</title>
 <description>路線降雨預報 — GitHub Actions 氣象快取抓取執行紀錄</description>
 <link>https://github.com/bgtsai/browser-tools</link>
+<item><title>🟡 03:31 2026.08.19｜抓取重試</title><description><![CDATA[【摘要】成功 22/22 縣市<br>
+<br>
+【重試紀錄】<br>
+19:27:26 新北市 重試成功<br>
+19:29:53 臺南市 重試成功<br>
+19:30:32 高雄市 重試成功<br>
+<br>
+【失敗紀錄】<br>
+（本次無）]]></description><pubDate>Tue, 18 Aug 2026 19:31:33 +0000</pubDate><guid isPermaLink="false">route-rain-1787081493</guid></item>
 <item><title>🟢 03:10 2026.08.19｜一切正常</title><description><![CDATA[【摘要】成功 22/22 縣市&lt;br&gt;&lt;br&gt;【重試紀錄】&lt;br&gt;（本次無）&lt;br&gt;&lt;br&gt;【失敗紀錄】&lt;br&gt;（本次無）]]></description><pubDate>Tue, 18 Aug 2026 19:10:47 +0000</pubDate><guid isPermaLink="false">route-rain-1787080247</guid></item>
 <item><title>🟡 02:55 2026.08.19｜抓取重試</title><description><![CDATA[【摘要】成功 22/22 縣市&lt;br&gt;&lt;br&gt;【重試紀錄】&lt;br&gt;18:51:42 苗栗縣 重試成功&lt;br&gt;18:52:23 臺中市 重試成功&lt;br&gt;18:54:22 屏東縣 重試成功&lt;br&gt;&lt;br&gt;【失敗紀錄】&lt;br&gt;（本次無）]]></description><pubDate>Tue, 18 Aug 2026 18:55:13 +0000</pubDate><guid isPermaLink="false">route-rain-1787079313</guid></item>
 </channel></rss>
