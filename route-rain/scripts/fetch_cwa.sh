@@ -148,10 +148,16 @@ title_time=$(TZ=Asia/Taipei date +"%H:%M")
 title_date=$(TZ=Asia/Taipei date +"%Y.%m.%d")
 item_title="${color} ${title_time} ${title_date}｜${reason}"
 
-if [ -z "$retry_log" ]; then retry_display="（本次無）"; else retry_display=$(printf '%b' "$retry_log" | awk 'NF' | awk 'NR>1{printf "&lt;br&gt;"} {printf "%s", $0}'); fi
-if [ -z "$fail_log" ]; then fail_display="（本次無）"; else fail_display=$(printf '%b' "$fail_log" | awk 'NF' | awk 'NR>1{printf "&lt;br&gt;"} {printf "%s", $0}'); fi
+if [ -z "$retry_log" ]; then retry_display="（本次無）"; else retry_display=$(printf '%b' "$retry_log" | awk 'NF' | awk 'NR>1{printf "<br>\n"} {printf "%s", $0}'); fi
+if [ -z "$fail_log" ]; then fail_display="（本次無）"; else fail_display=$(printf '%b' "$fail_log" | awk 'NF' | awk 'NR>1{printf "<br>\n"} {printf "%s", $0}'); fi
 
-item_desc="【摘要】成功 ${fetched_count}/${total_count} 縣市&lt;br&gt;&lt;br&gt;【重試紀錄】&lt;br&gt;${retry_display}&lt;br&gt;&lt;br&gt;【失敗紀錄】&lt;br&gt;${fail_display}"
+item_desc="【摘要】成功 ${fetched_count}/${total_count} 縣市<br>
+<br>
+【重試紀錄】<br>
+${retry_display}<br>
+<br>
+【失敗紀錄】<br>
+${fail_display}"
 
 pub_date=$(date -u +"%a, %d %b %Y %H:%M:%S +0000")
 guid="route-rain-$(date -u +%s)"
