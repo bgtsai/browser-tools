@@ -2,14 +2,17 @@
 
 Google Maps Tampermonkey 使用者腳本，疊加中央氣象署降雨預報在路線規劃上。
 
-## 使用者需要自行提供的 Token
+## （選填）使用者需要自行提供的 Token
 
-腳本本身**不內建任何憑證**，需要的兩組 token，由使用者透過 Tampermonkey 選單自行輸入，存在瀏覽器本機：
+腳本本身**不內建任何憑證**。**預設情況下完全不需要任何 token**——直接讀取 GitHub 上這份每小時自動更新的快取即可正常運作。
 
-- **Google Maps API token**（Routes API）
-- **中央氣象署開放資料授權碼**
+只有在下列情況，才需要使用者透過 Tampermonkey 選單自行輸入、存在瀏覽器本機：
+
+- **中央氣象署開放資料授權碼**：GitHub 快取來源失敗時的 fallback，或使用者想跳過快取、即時查詢最新資料時才會用到
 
 **為什麼不能寫死在腳本裡**：自動更新需要 `@downloadURL` 指向公開網址，代表腳本原始碼本身必然是公開的——token 若寫進原始碼，就等於把它公開貼在 GitHub 上，任何人都看得到。
+
+> 註：早期版本另外需要 Google Maps API token（Routes API），後來腳本改成直接讀取 Google Maps 頁面上已經算好的路線資料，不再另外呼叫 Routes API，這組 token 已經不需要了。
 
 ## 這個資料夾底下的檔案
 
