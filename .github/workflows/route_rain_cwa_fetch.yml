@@ -28,6 +28,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "RouteRain cwa_cache update $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            git commit -m "RouteRain cwa_cache update $(TZ=Asia/Taipei date +'%Y-%m-%d %H:%M:%S')（台北時間）"
             git push
           fi
