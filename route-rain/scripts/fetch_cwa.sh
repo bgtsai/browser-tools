@@ -6,7 +6,9 @@ CITY_LIST="臺北市,F-D0047-061 新北市,F-D0047-069 基隆市,F-D0047-049 桃
 CWA_KEY="${CWA_API_TOKEN:?請設定 CWA_API_TOKEN 環境變數}"
 SLEEP_BETWEEN=2
 CONNECT_TIMEOUT=5
-MAX_TIME=20
+MAX_TIME=120
+SPEED_LIMIT=1
+SPEED_TIME=20
 
 REPO_ROOT="$(pwd)"
 DATA_FILE="${REPO_ROOT}/route-rain/cwa_cache.json"
@@ -36,7 +38,7 @@ for pair in $CITY_LIST; do
   while [ "$attempt" -le 2 ]; do
     echo "→ 請求 ${city_name}(${dataid}) 第${attempt}次"
     req_start=$(date +%s)
-    raw=$(curl -s --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" "$url" || true)
+    raw=$(curl -s --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" --speed-limit "$SPEED_LIMIT" --speed-time "$SPEED_TIME" "$url" || true)
     req_end=$(date +%s)
     echo "← ${city_name} 耗時$((req_end - req_start))秒 長度$(printf '%s' "$raw" | wc -c)bytes"
 
