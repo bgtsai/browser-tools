@@ -162,25 +162,63 @@ ${fail_display}"
 pub_date=$(date -u +"%a, %d %b %Y %H:%M:%S +0000")
 guid="route-rain-$(date -u +%s)"
 
-# 保留最近 20 筆既有 item（如果 RSS 檔案已存在）
+# 組出這次的新 item，交給 Python 用真正的 XML 解析器處理「保留最近 20 筆」，
+# 不再用 grep/sed 這種逐行文字比對（多行內容跨行時容易漏掉，見 KB 17 第⑦條相關教訓）
 mkdir -p "$(dirname "$RSS_FILE")"
-existing_items=""
-if [ -f "$RSS_FILE" ]; then
-  existing_items=$(sed -n '/<item>/,/<\/item>/p' "$RSS_FILE" | head -c 200000)
-fi
 
-{
-  echo '<?xml version="1.0" encoding="UTF-8"?>'
-  echo '<rss version="2.0"><channel>'
-  echo '<title>Route Rain 氣象快取更新狀態</title>'
-  echo '<description>路線降雨預報 — GitHub Actions 氣象快取抓取執行紀錄</description>'
-  echo '<link>https://github.com/bgtsai/browser-tools</link>'
-  echo "<item><title>${item_title}</title><description><![CDATA[${item_desc}]]></description><pubDate>${pub_date}</pubDate><guid isPermaLink=\"false\">${guid}</guid></item>"
-  if [ -n "$existing_items" ]; then
-    printf '%s\n' "$existing_items" | grep -o '<item>.*</item>' | head -19
-  fi
-  echo '</channel></rss>'
-} > "$RSS_FILE"
+NEW_ITEM_TITLE="$item_title" \
+NEW_ITEM_DESC="$item_desc" \
+NEW_ITEM_PUBDATE="$pub_date" \
+NEW_ITEM_GUID="$guid" \
+RSS_FILE="$RSS_FILE" \
+python3 << 'PYEOF'
+import os
+import xml.etree.ElementTree as ET
+
+rss_file = os.environ["RSS_FILE"]
+new_title = os.environ["NEW_ITEM_TITLE"]
+new_desc = os.environ["NEW_ITEM_DESC"]
+new_pubdate = os.environ["NEW_ITEM_PUBDATE"]
+new_guid = os.environ["NEW_ITEM_GUID"]
+
+items = []  # 每筆是 (title, desc, pubdate, guid) 的 tuple
+if os.path.exists(rss_file):
+    try:
+        tree = ET.parse(rss_file)
+        channel = tree.getroot().find("channel")
+        if channel is not None:
+            for it in channel.findall("item"):
+                t = it.findtext("title", default="")
+                d = it.findtext("description", default="")
+                p = it.findtext("pubDate", default="")
+                g = it.findtext("guid", default="")
+                items.append((t, d, p, g))
+    except ET.ParseError:
+        # 舊檔案格式壞掉就當作沒有歷史，不要讓整支腳本掛掉
+        items = []
+
+# 新的一筆放最前面，保留最近 20 筆
+items = [(new_title, new_desc, new_pubdate, new_guid)] + items
+items = items[:20]
+
+lines = []
+lines.append('<?xml version="1.0" encoding="UTF-8"?>')
+lines.append('<rss version="2.0"><channel>')
+lines.append('<title>Route Rain 氣象快取更新狀態</title>')
+lines.append('<description>路線降雨預報 — GitHub Actions 氣象快取抓取執行紀錄</description>')
+lines.append('<link>https://github.com/bgtsai/browser-tools</link>')
+for t, d, p, g in items:
+    lines.append(
+        f'<item><title>{t}</title>'
+        f'<description><![CDATA[{d}]]></description>'
+        f'<pubDate>{p}</pubDate>'
+        f'<guid isPermaLink="false">{g}</guid></item>'
+    )
+lines.append('</channel></rss>')
+
+with open(rss_file, "w", encoding="utf-8") as f:
+    f.write("\n".join(lines) + "\n")
+PYEOF
 
 echo "已寫入 $RSS_FILE"
 echo "SUMMARY_TITLE=${item_title}" >> "${GITHUB_STEP_SUMMARY:-/dev/null}" 2>/dev/null || true
