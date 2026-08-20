@@ -42,8 +42,8 @@ jobs:
           should_run = True
 
           if log:
-              last = log[-1]["created_at_utc"]
-              last_dt = datetime.strptime(last, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+              last = log[-1]["created_at_tw"]
+              last_dt = datetime.strptime(last, "%Y-%m-%dT%H:%M:%S%z")
               now = datetime.now(timezone.utc)
               elapsed_minutes = (now - last_dt).total_seconds() / 60
               threshold = interval_minutes - buffer_minutes
@@ -66,7 +66,9 @@ jobs:
           # 寫進 trigger_log.json 的都是同一個值——重試花掉的時間屬於
           # 「這次執行跑了多久」，跟我們要記錄的「何時被觸發」是兩件事，
           # 不能讓重試次數污染了觸發時間的準確性
-          TRIGGER_TIME=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          # 記錄用台灣時間（+08:00），並在字串裡明確帶偏移量，
+          # 避免存進去的內容跟欄位名稱脫鉤、之後被誤判成 UTC
+          TRIGGER_TIME=$(TZ=Asia/Taipei date +'%Y-%m-%dT%H:%M:%S+08:00')
           echo "TRIGGER_TIME=$TRIGGER_TIME" >> "$GITHUB_ENV"
 
           write_and_commit() {
@@ -83,15 +85,15 @@ jobs:
               log = []
 
           log.append({
-              "created_at_utc": os.environ["TRIGGER_TIME"],
+              "created_at_tw": os.environ["TRIGGER_TIME"],
               "trigger_event": os.environ["GITHUB_EVENT_NAME"]
           })
 
           now = datetime.now(timezone.utc)
           cutoff = now - timedelta(days=14)
           def parse(ts):
-              return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-          log = [entry for entry in log if parse(entry["created_at_utc"]) >= cutoff]
+              return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S%z")
+          log = [entry for entry in log if parse(entry["created_at_tw"]) >= cutoff]
 
           with open(path, "w", encoding="utf-8") as f:
               json.dump(log, f, ensure_ascii=False, indent=2)
