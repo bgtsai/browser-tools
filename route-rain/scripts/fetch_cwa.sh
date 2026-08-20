@@ -146,8 +146,9 @@ else
   color="🟢"; reason="一切正常"
 fi
 
-title_time=$(TZ=Asia/Taipei date +"%H:%M")
-title_date=$(TZ=Asia/Taipei date +"%Y.%m.%d")
+TRIGGER_TIME="${TRIGGER_TIME:?TRIGGER_TIME 未設定}"
+title_time=$(TZ=Asia/Taipei date -d "$TRIGGER_TIME" +"%H:%M")
+title_date=$(TZ=Asia/Taipei date -d "$TRIGGER_TIME" +"%Y.%m.%d")
 item_title="${color} ${title_time} ${title_date}｜${reason}"
 
 if [ -z "$retry_log" ]; then retry_display="（本次無）"; else retry_display=$(printf '%b' "$retry_log" | awk 'NF' | awk 'NR>1{printf "<br>\n"} {printf "%s", $0}'); fi

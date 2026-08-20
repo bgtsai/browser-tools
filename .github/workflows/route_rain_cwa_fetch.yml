@@ -2,11 +2,19 @@ name: Route Rain CWA Fetch
 
 on:
   schedule:
+    # 每小時整點 30 分觸發，若調整這裡，下面 env.INTERVAL_MINUTES 也要跟著改
     - cron: '30 * * * *'
   workflow_dispatch: {}
 
 permissions:
   contents: write
+
+concurrency:
+  group: route-rain-cwa-fetch
+  cancel-in-progress: false
+
+env:
+  INTERVAL_MINUTES: 60   # 對應上面 cron 的觸發間隔（分鐘），兩者需人工保持一致
 
 jobs:
   fetch:
@@ -15,12 +23,120 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Check trigger interval
+        id: check
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from datetime import datetime, timezone
+
+          path = "route-rain/.log/trigger_log.json"
+          try:
+              with open(path, "r", encoding="utf-8") as f:
+                  log = json.load(f)
+          except FileNotFoundError:
+              log = []
+
+          interval_minutes = int(os.environ["INTERVAL_MINUTES"])
+          buffer_minutes = 5
+          should_run = True
+
+          if log:
+              last = log[-1]["created_at_utc"]
+              last_dt = datetime.strptime(last, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+              now = datetime.now(timezone.utc)
+              elapsed_minutes = (now - last_dt).total_seconds() / 60
+              threshold = interval_minutes - buffer_minutes
+              should_run = elapsed_minutes >= threshold
+              print(f"上次觸發：{last}，距今 {elapsed_minutes:.1f} 分鐘，門檻 {threshold} 分鐘，should_run={should_run}")
+          else:
+              print("trigger_log.json 為空，視為第一次執行，should_run=True")
+
+          gh_output = os.environ["GITHUB_OUTPUT"]
+          with open(gh_output, "a", encoding="utf-8") as f:
+              f.write(f"should_run={'true' if should_run else 'false'}\n")
+          PY
+
+      - name: Record trigger time
+        if: steps.check.outputs.should_run == 'true'
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: |
+          # 這個 run 的觸發時間只在這裡算一次，不管後面 push 重試幾次，
+          # 寫進 trigger_log.json 的都是同一個值——重試花掉的時間屬於
+          # 「這次執行跑了多久」，跟我們要記錄的「何時被觸發」是兩件事，
+          # 不能讓重試次數污染了觸發時間的準確性
+          TRIGGER_TIME=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          echo "TRIGGER_TIME=$TRIGGER_TIME" >> "$GITHUB_ENV"
+
+          write_and_commit() {
+            mkdir -p route-rain/.log
+            TRIGGER_TIME="$TRIGGER_TIME" python3 - <<'PY'
+          import json, os
+          from datetime import datetime, timezone, timedelta
+
+          path = "route-rain/.log/trigger_log.json"
+          try:
+              with open(path, "r", encoding="utf-8") as f:
+                  log = json.load(f)
+          except FileNotFoundError:
+              log = []
+
+          log.append({
+              "created_at_utc": os.environ["TRIGGER_TIME"],
+              "trigger_event": os.environ["GITHUB_EVENT_NAME"]
+          })
+
+          now = datetime.now(timezone.utc)
+          cutoff = now - timedelta(days=14)
+          def parse(ts):
+              return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+          log = [entry for entry in log if parse(entry["created_at_utc"]) >= cutoff]
+
+          with open(path, "w", encoding="utf-8") as f:
+              json.dump(log, f, ensure_ascii=False, indent=2)
+              f.write("\n")
+          PY
+            git config user.name "route-rain-bot"
+            git config user.email "actions@github.com"
+            git add route-rain/.log/trigger_log.json
+            if git diff --cached --quiet; then
+              echo "No changes to commit"
+              return 0
+            fi
+            git commit -m "RouteRain trigger log update $(TZ=Asia/Taipei date +'%Y-%m-%d %H:%M:%S')（台北時間）"
+          }
+
+          write_and_commit
+
+          for i in 1 2 3 4 5; do
+            git push && break
+            echo "推送衝突，重試中（第 $i 次）..."
+            sleep $((RANDOM % 5 + 1))
+            # 真正的衝突：兩邊都改了同一份 trigger_log.json 的完整內容，
+            # 單純 pull --rebase 會產生文字衝突，必須捨棄本地這次的 commit、
+            # 拉最新版本後重新讀取＋append＋重算，而不是死盯著同一次 push 硬重試
+            #
+            # 不用 git reset --hard HEAD~1：那個寫法依賴「這次 commit 一定是
+            # HEAD 頂端唯一新增的一個」這個隱含假設，之後前面若插入其他會
+            # commit 的步驟就會砍錯東西。改用 git checkout 把工作目錄還原到
+            # 目前 checkout 起點（不動 commit 歷史本身），再直接把分支重設到
+            # 遠端最新版本，不管本地目前是「多一個 commit」還是別的狀態，
+            # 結果都一致，不依賴「剛好多一個」這個假設。
+            git fetch origin main -q
+            git checkout -- .
+            git reset --hard origin/main
+            write_and_commit
+          done
+
       - name: Fetch CWA data and build RSS
+        if: steps.check.outputs.should_run == 'true'
         env:
           CWA_API_TOKEN: ${{ secrets.CWA_API_TOKEN }}
         run: bash route-rain/scripts/fetch_cwa.sh
 
       - name: Commit and push
+        if: steps.check.outputs.should_run == 'true'
         run: |
           git config user.name "route-rain-bot"
           git config user.email "actions@github.com"
@@ -29,5 +145,10 @@ jobs:
             echo "No changes to commit"
           else
             git commit -m "RouteRain cwa_cache update $(TZ=Asia/Taipei date +'%Y-%m-%d %H:%M:%S')（台北時間）"
-            git push
+            for i in 1 2 3 4 5; do
+              git push && break
+              echo "推送衝突，重試中（第 $i 次）..."
+              sleep $((RANDOM % 5 + 1))
+              git pull --rebase origin main -q
+            done
           fi
