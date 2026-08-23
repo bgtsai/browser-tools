@@ -190,5 +190,9 @@
   {
     "created_at_tw": "2026-08-23T13:02:31+08:00",
     "trigger_event": "schedule"
+  },
+  {
+    "created_at_tw": "2026-08-23T15:10:56+08:00",
+    "trigger_event": "schedule"
   }
 ]
