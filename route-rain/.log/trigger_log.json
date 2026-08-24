@@ -282,5 +282,9 @@
   {
     "created_at_tw": "2026-08-25T01:05:32+08:00",
     "trigger_event": "schedule"
+  },
+  {
+    "created_at_tw": "2026-08-25T03:10:22+08:00",
+    "trigger_event": "schedule"
   }
 ]
