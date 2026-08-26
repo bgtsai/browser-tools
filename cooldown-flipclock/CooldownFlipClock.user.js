@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.7.0
+// @version      0.8.0
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -409,7 +409,12 @@
     #cfc-flipdown .rotor-leaf-front { line-height: calc(var(--cfc-u) * 44); border-radius: calc(var(--cfc-u) * 3) calc(var(--cfc-u) * 3) 0 0; }
     #cfc-flipdown .rotor-leaf-rear  { line-height: 0;     border-radius: 0 0 calc(var(--cfc-u) * 3) calc(var(--cfc-u) * 3); transform: rotateX(-180deg); }
     #cfc-flipdown .rotor-top    { line-height: calc(var(--cfc-u) * 44); border-radius: calc(var(--cfc-u) * 3) calc(var(--cfc-u) * 3) 0 0; }
-    #cfc-flipdown .rotor-bottom { bottom: 0; line-height: 0; border-radius: 0 0 calc(var(--cfc-u) * 3) calc(var(--cfc-u) * 3); }
+    #cfc-flipdown .rotor-bottom {
+      bottom: 0;
+      line-height: 0;
+      border-radius: 0 0 calc(var(--cfc-u) * 3) calc(var(--cfc-u) * 3);
+      clip-path: inset(2px 0 0 0); /* 固定值，不隨翻頁狀態變動：裁掉文字反鋸齒邊緣殘留在裁切線上的淺色像素 */
+    }
     #cfc-flipdown .rotor,
     #cfc-flipdown .rotor-top,
     #cfc-flipdown .rotor-leaf-front { color: #f5f5f5; background-color: #1c1c1e; }
