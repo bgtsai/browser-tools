@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.2.0
+// @version      0.3.0
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -373,7 +373,7 @@
       border-radius: calc(var(--cfc-u) * 3); /* 24px */
       font-size: calc(var(--cfc-u) * 32); /* 256px */
       text-align: center;
-      perspective: calc(var(--cfc-u) * 36); /* 288px */
+      perspective: calc(var(--cfc-u) * 100); /* 800px（原 288px）——加大透視距離，減少翻頁時「靠近放大」的畸變感 */
     }
     #cfc-flipdown .rotor:last-child { margin-right: 0; }
     #cfc-flipdown .rotor-top,
@@ -442,7 +442,7 @@
       position: fixed;
       inset: 0;
       z-index: 2147483647;
-      background: rgba(10, 10, 12, 0.94);
+      background: rgba(10, 10, 12, 0.85);
       display: flex;
       flex-direction: column;
       align-items: center;
