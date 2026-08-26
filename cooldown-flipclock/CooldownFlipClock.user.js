@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.0.0
+// @version      1.0.1
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -413,18 +413,12 @@
       bottom: 0;
       line-height: 0;
       border-radius: 0 0 calc(var(--cfc-u) * 3) calc(var(--cfc-u) * 3);
+      clip-path: inset(2px 0 0 0); /* 固定值，不隨翻頁狀態變動：裁掉文字反鋸齒邊緣殘留在裁切線上的淺色像素 */
     }
-    #cfc-flipdown .rotor-bottom::before {
-      /* 蓋住文字裁切邊界的反鋸齒殘影，用同色色塊「蓋住」而非 clip-path「挖空」——
-         挖空會露出 .rotor 本身的上半底色，靜止時縫看起來變粗；蓋色塊則不管翻頁與否視覺上都一致 */
-      content: '';
-      position: absolute;
-      top: 0; left: 0; right: 0;
-      height: 2px;
-      background-color: var(--cfc-color-bottom-bg);
-      z-index: 2;
-    }
-    #cfc-flipdown .rotor,
+    /* .rotor 容器本身的底色改用下半色（而不是跟 rotor-top 共用上半色）——
+       這樣 rotor-bottom 被 clip-path 挖空後，露出來的正好是 .rotor 自己的底色，
+       顏色天生就對，不需要再疊一層東西去蓋，也不用擔心疊色塊的 z-index 堆疊順序 */
+    #cfc-flipdown .rotor { color: #f5f5f5; background-color: var(--cfc-color-bottom-bg); }
     #cfc-flipdown .rotor-top,
     #cfc-flipdown .rotor-leaf-front { color: #f5f5f5; background-color: #1c1c1e; }
     #cfc-flipdown .rotor-bottom,
