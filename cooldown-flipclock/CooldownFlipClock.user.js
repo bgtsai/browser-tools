@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.0.1
+// @version      1.1.0
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -565,7 +565,7 @@
       if (reopenBtn) return reopenBtn;
       reopenBtn = document.createElement("button");
       reopenBtn.id = "cfc-reopen";
-      reopenBtn.textContent = "\u23F1"; // ⏱
+      reopenBtn.innerHTML = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9" stroke-dasharray="2.5 3"/><path d="M12 7.5v5l3 2"/></svg>';
       reopenBtn.setAttribute("aria-label", "重新開啟倒數畫面");
       reopenBtn.style.display = "none";
       reopenBtn.addEventListener("click", () => {
@@ -629,6 +629,9 @@
         theme: "dark", // 我們的 CSS 已覆蓋配色，這裡只是滿足函式庫必填參數
         headings: ["天", "時", "分", "秒"],
       }).start();
+      flipdownInstance.ifEnded(() => {
+        setTimeout(() => close(), 5000); // 倒數歸零＝額度已恢復，延遲 5 秒讓使用者看到 00:00:00 再自動關閉
+      });
 
       // 除錯掛鉤：暴露實例本體，方便 Console 直接操控（例如降速測試時覆寫 _getTime）
       target.__cfcInstance = flipdownInstance;
