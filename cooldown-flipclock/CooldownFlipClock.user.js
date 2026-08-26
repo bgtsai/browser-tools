@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.2.0
+// @version      1.3.0
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -424,13 +424,18 @@
     #cfc-flipdown .rotor-bottom,
     #cfc-flipdown .rotor-leaf-rear  { color: #e8e8e8; background-color: var(--cfc-color-bottom-bg); }
     #cfc-flipdown .rotor:after {
+      /* 中線黑線：純色塊填滿，不用 border-top（避免旁邊 3D 旋轉造成的反鋸齒不穩定）。
+         粗細 2px、往下偏移 1px，數值是使用者用可調面板實測確認的。
+         z-index 拉到跟 #cfc-overlay 同等級，確保絕對在最上層。 */
       content: '';
-      z-index: 2;
       position: absolute;
-      bottom: 0; left: 0;
-      width: calc(var(--cfc-u) * 30); height: calc(var(--cfc-u) * 22); /* 240px / 176px */
-      border-radius: 0 0 calc(var(--cfc-u) * 3) calc(var(--cfc-u) * 3);
-      border-top: solid 1px #000;
+      left: 0;
+      top: calc(50% + 1px);
+      width: calc(var(--cfc-u) * 30); /* 240px，跟 rotor 同寬 */
+      height: 2px;
+      transform: translateY(-50%);
+      background-color: #000;
+      z-index: 2147483647;
       pointer-events: none;
     }
 
@@ -521,8 +526,7 @@
       #cfc-flipdown .rotor-leaf { height: 80px; }
       #cfc-flipdown .rotor-top, #cfc-flipdown .rotor-leaf-front { line-height: 80px; }
       #cfc-flipdown .rotor-top, #cfc-flipdown .rotor-bottom,
-      #cfc-flipdown .rotor-leaf-front, #cfc-flipdown .rotor-leaf-rear,
-      #cfc-flipdown .rotor:after { height: 40px; }
+      #cfc-flipdown .rotor-leaf-front, #cfc-flipdown .rotor-leaf-rear { height: 40px; }
       #cfc-flipdown .rotor-group { padding-right: 24px; }
       #cfc-flipdown .rotor-group-heading:before { font-size: 16px; height: 24px; line-height: 24px; }
       #cfc-overlay .cfc-close { width: 40px; height: 40px; font-size: 16px; bottom: 16px; right: 16px; }
@@ -565,7 +569,7 @@
       if (reopenBtn) return reopenBtn;
       reopenBtn = document.createElement("button");
       reopenBtn.id = "cfc-reopen";
-      reopenBtn.innerHTML = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9" stroke-dasharray="2.5 3"/><path d="M12 7.5v5l3 2"/></svg>';
+      reopenBtn.innerHTML = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5l3 2"/></svg>';
       reopenBtn.setAttribute("aria-label", "重新開啟倒數畫面");
       reopenBtn.style.display = "none";
       reopenBtn.addEventListener("click", () => {
