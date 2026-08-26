@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.4.0
+// @version      0.5.0
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -389,13 +389,17 @@
       width: calc(var(--cfc-u) * 30);  /* 240px */
       height: calc(var(--cfc-u) * 44); /* 352px */
       transform-style: preserve-3d;
-      transition: transform 0s, opacity 0s;
-      opacity: 0; /* 靜止狀態（翻頁完成後／下次翻頁前）隱藏，底下 rotor-top/rotor-bottom 已顯示正確數字，避免重疊接縫殘留 */
+      transform: rotateX(0deg);
+      opacity: 0; /* 靜止狀態隱藏，底下 rotor-top/rotor-bottom 已顯示正確數字 */
     }
     #cfc-flipdown .rotor-leaf.flipped {
-      transform: rotateX(-180deg);
-      opacity: 1; /* 翻頁動畫進行中才顯示 */
-      transition: transform 0.5s ease-in-out, opacity 0s;
+      animation: cfc-flip 0.5s ease-in-out forwards;
+    }
+    @keyframes cfc-flip {
+      0%   { transform: rotateX(0deg);    opacity: 1; }
+      49%  { opacity: 1; }
+      50%  { transform: rotateX(-90deg);  opacity: 0; } /* 轉到側面的瞬間就隱藏，不顯示後半段(90→180度) */
+      100% { transform: rotateX(-180deg); opacity: 0; }
     }
     #cfc-flipdown .rotor-leaf-front,
     #cfc-flipdown .rotor-leaf-rear {
