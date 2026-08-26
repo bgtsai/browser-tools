@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.1.0
+// @version      0.2.0
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -333,6 +333,13 @@
    * ------------------------------------------------------------ */
   const style = document.createElement("style");
   style.textContent = `
+    /* ===== 尺寸網格 =====
+     * 全部尺寸／間距先在 1920px 寬的設計基準下敲定為 8px 網格的整數倍，
+     * 再換算成 vw 讓整體跟著可視區域寬度等比縮放（不是寫死 px）。
+     * --cfc-u 代表「1 個網格單位」= 8px（在 1920px 寬時），
+     * 下面每個尺寸都寫成 calc(var(--cfc-u) * N)，N 即為「幾個 8px」，方便之後要調整網格基準時只改一個變數。
+     * 換算：N(單位) × 8px ÷ 1920px × 100 = N × 0.41667vw
+     */
     /* ===== vendored flipdown 主題（改為單一自訂配色，取消 dark/light 切換） ===== */
     #cfc-flipdown.flipdown {
       overflow: visible;
@@ -343,16 +350,16 @@
     #cfc-flipdown .rotor-group {
       position: relative;
       float: left;
-      padding-right: 40px;
+      padding-right: calc(var(--cfc-u) * 15); /* 120px */
     }
     #cfc-flipdown .rotor-group:last-child { padding-right: 0; }
     #cfc-flipdown .rotor-group-heading:before {
       display: block;
-      height: 36px;
-      line-height: 36px;
+      height: calc(var(--cfc-u) * 14); /* 112px */
+      line-height: calc(var(--cfc-u) * 14);
       text-align: center;
       content: attr(data-before);
-      font-size: 1rem;
+      font-size: calc(var(--cfc-u) * 3); /* 24px */
       letter-spacing: 0.2em;
       color: rgba(255,255,255,0.55);
       font-weight: 500;
@@ -360,27 +367,27 @@
     #cfc-flipdown .rotor {
       position: relative;
       float: left;
-      width: 80px;
-      height: 120px;
-      margin: 0 6px 0 0;
-      border-radius: 8px;
-      font-size: 5.5rem;
+      width: calc(var(--cfc-u) * 30);  /* 240px */
+      height: calc(var(--cfc-u) * 44); /* 352px（÷2＝176px，整除 8px，翻頁上下半才會精準對齊） */
+      margin: 0 calc(var(--cfc-u) * 2) 0 0; /* 16px */
+      border-radius: calc(var(--cfc-u) * 3); /* 24px */
+      font-size: calc(var(--cfc-u) * 32); /* 256px */
       text-align: center;
-      perspective: 300px;
+      perspective: calc(var(--cfc-u) * 36); /* 288px */
     }
     #cfc-flipdown .rotor:last-child { margin-right: 0; }
     #cfc-flipdown .rotor-top,
     #cfc-flipdown .rotor-bottom {
       overflow: hidden;
       position: absolute;
-      width: 80px;
-      height: 60px;
+      width: calc(var(--cfc-u) * 30);  /* 240px */
+      height: calc(var(--cfc-u) * 22); /* 176px */
     }
     #cfc-flipdown .rotor-leaf {
       z-index: 1;
       position: absolute;
-      width: 80px;
-      height: 120px;
+      width: calc(var(--cfc-u) * 30);  /* 240px */
+      height: calc(var(--cfc-u) * 44); /* 352px */
       transform-style: preserve-3d;
       transition: transform 0s;
     }
@@ -392,17 +399,17 @@
     #cfc-flipdown .rotor-leaf-rear {
       overflow: hidden;
       position: absolute;
-      width: 80px;
-      height: 60px;
+      width: calc(var(--cfc-u) * 30);  /* 240px */
+      height: calc(var(--cfc-u) * 22); /* 176px */
       margin: 0;
       transform: rotateX(0deg);
       backface-visibility: hidden;
       -webkit-backface-visibility: hidden;
     }
-    #cfc-flipdown .rotor-leaf-front { line-height: 120px; border-radius: 8px 8px 0 0; }
-    #cfc-flipdown .rotor-leaf-rear  { line-height: 0;     border-radius: 0 0 8px 8px; transform: rotateX(-180deg); }
-    #cfc-flipdown .rotor-top    { line-height: 120px; border-radius: 8px 8px 0 0; }
-    #cfc-flipdown .rotor-bottom { bottom: 0; line-height: 0; border-radius: 0 0 8px 8px; }
+    #cfc-flipdown .rotor-leaf-front { line-height: calc(var(--cfc-u) * 44); border-radius: calc(var(--cfc-u) * 3) calc(var(--cfc-u) * 3) 0 0; }
+    #cfc-flipdown .rotor-leaf-rear  { line-height: 0;     border-radius: 0 0 calc(var(--cfc-u) * 3) calc(var(--cfc-u) * 3); transform: rotateX(-180deg); }
+    #cfc-flipdown .rotor-top    { line-height: calc(var(--cfc-u) * 44); border-radius: calc(var(--cfc-u) * 3) calc(var(--cfc-u) * 3) 0 0; }
+    #cfc-flipdown .rotor-bottom { bottom: 0; line-height: 0; border-radius: 0 0 calc(var(--cfc-u) * 3) calc(var(--cfc-u) * 3); }
     #cfc-flipdown .rotor,
     #cfc-flipdown .rotor-top,
     #cfc-flipdown .rotor-leaf-front { color: #f5f5f5; background-color: #1c1c1e; }
@@ -413,8 +420,8 @@
       z-index: 2;
       position: absolute;
       bottom: 0; left: 0;
-      width: 80px; height: 60px;
-      border-radius: 0 0 8px 8px;
+      width: calc(var(--cfc-u) * 30); height: calc(var(--cfc-u) * 22); /* 240px / 176px */
+      border-radius: 0 0 calc(var(--cfc-u) * 3) calc(var(--cfc-u) * 3);
       border-top: solid 1px #000;
       pointer-events: none;
     }
@@ -429,7 +436,9 @@
     #cfc-flipdown[data-phase="min-sec"] .rotor-group:nth-child(2) { display: none; }
 
     /* ===== 我們自己的全螢幕外殼 ===== */
+    /* --cfc-u 定義在這一層（外殼），往下會自然繼承給 #cfc-flipdown，兩邊共用同一套網格 */
     #cfc-overlay {
+      --cfc-u: 0.41667vw; /* 1 網格單位 = 8px（基準寬度 1920px） */
       position: fixed;
       inset: 0;
       z-index: 2147483647;
@@ -438,27 +447,27 @@
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: 28px;
+      gap: calc(var(--cfc-u) * 4); /* 32px */
       -webkit-backdrop-filter: blur(6px);
       backdrop-filter: blur(6px);
     }
     #cfc-overlay .cfc-title {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      font-size: 1.1rem;
+      font-size: calc(var(--cfc-u) * 2); /* 16px */
       color: rgba(255,255,255,0.7);
       letter-spacing: 0.05em;
     }
     #cfc-overlay .cfc-close {
       position: absolute;
-      top: 24px;
-      right: 32px;
-      width: 44px;
-      height: 44px;
+      top: calc(var(--cfc-u) * 3);   /* 24px */
+      right: calc(var(--cfc-u) * 4); /* 32px */
+      width: calc(var(--cfc-u) * 6);  /* 48px */
+      height: calc(var(--cfc-u) * 6); /* 48px */
       border-radius: 50%;
       border: 1px solid rgba(255,255,255,0.25);
       background: rgba(255,255,255,0.06);
       color: rgba(255,255,255,0.8);
-      font-size: 1.4rem;
+      font-size: calc(var(--cfc-u) * 3); /* 24px */
       line-height: 1;
       cursor: pointer;
       display: flex;
@@ -468,17 +477,23 @@
     }
     #cfc-overlay .cfc-close:hover { background: rgba(255,255,255,0.16); }
 
+    /* 手機版維持固定 px（不繼續跟 vw 縮小）——窄螢幕上 vw 換算出來的字級會小到看不清楚，
+       這裡改成一組獨立的、同樣是 8px 網格倍數的「下限尺寸」 */
     @media (max-width: 640px) {
-      #cfc-flipdown .rotor { width: 50px; height: 76px; font-size: 3.2rem; margin-right: 4px; }
+      #cfc-flipdown .rotor { width: 48px; height: 80px; font-size: 48px; margin-right: 8px; }
       #cfc-flipdown .rotor-top, #cfc-flipdown .rotor-bottom,
       #cfc-flipdown .rotor-leaf, #cfc-flipdown .rotor-leaf-front,
-      #cfc-flipdown .rotor-leaf-rear, #cfc-flipdown .rotor:after { width: 50px; }
-      #cfc-flipdown .rotor-top, #cfc-flipdown .rotor-leaf-front { line-height: 76px; }
+      #cfc-flipdown .rotor-leaf-rear, #cfc-flipdown .rotor:after { width: 48px; }
+      #cfc-flipdown .rotor-leaf { height: 80px; }
+      #cfc-flipdown .rotor-top, #cfc-flipdown .rotor-leaf-front { line-height: 80px; }
       #cfc-flipdown .rotor-top, #cfc-flipdown .rotor-bottom,
       #cfc-flipdown .rotor-leaf-front, #cfc-flipdown .rotor-leaf-rear,
-      #cfc-flipdown .rotor:after { height: 38px; }
-      #cfc-flipdown .rotor-group { padding-right: 20px; }
-      #cfc-flipdown .rotor-group-heading:before { font-size: 0.75rem; height: 24px; line-height: 24px; }
+      #cfc-flipdown .rotor:after { height: 40px; }
+      #cfc-flipdown .rotor-group { padding-right: 24px; }
+      #cfc-flipdown .rotor-group-heading:before { font-size: 16px; height: 24px; line-height: 24px; }
+      #cfc-overlay .cfc-close { width: 40px; height: 40px; font-size: 16px; top: 16px; right: 16px; }
+      #cfc-overlay .cfc-title { font-size: 16px; }
+      #cfc-overlay { gap: 24px; }
     }
   `;
   document.head.appendChild(style);
