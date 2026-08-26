@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.8.0
+// @version      0.9.0
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -464,8 +464,8 @@
     }
     #cfc-overlay .cfc-close {
       position: absolute;
-      top: calc(var(--cfc-u) * 3);   /* 24px */
-      right: calc(var(--cfc-u) * 4); /* 32px */
+      bottom: calc(var(--cfc-u) * 3); /* 24px */
+      right: calc(var(--cfc-u) * 4);  /* 32px */
       width: calc(var(--cfc-u) * 6);  /* 48px */
       height: calc(var(--cfc-u) * 6); /* 48px */
       border-radius: 50%;
@@ -482,6 +482,31 @@
     }
     #cfc-overlay .cfc-close:hover { background: rgba(255,255,255,0.16); }
 
+    /* 常駐重新開啟按鈕：不在 #cfc-overlay 底下（overlay 關閉時會整個被移除），
+       直接掛在 body 上，位置與關閉鈕相同（右下角），視覺樣式也比照。 */
+    #cfc-reopen {
+      position: fixed;
+      bottom: calc(var(--cfc-u, 0.41667vw) * 3); /* 24px */
+      right: calc(var(--cfc-u, 0.41667vw) * 4);  /* 32px */
+      z-index: 2147483647;
+      width: calc(var(--cfc-u, 0.41667vw) * 6);  /* 48px */
+      height: calc(var(--cfc-u, 0.41667vw) * 6); /* 48px */
+      border-radius: 50%;
+      border: 1px solid rgba(255,255,255,0.25);
+      background: rgba(30,30,32,0.9);
+      color: rgba(255,255,255,0.85);
+      font-size: calc(var(--cfc-u, 0.41667vw) * 3); /* 24px */
+      line-height: 1;
+      cursor: pointer;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s ease;
+    }
+    #cfc-reopen:hover { background: rgba(50,50,54,0.95); }
+    @media (max-width: 640px) {
+      #cfc-reopen { width: 40px; height: 40px; font-size: 16px; bottom: 16px; right: 16px; }
+    }
+
     /* 手機版維持固定 px（不繼續跟 vw 縮小）——窄螢幕上 vw 換算出來的字級會小到看不清楚，
        這裡改成一組獨立的、同樣是 8px 網格倍數的「下限尺寸」 */
     @media (max-width: 640px) {
@@ -496,7 +521,7 @@
       #cfc-flipdown .rotor:after { height: 40px; }
       #cfc-flipdown .rotor-group { padding-right: 24px; }
       #cfc-flipdown .rotor-group-heading:before { font-size: 16px; height: 24px; line-height: 24px; }
-      #cfc-overlay .cfc-close { width: 40px; height: 40px; font-size: 16px; top: 16px; right: 16px; }
+      #cfc-overlay .cfc-close { width: 40px; height: 40px; font-size: 16px; bottom: 16px; right: 16px; }
       #cfc-overlay .cfc-title { font-size: 16px; }
       #cfc-overlay { gap: 24px; }
     }
@@ -510,6 +535,8 @@
     let overlayEl = null;
     let flipdownInstance = null;
     let phaseTimer = null;
+    let lastEpoch = null; // 記錄目前倒數的目標時間，關閉後重新開啟時要沿用同一個目標，不能歸零重算
+    let reopenBtn = null; // 常駐的重新開啟按鈕（不隨 overlay 一起被移除）
 
     // 相鄰兩組欄位的切換門檻：>=1天 顯示「天+時」；>=1小時 顯示「時+分」；否則「分+秒」
     // 這是直接切換（無翻頁動畫）——原因：翻頁鐘的物理結構是「固定位置的轉輪」，
@@ -530,6 +557,22 @@
       }
     }
 
+    function ensureReopenBtn() {
+      if (reopenBtn) return reopenBtn;
+      reopenBtn = document.createElement("button");
+      reopenBtn.id = "cfc-reopen";
+      reopenBtn.textContent = "\u23F1"; // ⏱
+      reopenBtn.setAttribute("aria-label", "重新開啟倒數畫面");
+      reopenBtn.style.display = "none";
+      reopenBtn.addEventListener("click", () => {
+        if (lastEpoch != null && lastEpoch - Date.now() / 1000 > 0) {
+          show(lastEpoch); // 沿用原本的目標時間，不重新計算
+        }
+      });
+      document.body.appendChild(reopenBtn);
+      return reopenBtn;
+    }
+
     function close() {
       if (phaseTimer) {
         clearInterval(phaseTimer);
@@ -543,11 +586,17 @@
         overlayEl.remove();
         overlayEl = null;
       }
+      // 倒數還沒結束的話，留一顆常駐按鈕讓使用者可以再打開
+      if (lastEpoch != null && lastEpoch - Date.now() / 1000 > 0) {
+        ensureReopenBtn().style.display = "flex";
+      }
     }
 
     // epochSeconds：目標時間（unix timestamp，秒）
     function show(epochSeconds) {
-      close(); // 避免重複開啟
+      close(); // 避免重複開啟（close() 內部的「留重新開啟按鈕」判斷這裡也會跑到，等等再蓋掉）
+      lastEpoch = epochSeconds;
+      if (reopenBtn) reopenBtn.style.display = "none"; // 畫面開啟中，不需要重新開啟按鈕
 
       overlayEl = document.createElement("div");
       overlayEl.id = "cfc-overlay";
