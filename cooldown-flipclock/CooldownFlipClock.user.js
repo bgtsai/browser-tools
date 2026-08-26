@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.6.0
+// @version      0.7.0
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -571,6 +571,9 @@
         theme: "dark", // 我們的 CSS 已覆蓋配色，這裡只是滿足函式庫必填參數
         headings: ["天", "時", "分", "秒"],
       }).start();
+
+      // 除錯掛鉤：暴露實例本體，方便 Console 直接操控（例如降速測試時覆寫 _getTime）
+      target.__cfcInstance = flipdownInstance;
 
       updatePhase(epochSeconds);
       phaseTimer = setInterval(() => updatePhase(epochSeconds), 1000);
