@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.1.0
+// @version      1.2.0
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -642,6 +642,95 @@
 
     return { show, close };
   })();
+
+  /* ------------------------------------------------------------
+   * Phase 2：偵測額度用完 + 自動觸發
+   * ------------------------------------------------------------ */
+
+  // 已知限制：這兩個 class 是 Tailwind 產生的工具類名，UI 改版時很可能失效，
+  // 且目前沒有更穩定的 data-testid / aria-label 可用（已實際用檢查器確認過 DOM 結構）。
+  // 依使用者明確指示：只判斷這段結構「存在與否」，不比對裡面的文字內容。
+  const LIMIT_SELECTOR = "div.min-w-0.break-words > div.text-sm";
+
+  let orgId = null;
+  let limitActive = false; // 避免同一次額度用完期間，元件持續存在時重複觸發
+
+  const _origFetch = window.fetch.bind(window);
+  window.fetch = function (...args) {
+    const url = typeof args[0] === "string" ? args[0] : args[0] instanceof Request ? args[0].url : "";
+    captureOrgId(url);
+    return _origFetch(...args);
+  };
+  const _origXHROpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+    if (typeof url === "string") captureOrgId(url);
+    return _origXHROpen.call(this, method, url, ...rest);
+  };
+
+  function captureOrgId(url) {
+    if (!url || orgId) return;
+    const m = url.match(/\/api\/organizations\/([0-9a-f-]{36})/i);
+    if (m) orgId = m[1];
+  }
+
+  // 依序嘗試三個端點（沿用既有腳本驗證過的做法），取得 five_hour.resets_at 換算成 unix timestamp（秒）
+  async function fetchResetEpoch() {
+    if (!orgId) return null;
+    const endpoints = [
+      `https://claude.ai/api/organizations/${orgId}/usage`,
+      `https://claude.ai/api/organizations/${orgId}/rate_limit_status`,
+      `https://claude.ai/api/organizations/${orgId}/limits`,
+    ];
+    for (const url of endpoints) {
+      try {
+        const res = await _origFetch(url, { credentials: "include", headers: { Accept: "application/json" } });
+        if (res.status === 404 || !res.ok) continue;
+        const data = await res.json();
+        let resetsAt = data && data.five_hour ? data.five_hour.resets_at : null;
+        if (!resetsAt && data && Array.isArray(data.rate_limits)) {
+          const item = data.rate_limits.find((r) => /5h|five.?hour|session/i.test(String(r.window_duration || r.type || "")));
+          resetsAt = item ? item.resets_at || item.reset_at : null;
+        }
+        if (resetsAt) {
+          const t = typeof resetsAt === "string" ? new Date(resetsAt).getTime() / 1000 : resetsAt;
+          if (!Number.isNaN(t)) return t;
+        }
+      } catch (e) {
+        console.warn("[Claude額度冷卻翻頁鐘] 查詢用量失敗:", url, e);
+      }
+    }
+    return null;
+  }
+
+  async function handleLimitDetected() {
+    if (limitActive) return;
+    limitActive = true;
+    const epoch = await fetchResetEpoch();
+    if (epoch != null) {
+      CFC.show(epoch);
+    } else {
+      console.warn("[Claude額度冷卻翻頁鐘] 偵測到額度用完，但取不到 resets_at，未顯示倒數畫面");
+    }
+  }
+
+  function handleLimitCleared() {
+    limitActive = false;
+  }
+
+  const limitObserver = new MutationObserver(() => {
+    const exists = !!document.querySelector(LIMIT_SELECTOR);
+    if (exists && !limitActive) {
+      handleLimitDetected();
+    } else if (!exists && limitActive) {
+      handleLimitCleared();
+    }
+  });
+  limitObserver.observe(document.body, { childList: true, subtree: true });
+
+  // 頁面載入當下也檢查一次，避免腳本注入時額度剛好已經用完、錯過第一次 DOM 變化
+  if (document.querySelector(LIMIT_SELECTOR)) {
+    handleLimitDetected();
+  }
 
   // ---- Phase 1 測試用掛鉤：Console 執行 __cfcTest(秒數) 立即開出假倒數 ----
   const target = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
