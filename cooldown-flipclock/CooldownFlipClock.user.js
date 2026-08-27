@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.8.0
+// @version      1.9.0
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -454,13 +454,24 @@
     #cfc-flipdown[data-phase="min-sec"] .rotor-group:nth-child(1),
     #cfc-flipdown[data-phase="min-sec"] .rotor-group:nth-child(2) { display: none; }
 
+    /* 消除間距的規則原本只認 DOM 上真正的 :last-child（秒），但「目前可見的最後一組」
+       在 day-hour/hour-min 這兩個 phase 底下分別是「時」「分」，DOM 結構上它們後面還接著被
+       隱藏的欄位，並不是 :last-child，會被誤判成「還要留間距給下一組」，多出一段看不見、
+       但確實占用版面寬度的空間，導致整體時鐘的可視內容被推歪、看起來不置中。
+       這裡用 phase 選擇器精準指定「這個 phase 下真正可見的最後一組」，強制清除它的間距。 */
+    #cfc-flipdown[data-phase="day-hour"] .rotor-group:nth-child(2),
+    #cfc-flipdown[data-phase="hour-min"] .rotor-group:nth-child(3) { padding-right: 0; }
+
     /* ===== 兩組可見欄位之間的閃爍冒號 =====
      * 目的：分／秒以外的欄位（天+時、時+分）翻頁間隔可能長達一分鐘以上，
      * 畫面會有很長一段時間完全靜止，使用者容易誤以為卡住了；加一個每秒閃爍的冒號，
      * 模擬一般數位時鐘的效果，持續給視覺回饋。
      * 用 phase 選擇器精準指定「目前可見的第一組欄位」的 ::before/::after 當作上下兩個圓點，
      * 不用通用的 :not(:last-child) —— 那樣會選到「可見欄位」跟「已隱藏欄位」之間也畫一個冒號，
-     * 因為 :last-child 是看 DOM 結構、不是看目前可見與否。 */
+     * 因為 :last-child 是看 DOM 結構、不是看目前可見與否。
+     * 大小／位置不用猜測值：由 JS 在畫面建立時實際量測目前生效的字型（可能被使用者的字型替換
+     * 腳本蓋掉）畫出「:」字元的真實尺寸，再量測轉輪跟標題的實際渲染高度算出數字視覺中心，
+     * 寫入下面這些 CSS 變數；這裡的數值只是量測失敗時的保底預設值。 */
     #cfc-flipdown[data-phase="day-hour"] .rotor-group:nth-child(1)::before,
     #cfc-flipdown[data-phase="day-hour"] .rotor-group:nth-child(1)::after,
     #cfc-flipdown[data-phase="hour-min"] .rotor-group:nth-child(2)::before,
@@ -469,9 +480,9 @@
     #cfc-flipdown[data-phase="min-sec"] .rotor-group:nth-child(3)::after {
       content: '';
       position: absolute;
-      right: calc(var(--cfc-u) * 6.5); /* 置中在 15 個單位寬的間距裡（120px 間距 - 16px 圓點寬）/2 */
-      width: calc(var(--cfc-u) * 2);  /* 16px 圓點 */
-      height: calc(var(--cfc-u) * 2);
+      right: var(--cfc-colon-right, calc(var(--cfc-u) * 6.5));
+      width: var(--cfc-colon-dot-size, calc(var(--cfc-u) * 2));
+      height: var(--cfc-colon-dot-size, calc(var(--cfc-u) * 2));
       border-radius: 50%;
       background: rgba(255,255,255,0.85);
       animation: cfc-colon-blink 1s steps(1) infinite;
@@ -480,12 +491,12 @@
     #cfc-flipdown[data-phase="day-hour"] .rotor-group:nth-child(1)::before,
     #cfc-flipdown[data-phase="hour-min"] .rotor-group:nth-child(2)::before,
     #cfc-flipdown[data-phase="min-sec"] .rotor-group:nth-child(3)::before {
-      top: calc(var(--cfc-u) * 30); /* 240px：標題112px + 半個轉輪高176px - 48px，上圓點 */
+      top: calc(var(--cfc-colon-center, calc(var(--cfc-u) * 36)) - var(--cfc-colon-half-gap, calc(var(--cfc-u) * 6)));
     }
     #cfc-flipdown[data-phase="day-hour"] .rotor-group:nth-child(1)::after,
     #cfc-flipdown[data-phase="hour-min"] .rotor-group:nth-child(2)::after,
     #cfc-flipdown[data-phase="min-sec"] .rotor-group:nth-child(3)::after {
-      top: calc(var(--cfc-u) * 42); /* 336px：標題112px + 半個轉輪高176px + 48px，下圓點 */
+      top: calc(var(--cfc-colon-center, calc(var(--cfc-u) * 36)) + var(--cfc-colon-half-gap, calc(var(--cfc-u) * 6)));
     }
     @keyframes cfc-colon-blink {
       0%, 50% { opacity: 1; }
@@ -583,23 +594,10 @@
       #cfc-flipdown .rotor-leaf-front, #cfc-flipdown .rotor-leaf-rear { height: 40px; }
       #cfc-flipdown .rotor-group { padding-right: 24px; }
       #cfc-flipdown .rotor-group-heading:before { font-size: 16px; height: 24px; line-height: 24px; }
-      /* 冒號圓點：配合手機版縮小的轉輪尺寸（標題24px + 半個轉輪高40px = 64px 是數字視覺中心） */
-      #cfc-flipdown[data-phase="day-hour"] .rotor-group:nth-child(1)::before,
-      #cfc-flipdown[data-phase="day-hour"] .rotor-group:nth-child(1)::after,
-      #cfc-flipdown[data-phase="hour-min"] .rotor-group:nth-child(2)::before,
-      #cfc-flipdown[data-phase="hour-min"] .rotor-group:nth-child(2)::after,
-      #cfc-flipdown[data-phase="min-sec"] .rotor-group:nth-child(3)::before,
-      #cfc-flipdown[data-phase="min-sec"] .rotor-group:nth-child(3)::after {
-        right: 9px;
-        width: 6px;
-        height: 6px;
-      }
-      #cfc-flipdown[data-phase="day-hour"] .rotor-group:nth-child(1)::before,
-      #cfc-flipdown[data-phase="hour-min"] .rotor-group:nth-child(2)::before,
-      #cfc-flipdown[data-phase="min-sec"] .rotor-group:nth-child(3)::before { top: 48px; }
-      #cfc-flipdown[data-phase="day-hour"] .rotor-group:nth-child(1)::after,
-      #cfc-flipdown[data-phase="hour-min"] .rotor-group:nth-child(2)::after,
-      #cfc-flipdown[data-phase="min-sec"] .rotor-group:nth-child(3)::after { top: 80px; }
+      /* 同樣的置中修正：手機版也要清除「目前可見最後一組」的間距（見桌面版註解），
+         冒號圓點大小/位置不用另外寫死，JS 量測時會讀到手機版當下實際生效的字型跟尺寸。 */
+      #cfc-flipdown[data-phase="day-hour"] .rotor-group:nth-child(2),
+      #cfc-flipdown[data-phase="hour-min"] .rotor-group:nth-child(3) { padding-right: 0; }
       #cfc-overlay .cfc-close { width: 40px; height: 40px; font-size: 16px; bottom: 16px; right: 16px; }
       #cfc-overlay .cfc-title { font-size: 16px; }
       #cfc-overlay { gap: 24px; }
@@ -714,8 +712,56 @@
       // 除錯掛鉤：暴露實例本體，方便 Console 直接操控（例如降速測試時覆寫 _getTime）
       target.__cfcInstance = flipdownInstance;
 
+      applyColonMetrics(); // DOM 已經建好，量測目前實際生效的字型跟版面尺寸，套到冒號的 CSS 變數
+
       updatePhase(epochSeconds);
       phaseTimer = setInterval(() => updatePhase(epochSeconds), 1000);
+    }
+
+    // 冒號圓點的大小／位置不用猜測值：實際量測目前生效的字型（可能被使用者的字型替換腳本蓋掉）
+    // 畫出「:」字元的真實尺寸，再量測轉輪跟標題的實際渲染高度算出數字視覺中心。只需要在畫面
+    // 建立時量一次（不同 phase 之間轉輪本身尺寸不變，只是顯示/隱藏切換，不用每次 phase 切換都重量）。
+    function applyColonMetrics() {
+      const flipEl = document.getElementById("cfc-flipdown");
+      const rotorTop = flipEl && flipEl.querySelector(".rotor-top");
+      const headingEl = flipEl && flipEl.querySelector(".rotor-group-heading");
+      const rotorEl = flipEl && flipEl.querySelector(".rotor");
+      const groupEl = flipEl && flipEl.querySelector(".rotor-group");
+      if (!flipEl || !rotorTop || !headingEl || !rotorEl || !groupEl) return;
+
+      const cs = getComputedStyle(rotorTop);
+      const fontSizePx = parseFloat(cs.fontSize) || 256;
+
+      let dotSize, halfGap;
+      try {
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
+        ctx.font = `${cs.fontWeight} ${fontSizePx}px ${cs.fontFamily}`;
+        const m = ctx.measureText(":");
+        const width = m.width || fontSizePx * 0.28;
+        const ascent = m.actualBoundingBoxAscent || fontSizePx * 0.35;
+        const descent = m.actualBoundingBoxDescent || fontSizePx * 0.05;
+        dotSize = Math.max(2, Math.round(width));
+        halfGap = Math.max(dotSize, Math.round((ascent + descent) / 2));
+      } catch (e) {
+        console.warn("[Claude額度冷卻翻頁鐘] 量測冒號字型失敗，改用保底預設值:", e);
+        dotSize = Math.round(fontSizePx * 0.08);
+        halfGap = Math.round(fontSizePx * 0.19);
+      }
+
+      // 標題高度 + 半個轉輪高度＝數字在 rotor-group 這個容器裡的實際垂直視覺中心
+      const headingHeight = headingEl.getBoundingClientRect().height;
+      const rotorHeight = rotorEl.getBoundingClientRect().height;
+      const centerOffset = headingHeight + rotorHeight / 2;
+
+      // 圓點水平置中在間距裡（間距寬度＝這個 rotor-group 實際的 padding-right）
+      const gapWidth = parseFloat(getComputedStyle(groupEl).paddingRight) || 0;
+      const rightOffset = Math.max(0, (gapWidth - dotSize) / 2);
+
+      flipEl.style.setProperty("--cfc-colon-dot-size", dotSize + "px");
+      flipEl.style.setProperty("--cfc-colon-half-gap", halfGap + "px");
+      flipEl.style.setProperty("--cfc-colon-center", centerOffset + "px");
+      flipEl.style.setProperty("--cfc-colon-right", rightOffset + "px");
     }
 
     return { show, close };
