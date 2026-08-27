@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.9.0
+// @version      1.10.0
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -356,7 +356,7 @@
     #cfc-flipdown .rotor-group {
       position: relative;
       float: left;
-      padding-right: calc(var(--cfc-u) * 15); /* 120px */
+      padding-right: var(--cfc-group-gap, calc(var(--cfc-u) * 15)); /* 120px 保底，JS 量測後會覆蓋成實際值 */
     }
     #cfc-flipdown .rotor-group:last-child { padding-right: 0; }
     #cfc-flipdown .rotor-group-heading:before {
@@ -487,6 +487,7 @@
       background: rgba(255,255,255,0.85);
       animation: cfc-colon-blink 1s steps(1) infinite;
       pointer-events: none;
+      transform: translateY(-50%); /* top 值代表圓心座標，這裡才會真正置中在那個座標上，不是用 top 當方塊上緣 */
     }
     #cfc-flipdown[data-phase="day-hour"] .rotor-group:nth-child(1)::before,
     #cfc-flipdown[data-phase="hour-min"] .rotor-group:nth-child(2)::before,
@@ -592,7 +593,7 @@
       #cfc-flipdown .rotor-top, #cfc-flipdown .rotor-leaf-front { line-height: 80px; }
       #cfc-flipdown .rotor-top, #cfc-flipdown .rotor-bottom,
       #cfc-flipdown .rotor-leaf-front, #cfc-flipdown .rotor-leaf-rear { height: 40px; }
-      #cfc-flipdown .rotor-group { padding-right: 24px; }
+      #cfc-flipdown .rotor-group { padding-right: var(--cfc-group-gap, 24px); }
       #cfc-flipdown .rotor-group-heading:before { font-size: 16px; height: 24px; line-height: 24px; }
       /* 同樣的置中修正：手機版也要清除「目前可見最後一組」的間距（見桌面版註解），
          冒號圓點大小/位置不用另外寫死，JS 量測時會讀到手機版當下實際生效的字型跟尺寸。 */
@@ -726,8 +727,7 @@
       const rotorTop = flipEl && flipEl.querySelector(".rotor-top");
       const headingEl = flipEl && flipEl.querySelector(".rotor-group-heading");
       const rotorEl = flipEl && flipEl.querySelector(".rotor");
-      const groupEl = flipEl && flipEl.querySelector(".rotor-group");
-      if (!flipEl || !rotorTop || !headingEl || !rotorEl || !groupEl) return;
+      if (!flipEl || !rotorTop || !headingEl || !rotorEl) return;
 
       const cs = getComputedStyle(rotorTop);
       const fontSizePx = parseFloat(cs.fontSize) || 256;
@@ -738,15 +738,19 @@
         const ctx = canvas.getContext("2d");
         ctx.font = `${cs.fontWeight} ${fontSizePx}px ${cs.fontFamily}`;
         const m = ctx.measureText(":");
-        const width = m.width || fontSizePx * 0.28;
+        // 用緊貼字形墨水邊緣的量測值（actualBoundingBox），不是含左右留白的總佔位寬度（m.width）——
+        // 冒號字元的總佔位寬度比「一顆圓點的實際直徑」大上一截，直接拿來當圓點直徑會量出過大的結果。
+        const inkWidth = (m.actualBoundingBoxLeft || 0) + (m.actualBoundingBoxRight || 0);
         const ascent = m.actualBoundingBoxAscent || fontSizePx * 0.35;
         const descent = m.actualBoundingBoxDescent || fontSizePx * 0.05;
-        dotSize = Math.max(2, Math.round(width));
-        halfGap = Math.max(dotSize, Math.round((ascent + descent) / 2));
+        dotSize = Math.max(2, Math.round(inkWidth || fontSizePx * 0.09));
+        // halfGap＝圓心到垂直中心的距離。ascent+descent 量到的是整個冒號字形（兩點＋中間空隙）
+        // 的外緣到外緣高度，要再扣掉半顆圓點的半徑，才會是「圓心」而不是「外緣」的位置。
+        halfGap = Math.max(dotSize * 0.6, Math.round((ascent + descent) / 2 - dotSize / 2));
       } catch (e) {
         console.warn("[Claude額度冷卻翻頁鐘] 量測冒號字型失敗，改用保底預設值:", e);
-        dotSize = Math.round(fontSizePx * 0.08);
-        halfGap = Math.round(fontSizePx * 0.19);
+        dotSize = Math.round(fontSizePx * 0.09);
+        halfGap = Math.round(fontSizePx * 0.16);
       }
 
       // 標題高度 + 半個轉輪高度＝數字在 rotor-group 這個容器裡的實際垂直視覺中心
@@ -754,14 +758,16 @@
       const rotorHeight = rotorEl.getBoundingClientRect().height;
       const centerOffset = headingHeight + rotorHeight / 2;
 
-      // 圓點水平置中在間距裡（間距寬度＝這個 rotor-group 實際的 padding-right）
-      const gapWidth = parseFloat(getComputedStyle(groupEl).paddingRight) || 0;
-      const rightOffset = Math.max(0, (gapWidth - dotSize) / 2);
+      // 整體間距（rotor-group 的 padding-right）不再是寫死的網格值，改成跟著圓點大小走：
+      // 圓點本身 + 左右各留一個圓點直徑當呼吸空間，跟著字型大小一起動態縮放。
+      const groupGap = Math.round(dotSize * 3);
+      const rightOffset = Math.round((groupGap - dotSize) / 2);
 
       flipEl.style.setProperty("--cfc-colon-dot-size", dotSize + "px");
       flipEl.style.setProperty("--cfc-colon-half-gap", halfGap + "px");
       flipEl.style.setProperty("--cfc-colon-center", centerOffset + "px");
       flipEl.style.setProperty("--cfc-colon-right", rightOffset + "px");
+      flipEl.style.setProperty("--cfc-group-gap", groupGap + "px");
     }
 
     return { show, close };
