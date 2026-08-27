@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.3.0
+// @version      1.4.0
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -658,23 +658,39 @@
 
   let orgId = null;
   let limitActive = false; // 避免同一次額度用完期間，元件持續存在時重複觸發
+  let checkDebounceTimer = null;
 
   const _origFetch = window.fetch.bind(window);
   window.fetch = function (...args) {
     const url = typeof args[0] === "string" ? args[0] : args[0] instanceof Request ? args[0].url : "";
-    captureOrgId(url);
+    onApiActivity(url);
     return _origFetch(...args);
   };
   const _origXHROpen = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function (method, url, ...rest) {
-    if (typeof url === "string") captureOrgId(url);
+    if (typeof url === "string") onApiActivity(url);
     return _origXHROpen.call(this, method, url, ...rest);
   };
 
-  function captureOrgId(url) {
-    if (!url || orgId) return;
+  // 每次攔截到 claude.ai 自己發出的 org-scoped API 請求（聊天、送出訊息等大多數請求都走這個路徑前綴），
+  // 才 debounce 檢查一次 DOM——取代原本全頁面持續 MutationObserver（串流輸出文字時 DOM 幾乎每個字都在變動，
+  // 那樣會被觸發得非常頻繁）。順便取得 orgId（只需要成功一次）。
+  function onApiActivity(url) {
+    if (!url) return;
     const m = url.match(/\/api\/organizations\/([0-9a-f-]{36})/i);
-    if (m) orgId = m[1];
+    if (!m) return;
+    if (!orgId) orgId = m[1];
+    if (checkDebounceTimer) clearTimeout(checkDebounceTimer);
+    checkDebounceTimer = setTimeout(checkLimitDom, 600);
+  }
+
+  function checkLimitDom() {
+    const exists = !!document.querySelector(LIMIT_SELECTOR);
+    if (exists && !limitActive) {
+      handleLimitDetected();
+    } else if (!exists && limitActive) {
+      handleLimitCleared();
+    }
   }
 
   // 依序嘗試三個端點（沿用既有腳本驗證過的做法），取得 five_hour.resets_at 換算成 unix timestamp（秒）
@@ -721,20 +737,10 @@
     limitActive = false;
   }
 
-  const limitObserver = new MutationObserver(() => {
-    const exists = !!document.querySelector(LIMIT_SELECTOR);
-    if (exists && !limitActive) {
-      handleLimitDetected();
-    } else if (!exists && limitActive) {
-      handleLimitCleared();
-    }
-  });
-  limitObserver.observe(document.body, { childList: true, subtree: true });
+  const limitFallbackTimer = setInterval(checkLimitDom, 60000); // 保底輪詢：避免提示出現當下剛好沒有任何 API 活動被攔截到而漏抓
 
-  // 頁面載入當下也檢查一次，避免腳本注入時額度剛好已經用完、錯過第一次 DOM 變化
-  if (document.querySelector(LIMIT_SELECTOR)) {
-    handleLimitDetected();
-  }
+  // 頁面載入當下也檢查一次，避免腳本注入時額度剛好已經用完、錯過第一次觸發
+  checkLimitDom();
 
   // ---- Phase 1 測試用掛鉤：Console 執行 __cfcTest(秒數) 立即開出假倒數 ----
   const target = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
