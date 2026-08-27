@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.7.0
+// @version      1.8.0
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -454,6 +454,44 @@
     #cfc-flipdown[data-phase="min-sec"] .rotor-group:nth-child(1),
     #cfc-flipdown[data-phase="min-sec"] .rotor-group:nth-child(2) { display: none; }
 
+    /* ===== 兩組可見欄位之間的閃爍冒號 =====
+     * 目的：分／秒以外的欄位（天+時、時+分）翻頁間隔可能長達一分鐘以上，
+     * 畫面會有很長一段時間完全靜止，使用者容易誤以為卡住了；加一個每秒閃爍的冒號，
+     * 模擬一般數位時鐘的效果，持續給視覺回饋。
+     * 用 phase 選擇器精準指定「目前可見的第一組欄位」的 ::before/::after 當作上下兩個圓點，
+     * 不用通用的 :not(:last-child) —— 那樣會選到「可見欄位」跟「已隱藏欄位」之間也畫一個冒號，
+     * 因為 :last-child 是看 DOM 結構、不是看目前可見與否。 */
+    #cfc-flipdown[data-phase="day-hour"] .rotor-group:nth-child(1)::before,
+    #cfc-flipdown[data-phase="day-hour"] .rotor-group:nth-child(1)::after,
+    #cfc-flipdown[data-phase="hour-min"] .rotor-group:nth-child(2)::before,
+    #cfc-flipdown[data-phase="hour-min"] .rotor-group:nth-child(2)::after,
+    #cfc-flipdown[data-phase="min-sec"] .rotor-group:nth-child(3)::before,
+    #cfc-flipdown[data-phase="min-sec"] .rotor-group:nth-child(3)::after {
+      content: '';
+      position: absolute;
+      right: calc(var(--cfc-u) * 6.5); /* 置中在 15 個單位寬的間距裡（120px 間距 - 16px 圓點寬）/2 */
+      width: calc(var(--cfc-u) * 2);  /* 16px 圓點 */
+      height: calc(var(--cfc-u) * 2);
+      border-radius: 50%;
+      background: rgba(255,255,255,0.85);
+      animation: cfc-colon-blink 1s steps(1) infinite;
+      pointer-events: none;
+    }
+    #cfc-flipdown[data-phase="day-hour"] .rotor-group:nth-child(1)::before,
+    #cfc-flipdown[data-phase="hour-min"] .rotor-group:nth-child(2)::before,
+    #cfc-flipdown[data-phase="min-sec"] .rotor-group:nth-child(3)::before {
+      top: calc(var(--cfc-u) * 30); /* 240px：標題112px + 半個轉輪高176px - 48px，上圓點 */
+    }
+    #cfc-flipdown[data-phase="day-hour"] .rotor-group:nth-child(1)::after,
+    #cfc-flipdown[data-phase="hour-min"] .rotor-group:nth-child(2)::after,
+    #cfc-flipdown[data-phase="min-sec"] .rotor-group:nth-child(3)::after {
+      top: calc(var(--cfc-u) * 42); /* 336px：標題112px + 半個轉輪高176px + 48px，下圓點 */
+    }
+    @keyframes cfc-colon-blink {
+      0%, 50% { opacity: 1; }
+      50.01%, 100% { opacity: 0.15; }
+    }
+
     /* ===== 我們自己的全螢幕外殼 ===== */
     /* --cfc-u 定義在這一層（外殼），往下會自然繼承給 #cfc-flipdown，兩邊共用同一套網格 */
     #cfc-overlay {
@@ -505,8 +543,8 @@
        位置基準是右下角，實際位置 = 基準位置 + 可調偏移量（--cfc-reopen-offset-x/y，預設 0），
        要微調位置直接改這兩個變數即可，不用動其他數值。 */
     :root {
-      --cfc-reopen-offset-x: 0px; /* 正值往左移，負值往右移（因為是往 right 方向疊加） */
-      --cfc-reopen-offset-y: 0px; /* 正值往上移，負值往下移（因為是往 bottom 方向疊加） */
+      --cfc-reopen-offset-x: -7px; /* 正值往左移，負值往右移（因為是往 right 方向疊加） */
+      --cfc-reopen-offset-y: -12px; /* 正值往上移，負值往下移（因為是往 bottom 方向疊加） */
     }
     #cfc-reopen {
       position: fixed;
@@ -545,6 +583,23 @@
       #cfc-flipdown .rotor-leaf-front, #cfc-flipdown .rotor-leaf-rear { height: 40px; }
       #cfc-flipdown .rotor-group { padding-right: 24px; }
       #cfc-flipdown .rotor-group-heading:before { font-size: 16px; height: 24px; line-height: 24px; }
+      /* 冒號圓點：配合手機版縮小的轉輪尺寸（標題24px + 半個轉輪高40px = 64px 是數字視覺中心） */
+      #cfc-flipdown[data-phase="day-hour"] .rotor-group:nth-child(1)::before,
+      #cfc-flipdown[data-phase="day-hour"] .rotor-group:nth-child(1)::after,
+      #cfc-flipdown[data-phase="hour-min"] .rotor-group:nth-child(2)::before,
+      #cfc-flipdown[data-phase="hour-min"] .rotor-group:nth-child(2)::after,
+      #cfc-flipdown[data-phase="min-sec"] .rotor-group:nth-child(3)::before,
+      #cfc-flipdown[data-phase="min-sec"] .rotor-group:nth-child(3)::after {
+        right: 9px;
+        width: 6px;
+        height: 6px;
+      }
+      #cfc-flipdown[data-phase="day-hour"] .rotor-group:nth-child(1)::before,
+      #cfc-flipdown[data-phase="hour-min"] .rotor-group:nth-child(2)::before,
+      #cfc-flipdown[data-phase="min-sec"] .rotor-group:nth-child(3)::before { top: 48px; }
+      #cfc-flipdown[data-phase="day-hour"] .rotor-group:nth-child(1)::after,
+      #cfc-flipdown[data-phase="hour-min"] .rotor-group:nth-child(2)::after,
+      #cfc-flipdown[data-phase="min-sec"] .rotor-group:nth-child(3)::after { top: 80px; }
       #cfc-overlay .cfc-close { width: 40px; height: 40px; font-size: 16px; bottom: 16px; right: 16px; }
       #cfc-overlay .cfc-title { font-size: 16px; }
       #cfc-overlay { gap: 24px; }
@@ -712,10 +767,11 @@
     }
   }
 
-  // 依序嘗試三個端點（沿用既有腳本驗證過的做法），取得 five_hour.resets_at 換算成 unix timestamp（秒），
-  // 同時回傳 utilization（用量百分比），讓手動觸發時可以判斷「是不是真的用完了」，不是查得到 resets_at 就直接開。
-  async function fetchResetEpoch() {
-    if (!orgId) return { epoch: null, utilization: null };
+  // 依序嘗試三個端點（沿用既有腳本驗證過的做法），同時取得「短期視窗」（five_hour）跟
+  // 「長期視窗」（seven_day）兩者的 resets_at 與 utilization——實際能不能送出訊息，
+  // 兩個視窗都要有餘額才行，所以判斷「什麼時候能用」時兩個都要看，不能只看其中一個。
+  async function fetchWindowsData() {
+    if (!orgId) return null;
     const endpoints = [
       `https://claude.ai/api/organizations/${orgId}/usage`,
       `https://claude.ai/api/organizations/${orgId}/rate_limit_status`,
@@ -726,17 +782,25 @@
         const res = await _origFetch(url, { credentials: "include", headers: { Accept: "application/json" } });
         if (res.status === 404 || !res.ok) continue;
         const data = await res.json();
-        let resetsAt = data && data.five_hour ? data.five_hour.resets_at : null;
-        let utilization = data && data.five_hour ? data.five_hour.utilization : null;
-        if (!resetsAt && data && Array.isArray(data.rate_limits)) {
-          const item = data.rate_limits.find((r) => /5h|five.?hour|session/i.test(String(r.window_duration || r.type || "")));
-          resetsAt = item ? item.resets_at || item.reset_at : null;
-          utilization = item ? item.utilization : null;
+        const windows = {};
+        if (data && data.five_hour) {
+          windows.five_hour = { resets_at: data.five_hour.resets_at, utilization: data.five_hour.utilization };
         }
-        if (resetsAt) {
-          const t = typeof resetsAt === "string" ? new Date(resetsAt).getTime() / 1000 : resetsAt;
-          if (!Number.isNaN(t)) return { epoch: t, utilization };
+        if (data && data.seven_day) {
+          windows.seven_day = { resets_at: data.seven_day.resets_at, utilization: data.seven_day.utilization };
         }
+        if (!windows.five_hour && !windows.seven_day && data && Array.isArray(data.rate_limits)) {
+          for (const item of data.rate_limits) {
+            const label = String(item.window_duration || item.type || "").toLowerCase();
+            if (/5h|five.?hour|session/.test(label)) {
+              windows.five_hour = { resets_at: item.resets_at || item.reset_at, utilization: item.utilization };
+            }
+            if (/7d|seven.?day|week/.test(label)) {
+              windows.seven_day = { resets_at: item.resets_at || item.reset_at, utilization: item.utilization };
+            }
+          }
+        }
+        if (windows.five_hour || windows.seven_day) return windows;
       } catch (e) {
         console.warn("[Claude額度冷卻翻頁鐘] 查詢用量失敗:", url, e);
       }
@@ -744,12 +808,49 @@
     return null;
   }
 
+  function toEpoch(resetsAt) {
+    if (resetsAt == null) return null;
+    const t = typeof resetsAt === "string" ? new Date(resetsAt).getTime() / 1000 : resetsAt;
+    return Number.isNaN(t) ? null : t;
+  }
+
+  // 用量到這個百分比視為「這個視窗已經用盡」——沒有官方文件保證確切門檻，這是保守估計值
+  const EXHAUST_THRESHOLD = 95;
+
+  // 真的被擋住時使用：判斷哪個視窗真的用盡。只有一個用盡就回報那個；
+  // 兩個都用盡，回報時間離現在比較遠的那個（因為兩個視窗都要有餘額才能真正送出訊息）。
+  // 如果兩個視窗的用量資料都不明確（欄位缺失、門檻抓不準），保守回報較遠的那個，
+  // 避免使用者提早重試又再次被擋。
+  function pickBlockedEpoch(windows) {
+    const fh = windows.five_hour;
+    const sd = windows.seven_day;
+    const fhExhausted = fh && fh.utilization != null && fh.utilization >= EXHAUST_THRESHOLD;
+    const sdExhausted = sd && sd.utilization != null && sd.utilization >= EXHAUST_THRESHOLD;
+    const fhEpoch = fh ? toEpoch(fh.resets_at) : null;
+    const sdEpoch = sd ? toEpoch(sd.resets_at) : null;
+    if (fhExhausted && sdExhausted) {
+      const candidates = [fhEpoch, sdEpoch].filter((v) => v != null);
+      return candidates.length ? Math.max(...candidates) : null;
+    }
+    if (fhExhausted && fhEpoch != null) return fhEpoch;
+    if (sdExhausted && sdEpoch != null) return sdEpoch;
+    const candidates = [fhEpoch, sdEpoch].filter((v) => v != null);
+    return candidates.length ? Math.max(...candidates) : null;
+  }
+
+  // 還有額度時（預覽模式）固定回報短期視窗，不管長期視窗
+  function pickPreviewEpoch(windows) {
+    const fh = windows.five_hour;
+    return fh ? toEpoch(fh.resets_at) : null;
+  }
+
   async function handleLimitDetected() {
     if (limitActive) return;
     limitActive = true;
-    const result = await fetchResetEpoch();
-    if (result && result.epoch != null) {
-      CFC.show(result.epoch);
+    const windows = await fetchWindowsData();
+    const epoch = windows ? pickBlockedEpoch(windows) : null;
+    if (epoch != null) {
+      CFC.show(epoch, false);
     } else {
       console.warn("[Claude額度冷卻翻頁鐘] 偵測到額度用完，但取不到 resets_at，未顯示倒數畫面");
     }
@@ -764,17 +865,23 @@
   // 頁面載入當下也檢查一次，避免腳本注入時額度剛好已經用完、錯過第一次觸發
   checkLimitDom();
 
-  // 手動觸發共用邏輯：查 API，如果用量看起來還沒真的用完，先跟使用者確認要不要仍然打開畫面看效果，
-  // 不是查得到 resets_at 就直接當作「已用完」（resets_at 這個滾動時間窗的重置時間本來就一直存在）。
+  // 手動觸發共用邏輯：查兩個視窗的資料，短期視窗用量到門檻就視為「真的用盡」，
+  // 回報邏輯照 pickBlockedEpoch；否則視為「還有額度」，回報短期視窗的 resets_at（預覽模式）。
   async function manualCheckAndShow() {
-    const result = await fetchResetEpoch();
-    if (!result || result.epoch == null) {
-      alert("[Claude額度冷卻翻頁鐘] 查不到 resets_at，可能還沒有任何 API 請求被攔截到（orgId 未知）。");
+    const windows = await fetchWindowsData();
+    if (!windows) {
+      alert("[Claude額度冷卻翻頁鐘] 查不到用量資料，可能還沒有任何 API 請求被攔截到（orgId 未知）。");
       return;
     }
-    const isPreview = result.utilization != null && result.utilization < 95; // 用量還沒到，不是真的用完，用「預覽模式」樣式呈現
+    const fh = windows.five_hour;
+    const looksBlocked = fh && fh.utilization != null && fh.utilization >= EXHAUST_THRESHOLD;
+    const epoch = looksBlocked ? pickBlockedEpoch(windows) : pickPreviewEpoch(windows);
+    if (epoch == null) {
+      alert("[Claude額度冷卻翻頁鐘] 查得到用量資料，但沒有 resets_at 可用。");
+      return;
+    }
     limitActive = true;
-    CFC.show(result.epoch, isPreview);
+    CFC.show(epoch, !looksBlocked);
   }
   target.__cfcManualCheck = manualCheckAndShow; // 讓 CFC 常駐按鈕（定義在檔案較前面、作用域不同）也能呼叫同一套邏輯
 
