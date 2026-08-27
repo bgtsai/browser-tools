@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.6.0
+// @version      1.7.0
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -477,6 +477,10 @@
       color: rgba(255,255,255,0.7);
       letter-spacing: 0.05em;
     }
+    /* 預覽模式（還有額度，不是真的用盡）：標題改綠色，跟真的用盡的樣式做出區別 */
+    #cfc-overlay.cfc-preview .cfc-title {
+      color: rgba(74, 222, 128, 0.9); /* 柔和的綠色 */
+    }
     #cfc-overlay .cfc-close {
       position: absolute;
       bottom: calc(var(--cfc-u) * 3); /* 24px */
@@ -556,6 +560,7 @@
     let flipdownInstance = null;
     let phaseTimer = null;
     let lastEpoch = null; // 記錄目前倒數的目標時間，關閉後重新開啟時要沿用同一個目標，不能歸零重算
+    let lastIsPreview = false; // 連同預覽模式狀態一起記住，重新開啟時樣式才不會跑掉
     let reopenBtn = null; // 常駐的重新開啟按鈕（不隨 overlay 一起被移除）
 
     // 相鄰兩組欄位的切換門檻：>=1天 顯示「天+時」；>=1小時 顯示「時+分」；否則「分+秒」
@@ -585,7 +590,7 @@
       reopenBtn.setAttribute("aria-label", "開啟額度冷卻倒數畫面");
       reopenBtn.addEventListener("click", () => {
         if (lastEpoch != null && lastEpoch - Date.now() / 1000 > 0) {
-          show(lastEpoch); // 有進行中的倒數，沿用原本目標時間，不重新計算
+          show(lastEpoch, lastIsPreview); // 有進行中的倒數，沿用原本目標時間跟模式，不重新計算
         } else if (typeof target.__cfcManualCheck === "function") {
           target.__cfcManualCheck(); // 沒有進行中的倒數，改成即時查詢（跟 GM 選單同一套邏輯，含用量確認）
         }
@@ -612,17 +617,20 @@
     }
 
     // epochSeconds：目標時間（unix timestamp，秒）
-    function show(epochSeconds) {
+    // isPreview：true＝還有額度（手動查詢時用量未達門檻），顯示「預覽」樣式；false／省略＝真的額度用盡
+    function show(epochSeconds, isPreview) {
       close(); // 避免重複開啟（close() 內部的「留重新開啟按鈕」判斷這裡也會跑到，等等再蓋掉）
       lastEpoch = epochSeconds;
+      lastIsPreview = !!isPreview;
       if (reopenBtn) reopenBtn.style.display = "none"; // 畫面開啟中，不需要重新開啟按鈕
 
       overlayEl = document.createElement("div");
       overlayEl.id = "cfc-overlay";
+      if (isPreview) overlayEl.classList.add("cfc-preview");
 
       const title = document.createElement("div");
       title.className = "cfc-title";
-      title.textContent = "額度已用完，等待恢復中";
+      title.textContent = isPreview ? "距離本輪額度重置時間還剩餘" : "額度已用盡，等待恢復中";
       overlayEl.appendChild(title);
 
       const clockEl = document.createElement("div");
@@ -764,12 +772,9 @@
       alert("[Claude額度冷卻翻頁鐘] 查不到 resets_at，可能還沒有任何 API 請求被攔截到（orgId 未知）。");
       return;
     }
-    if (result.utilization != null && result.utilization < 95) {
-      const proceed = confirm(`目前額度用量約 ${result.utilization}%，看起來還沒真的用完。仍要開啟倒數畫面看看效果嗎？`);
-      if (!proceed) return;
-    }
+    const isPreview = result.utilization != null && result.utilization < 95; // 用量還沒到，不是真的用完，用「預覽模式」樣式呈現
     limitActive = true;
-    CFC.show(result.epoch);
+    CFC.show(result.epoch, isPreview);
   }
   target.__cfcManualCheck = manualCheckAndShow; // 讓 CFC 常駐按鈕（定義在檔案較前面、作用域不同）也能呼叫同一套邏輯
 
