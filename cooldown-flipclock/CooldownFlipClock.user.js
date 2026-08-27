@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.5.0
+// @version      1.6.0
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -497,29 +497,35 @@
     }
     #cfc-overlay .cfc-close:hover { background: rgba(255,255,255,0.16); }
 
-    /* 常駐重新開啟按鈕：不在 #cfc-overlay 底下（overlay 關閉時會整個被移除），
-       直接掛在 body 上，位置與關閉鈕相同（右下角），視覺樣式也比照。 */
+    /* 常駐開啟按鈕：不在 #cfc-overlay 底下（overlay 關閉時會整個被移除），直接掛在 body 上。
+       位置基準是右下角，實際位置 = 基準位置 + 可調偏移量（--cfc-reopen-offset-x/y，預設 0），
+       要微調位置直接改這兩個變數即可，不用動其他數值。 */
+    :root {
+      --cfc-reopen-offset-x: 0px; /* 正值往左移，負值往右移（因為是往 right 方向疊加） */
+      --cfc-reopen-offset-y: 0px; /* 正值往上移，負值往下移（因為是往 bottom 方向疊加） */
+    }
     #cfc-reopen {
       position: fixed;
-      bottom: calc(var(--cfc-u, 0.41667vw) * 3); /* 24px */
-      right: calc(var(--cfc-u, 0.41667vw) * 4);  /* 32px */
+      bottom: calc(var(--cfc-u, 0.41667vw) * 3 + var(--cfc-reopen-offset-y)); /* 基準 24px + 偏移 */
+      right: calc(var(--cfc-u, 0.41667vw) * 4 + var(--cfc-reopen-offset-x));  /* 基準 32px + 偏移 */
       z-index: 2147483647;
-      width: calc(var(--cfc-u, 0.41667vw) * 6);  /* 48px */
+      width: calc(var(--cfc-u, 0.41667vw) * 6);  /* 48px，維持點擊熱區大小 */
       height: calc(var(--cfc-u, 0.41667vw) * 6); /* 48px */
-      border-radius: 50%;
-      border: 1px solid rgba(255,255,255,0.25);
-      background: rgba(30,30,32,0.9);
-      color: rgba(255,255,255,0.85);
+      background: transparent;
+      border: none;
+      color: #333; /* 深灰色圖示，不再用圓形底色 */
       font-size: calc(var(--cfc-u, 0.41667vw) * 3); /* 24px */
       line-height: 1;
       cursor: pointer;
+      display: flex;
       align-items: center;
       justify-content: center;
-      transition: background 0.15s ease;
+      opacity: 0.85;
+      transition: opacity 0.15s ease;
     }
-    #cfc-reopen:hover { background: rgba(50,50,54,0.95); }
+    #cfc-reopen:hover { opacity: 1; }
     @media (max-width: 640px) {
-      #cfc-reopen { width: 40px; height: 40px; font-size: 16px; bottom: 16px; right: 16px; }
+      #cfc-reopen { width: 40px; height: 40px; font-size: 16px; }
     }
 
     /* 手機版維持固定 px（不繼續跟 vw 縮小）——窄螢幕上 vw 換算出來的字級會小到看不清楚，
@@ -576,16 +582,18 @@
       reopenBtn = document.createElement("button");
       reopenBtn.id = "cfc-reopen";
       reopenBtn.innerHTML = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5l3 2"/></svg>';
-      reopenBtn.setAttribute("aria-label", "重新開啟倒數畫面");
-      reopenBtn.style.display = "none";
+      reopenBtn.setAttribute("aria-label", "開啟額度冷卻倒數畫面");
       reopenBtn.addEventListener("click", () => {
         if (lastEpoch != null && lastEpoch - Date.now() / 1000 > 0) {
-          show(lastEpoch); // 沿用原本的目標時間，不重新計算
+          show(lastEpoch); // 有進行中的倒數，沿用原本目標時間，不重新計算
+        } else if (typeof target.__cfcManualCheck === "function") {
+          target.__cfcManualCheck(); // 沒有進行中的倒數，改成即時查詢（跟 GM 選單同一套邏輯，含用量確認）
         }
       });
       document.body.appendChild(reopenBtn);
       return reopenBtn;
     }
+    ensureReopenBtn(); // 常駐按鈕，腳本載入時就建立、預設顯示，不等第一次關閉才出現
 
     function close() {
       if (phaseTimer) {
@@ -600,10 +608,7 @@
         overlayEl.remove();
         overlayEl = null;
       }
-      // 倒數還沒結束的話，留一顆常駐按鈕讓使用者可以再打開
-      if (lastEpoch != null && lastEpoch - Date.now() / 1000 > 0) {
-        ensureReopenBtn().style.display = "flex";
-      }
+      ensureReopenBtn().style.display = "flex"; // 常駐按鈕，關閉全螢幕畫面後一律顯示
     }
 
     // epochSeconds：目標時間（unix timestamp，秒）
@@ -699,9 +704,10 @@
     }
   }
 
-  // 依序嘗試三個端點（沿用既有腳本驗證過的做法），取得 five_hour.resets_at 換算成 unix timestamp（秒）
+  // 依序嘗試三個端點（沿用既有腳本驗證過的做法），取得 five_hour.resets_at 換算成 unix timestamp（秒），
+  // 同時回傳 utilization（用量百分比），讓手動觸發時可以判斷「是不是真的用完了」，不是查得到 resets_at 就直接開。
   async function fetchResetEpoch() {
-    if (!orgId) return null;
+    if (!orgId) return { epoch: null, utilization: null };
     const endpoints = [
       `https://claude.ai/api/organizations/${orgId}/usage`,
       `https://claude.ai/api/organizations/${orgId}/rate_limit_status`,
@@ -713,13 +719,15 @@
         if (res.status === 404 || !res.ok) continue;
         const data = await res.json();
         let resetsAt = data && data.five_hour ? data.five_hour.resets_at : null;
+        let utilization = data && data.five_hour ? data.five_hour.utilization : null;
         if (!resetsAt && data && Array.isArray(data.rate_limits)) {
           const item = data.rate_limits.find((r) => /5h|five.?hour|session/i.test(String(r.window_duration || r.type || "")));
           resetsAt = item ? item.resets_at || item.reset_at : null;
+          utilization = item ? item.utilization : null;
         }
         if (resetsAt) {
           const t = typeof resetsAt === "string" ? new Date(resetsAt).getTime() / 1000 : resetsAt;
-          if (!Number.isNaN(t)) return t;
+          if (!Number.isNaN(t)) return { epoch: t, utilization };
         }
       } catch (e) {
         console.warn("[Claude額度冷卻翻頁鐘] 查詢用量失敗:", url, e);
@@ -731,9 +739,9 @@
   async function handleLimitDetected() {
     if (limitActive) return;
     limitActive = true;
-    const epoch = await fetchResetEpoch();
-    if (epoch != null) {
-      CFC.show(epoch);
+    const result = await fetchResetEpoch();
+    if (result && result.epoch != null) {
+      CFC.show(result.epoch);
     } else {
       console.warn("[Claude額度冷卻翻頁鐘] 偵測到額度用完，但取不到 resets_at，未顯示倒數畫面");
     }
@@ -748,18 +756,27 @@
   // 頁面載入當下也檢查一次，避免腳本注入時額度剛好已經用完、錯過第一次觸發
   checkLimitDom();
 
+  // 手動觸發共用邏輯：查 API，如果用量看起來還沒真的用完，先跟使用者確認要不要仍然打開畫面看效果，
+  // 不是查得到 resets_at 就直接當作「已用完」（resets_at 這個滾動時間窗的重置時間本來就一直存在）。
+  async function manualCheckAndShow() {
+    const result = await fetchResetEpoch();
+    if (!result || result.epoch == null) {
+      alert("[Claude額度冷卻翻頁鐘] 查不到 resets_at，可能還沒有任何 API 請求被攔截到（orgId 未知）。");
+      return;
+    }
+    if (result.utilization != null && result.utilization < 95) {
+      const proceed = confirm(`目前額度用量約 ${result.utilization}%，看起來還沒真的用完。仍要開啟倒數畫面看看效果嗎？`);
+      if (!proceed) return;
+    }
+    limitActive = true;
+    CFC.show(result.epoch);
+  }
+  target.__cfcManualCheck = manualCheckAndShow; // 讓 CFC 常駐按鈕（定義在檔案較前面、作用域不同）也能呼叫同一套邏輯
+
   // 手動觸發機制：萬一自動偵測失效（例如選擇器跟著 UI 改版失效），
   // 使用者可以從 Tampermonkey 圖示選單手動叫出倒數畫面，不用等自動偵測。
   if (typeof GM_registerMenuCommand !== "undefined") {
-    GM_registerMenuCommand("手動開啟額度冷卻倒數", async () => {
-      const epoch = await fetchResetEpoch();
-      if (epoch != null) {
-        limitActive = true;
-        CFC.show(epoch);
-      } else {
-        alert("[Claude額度冷卻翻頁鐘] 查不到 resets_at，可能還沒有任何 API 請求被攔截到（orgId 未知），或目前額度還沒用完。");
-      }
-    });
+    GM_registerMenuCommand("手動開啟額度冷卻倒數", manualCheckAndShow);
   }
 
   // ---- Phase 1 測試用掛鉤：Console 執行 __cfcTest(秒數) 立即開出假倒數 ----
