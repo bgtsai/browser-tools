@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.4.0
+// @version      1.5.0
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
 // @grant        unsafeWindow
+// @grant        GM_registerMenuCommand
 // @run-at       document-idle
 // @downloadURL  https://raw.githubusercontent.com/bgtsai/browser-tools/main/cooldown-flipclock/CooldownFlipClock.user.js
 // @updateURL    https://raw.githubusercontent.com/bgtsai/browser-tools/main/cooldown-flipclock/CooldownFlipClock.user.js
@@ -33,6 +34,11 @@
 
 (function () {
   "use strict";
+
+  // 真正的頁面 window（跳脫 Tampermonkey 沙盒）。@grant unsafeWindow 會讓腳本跑在獨立沙盒，
+  // 沙盒裡的 window 跟頁面實際的 window 是兩個不同物件——覆寫 fetch/XHR 這類要攔截「頁面自己呼叫」
+  // 的內建函式，一定要用 unsafeWindow，用 window 只會覆寫到沙盒自己的副本，攔截不到頁面真正的請求。
+  const target = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
 
   /* ------------------------------------------------------------
    * 翻頁鐘核心：vendored from PButcher/flipdown v0.3.2 (MIT License)
@@ -660,14 +666,14 @@
   let limitActive = false; // 避免同一次額度用完期間，元件持續存在時重複觸發
   let checkDebounceTimer = null;
 
-  const _origFetch = window.fetch.bind(window);
-  window.fetch = function (...args) {
+  const _origFetch = target.fetch.bind(target);
+  target.fetch = function (...args) {
     const url = typeof args[0] === "string" ? args[0] : args[0] instanceof Request ? args[0].url : "";
     onApiActivity(url);
     return _origFetch(...args);
   };
-  const _origXHROpen = XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+  const _origXHROpen = target.XMLHttpRequest.prototype.open;
+  target.XMLHttpRequest.prototype.open = function (method, url, ...rest) {
     if (typeof url === "string") onApiActivity(url);
     return _origXHROpen.call(this, method, url, ...rest);
   };
@@ -742,8 +748,21 @@
   // 頁面載入當下也檢查一次，避免腳本注入時額度剛好已經用完、錯過第一次觸發
   checkLimitDom();
 
+  // 手動觸發機制：萬一自動偵測失效（例如選擇器跟著 UI 改版失效），
+  // 使用者可以從 Tampermonkey 圖示選單手動叫出倒數畫面，不用等自動偵測。
+  if (typeof GM_registerMenuCommand !== "undefined") {
+    GM_registerMenuCommand("手動開啟額度冷卻倒數", async () => {
+      const epoch = await fetchResetEpoch();
+      if (epoch != null) {
+        limitActive = true;
+        CFC.show(epoch);
+      } else {
+        alert("[Claude額度冷卻翻頁鐘] 查不到 resets_at，可能還沒有任何 API 請求被攔截到（orgId 未知），或目前額度還沒用完。");
+      }
+    });
+  }
+
   // ---- Phase 1 測試用掛鉤：Console 執行 __cfcTest(秒數) 立即開出假倒數 ----
-  const target = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
   target.__cfcTest = function (secondsFromNow) {
     const epoch = Date.now() / 1000 + Number(secondsFromNow || 90);
     CFC.show(epoch);
