@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.14.3
+// @version      1.15.0
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -629,13 +629,11 @@
     #cfc-overlay .cfc-theme-toggle-thumb {
       position: absolute;
       top: 50%;
-      left: 51px; /* 預設（深色主題）：thumb 停在右側。box-sizing:border-box 讓 1px 邊框往內縮，
-                     實際可用內部寬度是 96-2(左右各1px邊框)=94px，94-5(邊距)-38(直徑)=51，
-                     不是單純用外框 96px 去算的 53（那樣會多推 2px，貼近邊框） */
+      left: var(--cfc-toggle-far, 51px); /* 預設（深色主題）：thumb 停在右側。用 JS 量測膠囊實際渲染尺寸算出來，不是猜的 */
       transform: translateY(-50%);
       z-index: 2;
-      width: 38px;
-      height: 38px;
+      width: var(--cfc-toggle-dot, 38px);  /* 邊距歸零、直徑＝膠囊實際高度，JS 量測後套用 */
+      height: var(--cfc-toggle-dot, 38px);
       border-radius: 50%;
       background: var(--cfc-color-close-text);
       display: flex;
@@ -646,7 +644,7 @@
     #cfc-overlay .cfc-theme-toggle-thumb svg { width: 20px; height: 20px; }
     /* 淺色主題啟用時：thumb 滑到左側 */
     #cfc-overlay.cfc-theme-light .cfc-theme-toggle-thumb {
-      left: 5px;
+      left: 0;
     }
     #cfc-overlay .cfc-theme-toggle-thumb .cfc-theme-toggle-icon-sun,
     #cfc-overlay .cfc-theme-toggle-thumb .cfc-theme-toggle-icon-moon {
@@ -665,11 +663,11 @@
     #cfc-overlay .cfc-theme-toggle-ghost {
       position: absolute;
       top: 50%;
-      left: 5px; /* 預設（深色主題）：ghost 顯示在左側（太陽，代表切過去會變淺色） */
+      left: 0; /* 預設（深色主題）：ghost 顯示在左側（太陽，代表切過去會變淺色），邊距歸零 */
       transform: translateY(-50%);
       z-index: 1;
-      width: 38px;
-      height: 38px;
+      width: var(--cfc-toggle-dot, 38px);
+      height: var(--cfc-toggle-dot, 38px);
       display: flex;
       align-items: center;
       justify-content: center;
@@ -680,7 +678,7 @@
     }
     #cfc-overlay .cfc-theme-toggle-ghost svg { width: 20px; height: 20px; }
     #cfc-overlay.cfc-theme-light .cfc-theme-toggle-ghost {
-      left: 51px; /* 淺色主題啟用時：ghost 換到右側，顯示月亮（代表切回去會變深色）；同樣扣掉邊框內縮 */
+      left: var(--cfc-toggle-far, 51px); /* 淺色主題啟用時：ghost 換到右側，顯示月亮（代表切回去會變深色） */
     }
     #cfc-overlay .cfc-theme-toggle-ghost .cfc-theme-toggle-icon-sun { display: block; } /* 深色主題（預設）：ghost 顯示太陽，代表切過去會變淺色 */
     #cfc-overlay.cfc-theme-light .cfc-theme-toggle-ghost .cfc-theme-toggle-icon-sun { display: none; }
@@ -862,6 +860,7 @@
       overlayEl.appendChild(closeBtn);
 
       document.body.appendChild(overlayEl);
+      applyToggleMetrics(); // 量測膠囊實際渲染出來的高度，算出圓圈直徑（＝膠囊高度，邊距歸零）跟靠右停駐位置
 
       const FlipDown = window.__CFC_FlipDown;
       flipdownInstance = new FlipDown(epochSeconds, "cfc-flipdown", {
@@ -893,6 +892,18 @@
     // 冒號圓點的大小／位置不用猜測值：實際量測目前生效的字型（可能被使用者的字型替換腳本蓋掉）
     // 畫出「:」字元的真實尺寸，再量測轉輪跟標題的實際渲染高度算出數字視覺中心。只需要在畫面
     // 建立時量一次（不同 phase 之間轉輪本身尺寸不變，只是顯示/隱藏切換，不用每次 phase 切換都重量）。
+    // 膠囊裡圓圈的直徑跟位置不用猜測值：量測膠囊實際渲染出來的 clientHeight（已經是瀏覽器算好的
+    // 內部可用高度，不用自己再去扣邊框、猜 box-sizing 怎麼算），直徑＝這個值、邊距＝0（圓圈頂滿
+    // 膠囊上下緣），靠右停駐位置＝膠囊實際寬度－直徑。
+    function applyToggleMetrics() {
+      const pill = document.querySelector(".cfc-theme-toggle");
+      if (!pill) return;
+      const dot = pill.clientHeight; // 內部可用高度（不含邊框），直徑對齊這個值，圓圈才會頂滿上下緣不溢出
+      const far = pill.clientWidth - dot; // 內部可用寬度（不含邊框）減去直徑，才是正確的靠右停駐位置
+      pill.style.setProperty("--cfc-toggle-dot", dot + "px");
+      pill.style.setProperty("--cfc-toggle-far", far + "px");
+    }
+
     function applyColonMetrics() {
       const flipEl = document.getElementById("cfc-flipdown");
       const rotorTop = flipEl && flipEl.querySelector(".rotor-top");
