@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.11.1
+// @version      1.12.0
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
 // @grant        unsafeWindow
 // @grant        GM_registerMenuCommand
+// @grant        GM_setValue
+// @grant        GM_getValue
 // @run-at       document-idle
 // @downloadURL  https://raw.githubusercontent.com/bgtsai/browser-tools/main/cooldown-flipclock/CooldownFlipClock.user.js
 // @updateURL    https://raw.githubusercontent.com/bgtsai/browser-tools/main/cooldown-flipclock/CooldownFlipClock.user.js
@@ -43,10 +45,23 @@
   /* ------------------------------------------------------------
    * 使用者設定：直接改這裡
    * ------------------------------------------------------------ */
-  // 翻頁鐘配色主題："dark"（黑底白字，預設）或 "light"（白底黑字）。
-  // 注意：這只影響翻頁鐘本體的配色，全螢幕遮罩（蓋住頁面背景的那層）固定維持不透明黑色，不受這個設定影響。
+  // 翻頁鐘配色主題預設值："dark"（黑底白字）或 "light"（白底黑字）——
+  // 這只是「還沒有任何持久化選擇時」的初始值，畫面上的膠囊開關切換後會覆蓋，並記住使用者的選擇。
+  // 注意：主題只影響翻頁鐘本體的配色，全螢幕遮罩（蓋住頁面背景的那層）固定維持不透明黑色，不受這個設定影響。
   const CFC_THEME = "dark";
+  const THEME_STORAGE_KEY = "cfc_theme";
 
+  function getCurrentTheme() {
+    if (typeof GM_getValue !== "undefined") {
+      return GM_getValue(THEME_STORAGE_KEY, CFC_THEME);
+    }
+    return CFC_THEME;
+  }
+  function setCurrentTheme(theme) {
+    if (typeof GM_setValue !== "undefined") {
+      GM_setValue(THEME_STORAGE_KEY, theme);
+    }
+  }
 
   /* ------------------------------------------------------------
    * 翻頁鐘核心：vendored from PButcher/flipdown v0.3.2 (MIT License)
@@ -590,6 +605,57 @@
     }
     #cfc-overlay .cfc-close:hover { background: var(--cfc-color-close-bg-hover); }
 
+    /* 主題切換膠囊開關：日／月圖示，放在關閉鈕左側、同一水平線上。
+       兩個圖示固定貼在膠囊左右兩端（z-index 較低），thumb（實心圓）疊在最上層滑動——
+       thumb 滑到哪一側，那一側的圖示就被蓋住看不見，另一側的圖示露出來，是最常見的極簡做法，
+       不用另外處理圖示變色的邏輯。 */
+    #cfc-overlay .cfc-theme-toggle {
+      position: absolute;
+      bottom: calc(var(--cfc-u) * 3); /* 24px，跟關閉鈕同一水平線 */
+      right: calc(var(--cfc-u) * 13); /* 104px＝關閉鈕右緣32px + 寬48px + 間距24px */
+      width: calc(var(--cfc-u) * 12); /* 96px */
+      height: calc(var(--cfc-u) * 6);  /* 48px，跟關閉鈕同高 */
+      border-radius: calc(var(--cfc-u) * 6);
+      border: 1px solid var(--cfc-color-close-border);
+      background: var(--cfc-color-close-bg);
+      cursor: pointer;
+      padding: 0;
+      transition: background 0.15s ease;
+    }
+    #cfc-overlay .cfc-theme-toggle:hover { background: var(--cfc-color-close-bg-hover); }
+    #cfc-overlay .cfc-theme-toggle-thumb {
+      position: absolute;
+      top: 4px;
+      left: 4px;
+      z-index: 2;
+      width: calc(var(--cfc-u) * 6 - 8px); /* 40px：膠囊高 48px 扣掉上下各 4px 邊距 */
+      height: calc(var(--cfc-u) * 6 - 8px);
+      border-radius: 50%;
+      background: var(--cfc-color-close-text);
+      transition: transform 0.2s ease;
+      /* 預設（深色主題）：thumb 停在右側，裡面顯示月亮圖示 */
+      transform: translateX(calc(var(--cfc-u) * 12 - 8px - (var(--cfc-u) * 6 - 8px)));
+    }
+    /* 淺色主題啟用時：thumb 滑到左側，裡面顯示太陽圖示 */
+    #cfc-overlay.cfc-theme-light .cfc-theme-toggle-thumb {
+      transform: translateX(0);
+    }
+    /* 圖示畫在 thumb 裡面、跟著滑動：滑到哪一側就主動顯示對應圖示，用 opacity 切換取代固定位置被蓋住，語意才正確 */
+    #cfc-overlay .cfc-theme-toggle-icon-sun,
+    #cfc-overlay .cfc-theme-toggle-icon-moon {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: var(--cfc-color-close-bg); /* thumb 底色偏淺，圖示改用遮罩背景色，在 thumb 上才有對比 */
+      opacity: 0;
+      transition: opacity 0.15s ease;
+      pointer-events: none;
+    }
+    #cfc-overlay .cfc-theme-toggle-icon-moon { opacity: 1; } /* 深色主題（預設）：thumb 顯示月亮 */
+    #cfc-overlay.cfc-theme-light .cfc-theme-toggle-icon-sun { opacity: 1; }
+    #cfc-overlay.cfc-theme-light .cfc-theme-toggle-icon-moon { opacity: 0; }
+
     /* 常駐開啟按鈕：不在 #cfc-overlay 底下（overlay 關閉時會整個被移除），直接掛在 body 上。
        位置基準是右下角，實際位置 = 基準位置 + 可調偏移量（--cfc-reopen-offset-x/y，預設 0），
        要微調位置直接改這兩個變數即可，不用動其他數值。 */
@@ -639,6 +705,10 @@
       #cfc-flipdown[data-phase="day-hour"] .rotor-group:nth-child(2),
       #cfc-flipdown[data-phase="hour-min"] .rotor-group:nth-child(3) { padding-right: 0; }
       #cfc-overlay .cfc-close { width: 40px; height: 40px; font-size: 16px; bottom: 16px; right: 16px; }
+      #cfc-overlay .cfc-theme-toggle { width: 76px; height: 40px; bottom: 16px; right: 76px; }
+      #cfc-overlay .cfc-theme-toggle-thumb { width: 32px; height: 32px; }
+      #cfc-overlay.cfc-theme-light .cfc-theme-toggle-thumb { transform: translateX(0); }
+      #cfc-overlay:not(.cfc-theme-light) .cfc-theme-toggle-thumb { transform: translateX(36px); }
       #cfc-overlay .cfc-title { font-size: 16px; }
       #cfc-overlay { gap: 24px; }
     }
@@ -652,7 +722,6 @@
     let overlayEl = null;
     let flipdownInstance = null;
     let phaseTimer = null;
-    let colonObserver = null; // 監看秒的個位數轉輪，用真正的跳動事件驅動冒號亮暗，不是自跑動畫
     let lastEpoch = null; // 記錄目前倒數的目標時間，關閉後重新開啟時要沿用同一個目標，不能歸零重算
     let lastIsPreview = false; // 連同預覽模式狀態一起記住，重新開啟時樣式才不會跑掉
     let reopenBtn = null; // 常駐的重新開啟按鈕（不隨 overlay 一起被移除）
@@ -699,10 +768,6 @@
         clearInterval(phaseTimer);
         phaseTimer = null;
       }
-      if (colonObserver) {
-        colonObserver.disconnect();
-        colonObserver = null;
-      }
       if (flipdownInstance && flipdownInstance.countdown) {
         clearInterval(flipdownInstance.countdown);
       }
@@ -725,7 +790,7 @@
       overlayEl = document.createElement("div");
       overlayEl.id = "cfc-overlay";
       if (isPreview) overlayEl.classList.add("cfc-preview");
-      if (CFC_THEME === "light") overlayEl.classList.add("cfc-theme-light");
+      if (getCurrentTheme() === "light") overlayEl.classList.add("cfc-theme-light");
 
       const title = document.createElement("div");
       title.className = "cfc-title";
@@ -736,6 +801,21 @@
       clockEl.id = "cfc-flipdown";
       clockEl.className = "flipdown";
       overlayEl.appendChild(clockEl);
+
+      // 主題切換膠囊：日／月圖示，點擊切換深色／淺色，選擇會持久記住
+      const themeToggle = document.createElement("button");
+      themeToggle.className = "cfc-theme-toggle";
+      themeToggle.setAttribute("aria-label", "切換深色／淺色主題");
+      themeToggle.innerHTML =
+        '<span class="cfc-theme-toggle-thumb">' +
+        '<svg class="cfc-theme-toggle-icon-sun" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2.5v3M12 18.5v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2.5 12h3M18.5 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>' +
+        '<svg class="cfc-theme-toggle-icon-moon" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5Z"/></svg>' +
+        "</span>";
+      themeToggle.addEventListener("click", () => {
+        const next = overlayEl.classList.toggle("cfc-theme-light") ? "light" : "dark";
+        setCurrentTheme(next);
+      });
+      overlayEl.appendChild(themeToggle);
 
       const closeBtn = document.createElement("button");
       closeBtn.className = "cfc-close";
@@ -759,29 +839,15 @@
       target.__cfcInstance = flipdownInstance;
 
       applyColonMetrics(); // DOM 已經建好，量測目前實際生效的字型跟版面尺寸，套到冒號的 CSS 變數
-      syncColonToTick(); // 監看秒的個位數轉輪，用真正的跳動事件驅動冒號亮暗
 
       updatePhase(epochSeconds);
-      phaseTimer = setInterval(() => updatePhase(epochSeconds), 1000);
-    }
-
-    // 冒號的亮暗切換時間點，綁在「秒的個位數轉輪文字變化」這個事件上——
-    // 不管目前 phase 是不是顯示秒數，flipdown 內部固定每秒跳動一次，這個節點的文字內容都會跟著變，
-    // 用它當精準的跳動事件來源，取代原本自己跑、跟真正跳動時間點沒有對齊關係的 CSS animation。
-    function syncColonToTick() {
-      const flipEl = document.getElementById("cfc-flipdown");
-      const rotors = flipEl && flipEl.querySelectorAll(".rotor");
-      if (!rotors || !rotors.length) return;
-      const secOnes = rotors[rotors.length - 1]; // 秒的個位數那一格
-      const secTop = secOnes.querySelector(".rotor-top");
-      if (!secTop) return;
-
-      let on = true;
-      colonObserver = new MutationObserver(() => {
-        on = !on;
-        flipEl.classList.toggle("cfc-colon-off", !on);
-      });
-      colonObserver.observe(secTop, { childList: true, characterData: true, subtree: true });
+      let colonOn = true;
+      phaseTimer = setInterval(() => {
+        updatePhase(epochSeconds);
+        colonOn = !colonOn;
+        const flipEl = document.getElementById("cfc-flipdown");
+        if (flipEl) flipEl.classList.toggle("cfc-colon-off", !colonOn);
+      }, 1000);
     }
 
     // 冒號圓點的大小／位置不用猜測值：實際量測目前生效的字型（可能被使用者的字型替換腳本蓋掉）
