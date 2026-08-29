@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.14.0
+// @version      1.14.1
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -644,7 +644,8 @@
     }
     #cfc-overlay .cfc-theme-toggle-thumb .cfc-theme-toggle-icon-sun,
     #cfc-overlay .cfc-theme-toggle-thumb .cfc-theme-toggle-icon-moon {
-      color: var(--cfc-color-close-bg); /* thumb 底色偏淺，圖示改用遮罩背景色，在 thumb 上才有對比 */
+      color: #1c1c1e; /* 固定深色，thumb 本身是淺色實心圓，圖示要用深色才有對比；
+                          之前誤用 var(--cfc-color-close-bg)，那個變數實際上是近乎透明的白色，等於沒有對比 */
       opacity: 0;
       position: absolute;
       top: 50%;
@@ -675,10 +676,10 @@
     #cfc-overlay.cfc-theme-light .cfc-theme-toggle-ghost {
       left: 53px; /* 淺色主題啟用時：ghost 換到右側，顯示月亮（代表切回去會變深色） */
     }
-    #cfc-overlay .cfc-theme-toggle-ghost .cfc-theme-toggle-icon-sun { display: none; }
-    #cfc-overlay.cfc-theme-light .cfc-theme-toggle-ghost .cfc-theme-toggle-icon-sun { display: block; }
-    #cfc-overlay .cfc-theme-toggle-ghost .cfc-theme-toggle-icon-moon { display: block; }
-    #cfc-overlay.cfc-theme-light .cfc-theme-toggle-ghost .cfc-theme-toggle-icon-moon { display: none; }
+    #cfc-overlay .cfc-theme-toggle-ghost .cfc-theme-toggle-icon-sun { display: block; } /* 深色主題（預設）：ghost 顯示太陽，代表切過去會變淺色 */
+    #cfc-overlay.cfc-theme-light .cfc-theme-toggle-ghost .cfc-theme-toggle-icon-sun { display: none; }
+    #cfc-overlay .cfc-theme-toggle-ghost .cfc-theme-toggle-icon-moon { display: none; }
+    #cfc-overlay.cfc-theme-light .cfc-theme-toggle-ghost .cfc-theme-toggle-icon-moon { display: block; } /* 淺色主題啟用時：ghost 顯示月亮，代表切回去會變深色 */
 
     /* 常駐開啟按鈕：不在 #cfc-overlay 底下（overlay 關閉時會整個被移除），直接掛在 body 上。
        位置基準是右下角，實際位置 = 基準位置 + 可調偏移量（--cfc-reopen-offset-x/y，預設 0），
