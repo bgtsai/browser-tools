@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.13.0
+// @version      1.14.0
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -595,7 +595,7 @@
       border: 1px solid var(--cfc-color-close-border);
       background: var(--cfc-color-close-bg);
       color: var(--cfc-color-close-text);
-      font-size: calc(var(--cfc-u) * 3); /* 24px */
+      font-size: calc(var(--cfc-u) * 3.5); /* 28px，圖示放大，圓圈維持 48px 不變 */
       line-height: 1;
       cursor: pointer;
       display: flex;
@@ -606,16 +606,16 @@
     #cfc-overlay .cfc-close:hover { background: var(--cfc-color-close-bg-hover); }
 
     /* 主題切換膠囊開關：日／月圖示，放在右上角。
-       邊距對齊規則：右邊距跟關閉鈕的右邊距相同（calc(*4)）；上邊距的數值等於關閉鈕的下邊距（calc(*3)）——
-       也就是這個膠囊距離視窗上緣／右緣，跟關閉鈕距離視窗下緣／右緣，用的是同一組數值。
+       邊距對齊規則：右邊距跟關閉鈕的右邊距相同（calc(*4)）；上邊距的數值等於關閉鈕的下邊距（calc(*3)）。
+       尺寸：高度比照關閉鈕（48px），維持 2:1 比例，寬度 96px；不再跟關閉鈕擠在同一排，放大後更好點擊、看得更清楚。
        thumb（實心圓＋圖示）疊在最上層滑動，另一側用淺灰色的靜態圖示提示「切過去會變成什麼」。 */
     #cfc-overlay .cfc-theme-toggle {
       position: absolute;
       top: calc(var(--cfc-u) * 3);   /* 24px，數值等於關閉鈕的 bottom */
       right: calc(var(--cfc-u) * 4); /* 32px，跟關閉鈕的 right 相同 */
-      width: calc(var(--cfc-u) * 7);  /* 56px */
-      height: calc(var(--cfc-u) * 3.5); /* 28px */
-      border-radius: calc(var(--cfc-u) * 3.5);
+      width: calc(var(--cfc-u) * 12);  /* 96px */
+      height: calc(var(--cfc-u) * 6); /* 48px，跟關閉鈕同高 */
+      border-radius: calc(var(--cfc-u) * 6);
       border: 1px solid var(--cfc-color-close-border);
       background: var(--cfc-color-close-bg);
       cursor: pointer;
@@ -625,11 +625,11 @@
     #cfc-overlay .cfc-theme-toggle:hover { background: var(--cfc-color-close-bg-hover); }
     #cfc-overlay .cfc-theme-toggle-thumb {
       position: absolute;
-      top: 3px;
-      left: 31px; /* 預設（深色主題）：thumb 停在右側 */
+      top: 5px;
+      left: 53px; /* 預設（深色主題）：thumb 停在右側，96-5(邊距)-38(直徑)=53 */
       z-index: 2;
-      width: 22px;
-      height: 22px;
+      width: 38px;
+      height: 38px;
       border-radius: 50%;
       background: var(--cfc-color-close-text);
       display: flex;
@@ -637,10 +637,10 @@
       justify-content: center;
       transition: left 0.2s ease;
     }
-    #cfc-overlay .cfc-theme-toggle-thumb svg { width: 12px; height: 12px; }
+    #cfc-overlay .cfc-theme-toggle-thumb svg { width: 20px; height: 20px; }
     /* 淺色主題啟用時：thumb 滑到左側 */
     #cfc-overlay.cfc-theme-light .cfc-theme-toggle-thumb {
-      left: 3px;
+      left: 5px;
     }
     #cfc-overlay .cfc-theme-toggle-thumb .cfc-theme-toggle-icon-sun,
     #cfc-overlay .cfc-theme-toggle-thumb .cfc-theme-toggle-icon-moon {
@@ -658,11 +658,11 @@
     /* 未選中那端：淺灰色靜態圖示，淡淡提示切過去會變成什麼 */
     #cfc-overlay .cfc-theme-toggle-ghost {
       position: absolute;
-      top: 3px;
-      left: 3px; /* 預設（深色主題）：ghost 顯示在左側（太陽，代表切過去會變淺色） */
+      top: 5px;
+      left: 5px; /* 預設（深色主題）：ghost 顯示在左側（太陽，代表切過去會變淺色） */
       z-index: 1;
-      width: 22px;
-      height: 22px;
+      width: 38px;
+      height: 38px;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -671,9 +671,9 @@
       pointer-events: none;
       transition: left 0.2s ease;
     }
-    #cfc-overlay .cfc-theme-toggle-ghost svg { width: 12px; height: 12px; }
+    #cfc-overlay .cfc-theme-toggle-ghost svg { width: 20px; height: 20px; }
     #cfc-overlay.cfc-theme-light .cfc-theme-toggle-ghost {
-      left: 31px; /* 淺色主題啟用時：ghost 換到右側，顯示月亮（代表切回去會變深色） */
+      left: 53px; /* 淺色主題啟用時：ghost 換到右側，顯示月亮（代表切回去會變深色） */
     }
     #cfc-overlay .cfc-theme-toggle-ghost .cfc-theme-toggle-icon-sun { display: none; }
     #cfc-overlay.cfc-theme-light .cfc-theme-toggle-ghost .cfc-theme-toggle-icon-sun { display: block; }
@@ -743,6 +743,7 @@
     let overlayEl = null;
     let flipdownInstance = null;
     let phaseTimer = null;
+    let colonTimer = null;
     let lastEpoch = null; // 記錄目前倒數的目標時間，關閉後重新開啟時要沿用同一個目標，不能歸零重算
     let lastIsPreview = false; // 連同預覽模式狀態一起記住，重新開啟時樣式才不會跑掉
     let reopenBtn = null; // 常駐的重新開啟按鈕（不隨 overlay 一起被移除）
@@ -788,6 +789,10 @@
       if (phaseTimer) {
         clearInterval(phaseTimer);
         phaseTimer = null;
+      }
+      if (colonTimer) {
+        clearInterval(colonTimer);
+        colonTimer = null;
       }
       if (flipdownInstance && flipdownInstance.countdown) {
         clearInterval(flipdownInstance.countdown);
@@ -866,13 +871,16 @@
       applyColonMetrics(); // DOM 已經建好，量測目前實際生效的字型跟版面尺寸，套到冒號的 CSS 變數
 
       updatePhase(epochSeconds);
+      phaseTimer = setInterval(() => updatePhase(epochSeconds), 1000);
+
+      // 冒號閃爍：獨立的 500ms 計時器，亮 500ms、暗 500ms，合計一秒一輪——
+      // 之前誤把「每 1000ms 切換一次」當成「一秒一輪」，但那樣算出來的是亮一秒、暗一秒，合計兩秒一輪，是錯的。
       let colonOn = true;
-      phaseTimer = setInterval(() => {
-        updatePhase(epochSeconds);
+      colonTimer = setInterval(() => {
         colonOn = !colonOn;
         const flipEl = document.getElementById("cfc-flipdown");
         if (flipEl) flipEl.classList.toggle("cfc-colon-off", !colonOn);
-      }, 1000);
+      }, 500);
     }
 
     // 冒號圓點的大小／位置不用猜測值：實際量測目前生效的字型（可能被使用者的字型替換腳本蓋掉）
