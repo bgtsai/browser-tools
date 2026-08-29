@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.10.0
+// @version      1.11.0
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -39,6 +39,14 @@
   // 沙盒裡的 window 跟頁面實際的 window 是兩個不同物件——覆寫 fetch/XHR 這類要攔截「頁面自己呼叫」
   // 的內建函式，一定要用 unsafeWindow，用 window 只會覆寫到沙盒自己的副本，攔截不到頁面真正的請求。
   const target = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+
+  /* ------------------------------------------------------------
+   * 使用者設定：直接改這裡
+   * ------------------------------------------------------------ */
+  // 翻頁鐘配色主題："dark"（黑底白字，預設）或 "light"（白底黑字）。
+  // 注意：這只影響翻頁鐘本體的配色，全螢幕遮罩（蓋住頁面背景的那層）固定維持不透明黑色，不受這個設定影響。
+  const CFC_THEME = "dark";
+
 
   /* ------------------------------------------------------------
    * 翻頁鐘核心：vendored from PButcher/flipdown v0.3.2 (MIT License)
@@ -424,11 +432,11 @@
     /* .rotor 容器本身的底色改用下半色（而不是跟 rotor-top 共用上半色）——
        這樣 rotor-bottom 被 clip-path 挖空後，露出來的正好是 .rotor 自己的底色，
        顏色天生就對，不需要再疊一層東西去蓋，也不用擔心疊色塊的 z-index 堆疊順序 */
-    #cfc-flipdown .rotor { color: #f5f5f5; background-color: var(--cfc-color-bottom-bg); }
+    #cfc-flipdown .rotor { color: var(--cfc-color-top-text); background-color: var(--cfc-color-bottom-bg); }
     #cfc-flipdown .rotor-top,
-    #cfc-flipdown .rotor-leaf-front { color: #f5f5f5; background-color: #1c1c1e; }
+    #cfc-flipdown .rotor-leaf-front { color: var(--cfc-color-top-text); background-color: var(--cfc-color-top-bg); }
     #cfc-flipdown .rotor-bottom,
-    #cfc-flipdown .rotor-leaf-rear  { color: #e8e8e8; background-color: var(--cfc-color-bottom-bg); }
+    #cfc-flipdown .rotor-leaf-rear  { color: var(--cfc-color-bottom-text); background-color: var(--cfc-color-bottom-bg); }
     #cfc-flipdown .rotor:after {
       /* 中線黑線：純色塊填滿，不用 border-top（避免旁邊 3D 旋轉造成的反鋸齒不穩定）。
          粗細 2px、往下偏移 1px，數值是使用者用可調面板實測確認的。
@@ -484,10 +492,22 @@
       width: var(--cfc-colon-dot-size, calc(var(--cfc-u) * 2));
       height: var(--cfc-colon-dot-size, calc(var(--cfc-u) * 2));
       border-radius: 50%;
-      background: rgba(255,255,255,0.85);
-      animation: cfc-colon-blink 1s steps(1) infinite;
+      background: var(--cfc-color-colon);
+      opacity: 1;
+      transition: opacity 0.1s ease; /* 短暫過渡，避免硬切看起來太生硬，但仍然是 JS 事件驅動、不是自跑動畫 */
       pointer-events: none;
       transform: translateY(-50%); /* top 值代表圓心座標，這裡才會真正置中在那個座標上，不是用 top 當方塊上緣 */
+    }
+    /* 冒號亮暗由 JS 監看「秒的個位數」轉輪文字變化來驅動（見 syncColonToTick），
+       不管目前 phase 是不是顯示秒數，內部固定每秒跳一次，用這個當精準的「跳動事件」來源，
+       比自己跑一個沒有對齊真正跳動時間點的 CSS animation 更準確、更有意義的對應關係。 */
+    #cfc-flipdown.cfc-colon-off[data-phase="day-hour"] .rotor-group:nth-child(1)::before,
+    #cfc-flipdown.cfc-colon-off[data-phase="day-hour"] .rotor-group:nth-child(1)::after,
+    #cfc-flipdown.cfc-colon-off[data-phase="hour-min"] .rotor-group:nth-child(2)::before,
+    #cfc-flipdown.cfc-colon-off[data-phase="hour-min"] .rotor-group:nth-child(2)::after,
+    #cfc-flipdown.cfc-colon-off[data-phase="min-sec"] .rotor-group:nth-child(3)::before,
+    #cfc-flipdown.cfc-colon-off[data-phase="min-sec"] .rotor-group:nth-child(3)::after {
+      opacity: 0.15;
     }
     #cfc-flipdown[data-phase="day-hour"] .rotor-group:nth-child(1)::before,
     #cfc-flipdown[data-phase="hour-min"] .rotor-group:nth-child(2)::before,
@@ -499,32 +519,54 @@
     #cfc-flipdown[data-phase="min-sec"] .rotor-group:nth-child(3)::after {
       top: calc(var(--cfc-colon-center, calc(var(--cfc-u) * 36)) + var(--cfc-colon-half-gap, calc(var(--cfc-u) * 6)));
     }
-    @keyframes cfc-colon-blink {
-      0%, 50% { opacity: 1; }
-      50.01%, 100% { opacity: 0.15; }
-    }
 
     /* ===== 我們自己的全螢幕外殼 ===== */
     /* --cfc-u 定義在這一層（外殼），往下會自然繼承給 #cfc-flipdown，兩邊共用同一套網格 */
     #cfc-overlay {
       --cfc-u: 0.41667vw; /* 1 網格單位 = 8px（基準寬度 1920px） */
+      /* 主題色彩變數：預設是深色主題（黑底白字）的數值。
+         .cfc-theme-light 會整組覆蓋成淺色主題，但下面這個 background（全螢幕遮罩本身、
+         蓋住頁面背景的那層）刻意不寫成變數、固定寫死——不管哪個主題，遮罩都要保持不透明黑色。 */
+      --cfc-color-top-bg: #1c1c1e;
+      --cfc-color-top-text: #f5f5f5;
       --cfc-color-bottom-bg: #262628; /* rotor-bottom / rotor-leaf-rear 共用底色 */
+      --cfc-color-bottom-text: #e8e8e8;
+      --cfc-color-title: rgba(255,255,255,0.7);
+      --cfc-color-colon: rgba(255,255,255,0.85);
+      --cfc-color-close-text: rgba(255,255,255,0.8);
+      --cfc-color-close-border: rgba(255,255,255,0.25);
+      --cfc-color-close-bg: rgba(255,255,255,0.06);
+      --cfc-color-close-bg-hover: rgba(255,255,255,0.16);
       position: fixed;
       inset: 0;
       z-index: 2147483647;
-      background: rgba(10, 10, 12, 0.85);
+      background: rgba(10, 10, 12, 0.85); /* 固定不透明黑色，不隨主題改變 */
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
       gap: calc(var(--cfc-u) * 4); /* 32px */
-      -webkit-backdrop-filter: blur(6px);
-      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(16px);
+      backdrop-filter: blur(16px);
+    }
+    /* 淺色主題：整組色彩變數覆蓋成白底黑字，遮罩本身的 background（上面那行）刻意不在這裡覆蓋，
+       維持固定不透明黑色。 */
+    #cfc-overlay.cfc-theme-light {
+      --cfc-color-top-bg: #f5f5f5;
+      --cfc-color-top-text: #1c1c1e;
+      --cfc-color-bottom-bg: #e3e3e5;
+      --cfc-color-bottom-text: #333336;
+      --cfc-color-title: rgba(0,0,0,0.6);
+      --cfc-color-colon: rgba(0,0,0,0.75);
+      --cfc-color-close-text: rgba(0,0,0,0.75);
+      --cfc-color-close-border: rgba(0,0,0,0.2);
+      --cfc-color-close-bg: rgba(0,0,0,0.05);
+      --cfc-color-close-bg-hover: rgba(0,0,0,0.12);
     }
     #cfc-overlay .cfc-title {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       font-size: calc(var(--cfc-u) * 2); /* 16px */
-      color: rgba(255,255,255,0.7);
+      color: var(--cfc-color-title);
       letter-spacing: 0.05em;
     }
     /* 預覽模式（還有額度，不是真的用盡）：標題改綠色，跟真的用盡的樣式做出區別 */
@@ -538,9 +580,9 @@
       width: calc(var(--cfc-u) * 6);  /* 48px */
       height: calc(var(--cfc-u) * 6); /* 48px */
       border-radius: 50%;
-      border: 1px solid rgba(255,255,255,0.25);
-      background: rgba(255,255,255,0.06);
-      color: rgba(255,255,255,0.8);
+      border: 1px solid var(--cfc-color-close-border);
+      background: var(--cfc-color-close-bg);
+      color: var(--cfc-color-close-text);
       font-size: calc(var(--cfc-u) * 3); /* 24px */
       line-height: 1;
       cursor: pointer;
@@ -549,7 +591,7 @@
       justify-content: center;
       transition: background 0.15s ease;
     }
-    #cfc-overlay .cfc-close:hover { background: rgba(255,255,255,0.16); }
+    #cfc-overlay .cfc-close:hover { background: var(--cfc-color-close-bg-hover); }
 
     /* 常駐開啟按鈕：不在 #cfc-overlay 底下（overlay 關閉時會整個被移除），直接掛在 body 上。
        位置基準是右下角，實際位置 = 基準位置 + 可調偏移量（--cfc-reopen-offset-x/y，預設 0），
@@ -613,6 +655,7 @@
     let overlayEl = null;
     let flipdownInstance = null;
     let phaseTimer = null;
+    let colonObserver = null; // 監看秒的個位數轉輪，用真正的跳動事件驅動冒號亮暗，不是自跑動畫
     let lastEpoch = null; // 記錄目前倒數的目標時間，關閉後重新開啟時要沿用同一個目標，不能歸零重算
     let lastIsPreview = false; // 連同預覽模式狀態一起記住，重新開啟時樣式才不會跑掉
     let reopenBtn = null; // 常駐的重新開啟按鈕（不隨 overlay 一起被移除）
@@ -659,6 +702,10 @@
         clearInterval(phaseTimer);
         phaseTimer = null;
       }
+      if (colonObserver) {
+        colonObserver.disconnect();
+        colonObserver = null;
+      }
       if (flipdownInstance && flipdownInstance.countdown) {
         clearInterval(flipdownInstance.countdown);
       }
@@ -681,6 +728,7 @@
       overlayEl = document.createElement("div");
       overlayEl.id = "cfc-overlay";
       if (isPreview) overlayEl.classList.add("cfc-preview");
+      if (CFC_THEME === "light") overlayEl.classList.add("cfc-theme-light");
 
       const title = document.createElement("div");
       title.className = "cfc-title";
@@ -714,9 +762,29 @@
       target.__cfcInstance = flipdownInstance;
 
       applyColonMetrics(); // DOM 已經建好，量測目前實際生效的字型跟版面尺寸，套到冒號的 CSS 變數
+      syncColonToTick(); // 監看秒的個位數轉輪，用真正的跳動事件驅動冒號亮暗
 
       updatePhase(epochSeconds);
       phaseTimer = setInterval(() => updatePhase(epochSeconds), 1000);
+    }
+
+    // 冒號的亮暗切換時間點，綁在「秒的個位數轉輪文字變化」這個事件上——
+    // 不管目前 phase 是不是顯示秒數，flipdown 內部固定每秒跳動一次，這個節點的文字內容都會跟著變，
+    // 用它當精準的跳動事件來源，取代原本自己跑、跟真正跳動時間點沒有對齊關係的 CSS animation。
+    function syncColonToTick() {
+      const flipEl = document.getElementById("cfc-flipdown");
+      const rotors = flipEl && flipEl.querySelectorAll(".rotor");
+      if (!rotors || !rotors.length) return;
+      const secOnes = rotors[rotors.length - 1]; // 秒的個位數那一格
+      const secTop = secOnes.querySelector(".rotor-top");
+      if (!secTop) return;
+
+      let on = true;
+      colonObserver = new MutationObserver(() => {
+        on = !on;
+        flipEl.classList.toggle("cfc-colon-off", !on);
+      });
+      colonObserver.observe(secTop, { childList: true, characterData: true, subtree: true });
     }
 
     // 冒號圓點的大小／位置不用猜測值：實際量測目前生效的字型（可能被使用者的字型替換腳本蓋掉）
