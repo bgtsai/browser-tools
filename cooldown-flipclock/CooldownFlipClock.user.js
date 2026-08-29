@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.15.0
+// @version      1.16.0
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -50,6 +50,11 @@
   // 注意：主題只影響翻頁鐘本體的配色，全螢幕遮罩（蓋住頁面背景的那層）固定維持不透明黑色，不受這個設定影響。
   const CFC_THEME = "dark";
   const THEME_STORAGE_KEY = "cfc_theme";
+
+  // 用量到這個百分比視為「這個視窗已經用盡」——沒有官方文件保證確切門檻，這是保守估計值，
+  // 之前用 95 太寬鬆，7 天視窗剩 5%（其實還能用）也被誤判成用盡，改成 97。
+  // 如果之後又遇到誤判，直接改這個數字，不用去改邏輯本身。
+  const EXHAUST_THRESHOLD = 97;
 
   function getCurrentTheme() {
     if (typeof GM_getValue !== "undefined") {
@@ -833,6 +838,13 @@
       clockEl.className = "flipdown";
       overlayEl.appendChild(clockEl);
 
+      // 重置時間顯示：沿用標題的樣式（cfc-title），外殼本身已經用 flex + gap 控制間距、
+      // align-items:center 自動置中，不需要另外用 JS 量測寬度去手動置中。
+      const resetTimeEl = document.createElement("div");
+      resetTimeEl.className = "cfc-title cfc-reset-time";
+      resetTimeEl.textContent = "額度重計時間於 " + formatResetTime(epochSeconds);
+      overlayEl.appendChild(resetTimeEl);
+
       // 主題切換膠囊：日／月圖示，點擊切換深色／淺色，選擇會持久記住
       const themeToggle = document.createElement("button");
       themeToggle.className = "cfc-theme-toggle";
@@ -895,6 +907,14 @@
     // 膠囊裡圓圈的直徑跟位置不用猜測值：量測膠囊實際渲染出來的 clientHeight（已經是瀏覽器算好的
     // 內部可用高度，不用自己再去扣邊框、猜 box-sizing 怎麼算），直徑＝這個值、邊距＝0（圓圈頂滿
     // 膠囊上下緣），靠右停駐位置＝膠囊實際寬度－直徑。
+    // 格式化重置時間：YYYY年M月D日 星期X HH:MM，用瀏覽器本地時區（跟倒數計時本身用的時間基準一致）
+    function formatResetTime(epochSeconds) {
+      const d = new Date(epochSeconds * 1000);
+      const weekdays = ["日", "一", "二", "三", "四", "五", "六"];
+      const pad2 = (n) => String(n).padStart(2, "0");
+      return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 星期${weekdays[d.getDay()]} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+    }
+
     function applyToggleMetrics() {
       const pill = document.querySelector(".cfc-theme-toggle");
       if (!pill) return;
@@ -1047,9 +1067,6 @@
     const t = typeof resetsAt === "string" ? new Date(resetsAt).getTime() / 1000 : resetsAt;
     return Number.isNaN(t) ? null : t;
   }
-
-  // 用量到這個百分比視為「這個視窗已經用盡」——沒有官方文件保證確切門檻，這是保守估計值
-  const EXHAUST_THRESHOLD = 95;
 
   // 真的被擋住時使用：判斷哪個視窗真的用盡。只有一個用盡就回報那個；
   // 兩個都用盡，回報時間離現在比較遠的那個（因為兩個視窗都要有餘額才能真正送出訊息）。
