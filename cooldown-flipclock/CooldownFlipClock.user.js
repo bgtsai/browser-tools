@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.11.0
+// @version      1.11.1
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -524,9 +524,9 @@
     /* --cfc-u 定義在這一層（外殼），往下會自然繼承給 #cfc-flipdown，兩邊共用同一套網格 */
     #cfc-overlay {
       --cfc-u: 0.41667vw; /* 1 網格單位 = 8px（基準寬度 1920px） */
-      /* 主題色彩變數：預設是深色主題（黑底白字）的數值。
-         .cfc-theme-light 會整組覆蓋成淺色主題，但下面這個 background（全螢幕遮罩本身、
-         蓋住頁面背景的那層）刻意不寫成變數、固定寫死——不管哪個主題，遮罩都要保持不透明黑色。 */
+      /* 顏色變數。--cfc-color-top-*／--cfc-color-bottom-* 是疊在轉輪方塊上的顏色，
+         .cfc-theme-light 會覆蓋這兩組；其餘（標題／冒號／關閉鈕）都疊在下面這個遮罩本身
+         固定不透明黑色的背景上，不隨主題變動，兩個主題共用同一組淺色配色。 */
       --cfc-color-top-bg: #1c1c1e;
       --cfc-color-top-text: #f5f5f5;
       --cfc-color-bottom-bg: #262628; /* rotor-bottom / rotor-leaf-rear 共用底色 */
@@ -551,17 +551,14 @@
     }
     /* 淺色主題：整組色彩變數覆蓋成白底黑字，遮罩本身的 background（上面那行）刻意不在這裡覆蓋，
        維持固定不透明黑色。 */
+    /* 淺色主題只覆蓋「疊在轉輪方塊上」的顏色（上下半的底色與文字色）——
+       標題文字、冒號圓點、關閉鈕，這三個都疊在遮罩本身固定不透明黑色的背景上，
+       不是疊在轉輪的彩色方塊上，所以不該跟著主題切換，維持原本給深色背景看的淺色配色。 */
     #cfc-overlay.cfc-theme-light {
       --cfc-color-top-bg: #f5f5f5;
       --cfc-color-top-text: #1c1c1e;
       --cfc-color-bottom-bg: #e3e3e5;
       --cfc-color-bottom-text: #333336;
-      --cfc-color-title: rgba(0,0,0,0.6);
-      --cfc-color-colon: rgba(0,0,0,0.75);
-      --cfc-color-close-text: rgba(0,0,0,0.75);
-      --cfc-color-close-border: rgba(0,0,0,0.2);
-      --cfc-color-close-bg: rgba(0,0,0,0.05);
-      --cfc-color-close-bg-hover: rgba(0,0,0,0.12);
     }
     #cfc-overlay .cfc-title {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
