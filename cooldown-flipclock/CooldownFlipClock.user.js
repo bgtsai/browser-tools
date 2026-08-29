@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.14.1
+// @version      1.14.2
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -591,6 +591,7 @@
       right: calc(var(--cfc-u) * 4);  /* 32px */
       width: calc(var(--cfc-u) * 6);  /* 48px */
       height: calc(var(--cfc-u) * 6); /* 48px */
+      box-sizing: border-box; /* 跟膠囊一致，明確宣告不依賴頁面全域設定 */
       border-radius: 50%;
       border: 1px solid var(--cfc-color-close-border);
       background: var(--cfc-color-close-bg);
@@ -615,6 +616,7 @@
       right: calc(var(--cfc-u) * 4); /* 32px，跟關閉鈕的 right 相同 */
       width: calc(var(--cfc-u) * 12);  /* 96px */
       height: calc(var(--cfc-u) * 6); /* 48px，跟關閉鈕同高 */
+      box-sizing: border-box; /* 明確宣告，不依賴頁面全域設定——邊框內縮的計算方式要固定，寬高才可預期 */
       border-radius: calc(var(--cfc-u) * 6);
       border: 1px solid var(--cfc-color-close-border);
       background: var(--cfc-color-close-bg);
@@ -625,8 +627,9 @@
     #cfc-overlay .cfc-theme-toggle:hover { background: var(--cfc-color-close-bg-hover); }
     #cfc-overlay .cfc-theme-toggle-thumb {
       position: absolute;
-      top: 5px;
+      top: 50%; /* 用置中定位法，不管膠囊實際框高是多少（不受 box-sizing 差異影響）都一定垂直置中 */
       left: 53px; /* 預設（深色主題）：thumb 停在右側，96-5(邊距)-38(直徑)=53 */
+      transform: translateY(-50%);
       z-index: 2;
       width: 38px;
       height: 38px;
@@ -659,8 +662,9 @@
     /* 未選中那端：淺灰色靜態圖示，淡淡提示切過去會變成什麼 */
     #cfc-overlay .cfc-theme-toggle-ghost {
       position: absolute;
-      top: 5px;
+      top: 50%; /* 同樣改用置中定位法 */
       left: 5px; /* 預設（深色主題）：ghost 顯示在左側（太陽，代表切過去會變淺色） */
+      transform: translateY(-50%);
       z-index: 1;
       width: 38px;
       height: 38px;
