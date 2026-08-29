@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.12.0
+// @version      1.13.0
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -605,17 +605,17 @@
     }
     #cfc-overlay .cfc-close:hover { background: var(--cfc-color-close-bg-hover); }
 
-    /* 主題切換膠囊開關：日／月圖示，放在關閉鈕左側、同一水平線上。
-       兩個圖示固定貼在膠囊左右兩端（z-index 較低），thumb（實心圓）疊在最上層滑動——
-       thumb 滑到哪一側，那一側的圖示就被蓋住看不見，另一側的圖示露出來，是最常見的極簡做法，
-       不用另外處理圖示變色的邏輯。 */
+    /* 主題切換膠囊開關：日／月圖示，放在右上角。
+       邊距對齊規則：右邊距跟關閉鈕的右邊距相同（calc(*4)）；上邊距的數值等於關閉鈕的下邊距（calc(*3)）——
+       也就是這個膠囊距離視窗上緣／右緣，跟關閉鈕距離視窗下緣／右緣，用的是同一組數值。
+       thumb（實心圓＋圖示）疊在最上層滑動，另一側用淺灰色的靜態圖示提示「切過去會變成什麼」。 */
     #cfc-overlay .cfc-theme-toggle {
       position: absolute;
-      bottom: calc(var(--cfc-u) * 3); /* 24px，跟關閉鈕同一水平線 */
-      right: calc(var(--cfc-u) * 13); /* 104px＝關閉鈕右緣32px + 寬48px + 間距24px */
-      width: calc(var(--cfc-u) * 12); /* 96px */
-      height: calc(var(--cfc-u) * 6);  /* 48px，跟關閉鈕同高 */
-      border-radius: calc(var(--cfc-u) * 6);
+      top: calc(var(--cfc-u) * 3);   /* 24px，數值等於關閉鈕的 bottom */
+      right: calc(var(--cfc-u) * 4); /* 32px，跟關閉鈕的 right 相同 */
+      width: calc(var(--cfc-u) * 7);  /* 56px */
+      height: calc(var(--cfc-u) * 3.5); /* 28px */
+      border-radius: calc(var(--cfc-u) * 3.5);
       border: 1px solid var(--cfc-color-close-border);
       background: var(--cfc-color-close-bg);
       cursor: pointer;
@@ -625,36 +625,60 @@
     #cfc-overlay .cfc-theme-toggle:hover { background: var(--cfc-color-close-bg-hover); }
     #cfc-overlay .cfc-theme-toggle-thumb {
       position: absolute;
-      top: 4px;
-      left: 4px;
+      top: 3px;
+      left: 31px; /* 預設（深色主題）：thumb 停在右側 */
       z-index: 2;
-      width: calc(var(--cfc-u) * 6 - 8px); /* 40px：膠囊高 48px 扣掉上下各 4px 邊距 */
-      height: calc(var(--cfc-u) * 6 - 8px);
+      width: 22px;
+      height: 22px;
       border-radius: 50%;
       background: var(--cfc-color-close-text);
-      transition: transform 0.2s ease;
-      /* 預設（深色主題）：thumb 停在右側，裡面顯示月亮圖示 */
-      transform: translateX(calc(var(--cfc-u) * 12 - 8px - (var(--cfc-u) * 6 - 8px)));
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: left 0.2s ease;
     }
-    /* 淺色主題啟用時：thumb 滑到左側，裡面顯示太陽圖示 */
+    #cfc-overlay .cfc-theme-toggle-thumb svg { width: 12px; height: 12px; }
+    /* 淺色主題啟用時：thumb 滑到左側 */
     #cfc-overlay.cfc-theme-light .cfc-theme-toggle-thumb {
-      transform: translateX(0);
+      left: 3px;
     }
-    /* 圖示畫在 thumb 裡面、跟著滑動：滑到哪一側就主動顯示對應圖示，用 opacity 切換取代固定位置被蓋住，語意才正確 */
-    #cfc-overlay .cfc-theme-toggle-icon-sun,
-    #cfc-overlay .cfc-theme-toggle-icon-moon {
+    #cfc-overlay .cfc-theme-toggle-thumb .cfc-theme-toggle-icon-sun,
+    #cfc-overlay .cfc-theme-toggle-thumb .cfc-theme-toggle-icon-moon {
+      color: var(--cfc-color-close-bg); /* thumb 底色偏淺，圖示改用遮罩背景色，在 thumb 上才有對比 */
+      opacity: 0;
       position: absolute;
       top: 50%;
       left: 50%;
       transform: translate(-50%, -50%);
-      color: var(--cfc-color-close-bg); /* thumb 底色偏淺，圖示改用遮罩背景色，在 thumb 上才有對比 */
-      opacity: 0;
       transition: opacity 0.15s ease;
-      pointer-events: none;
     }
-    #cfc-overlay .cfc-theme-toggle-icon-moon { opacity: 1; } /* 深色主題（預設）：thumb 顯示月亮 */
-    #cfc-overlay.cfc-theme-light .cfc-theme-toggle-icon-sun { opacity: 1; }
-    #cfc-overlay.cfc-theme-light .cfc-theme-toggle-icon-moon { opacity: 0; }
+    #cfc-overlay .cfc-theme-toggle-thumb .cfc-theme-toggle-icon-moon { opacity: 1; } /* 深色主題（預設）：thumb 顯示月亮 */
+    #cfc-overlay.cfc-theme-light .cfc-theme-toggle-thumb .cfc-theme-toggle-icon-sun { opacity: 1; }
+    #cfc-overlay.cfc-theme-light .cfc-theme-toggle-thumb .cfc-theme-toggle-icon-moon { opacity: 0; }
+    /* 未選中那端：淺灰色靜態圖示，淡淡提示切過去會變成什麼 */
+    #cfc-overlay .cfc-theme-toggle-ghost {
+      position: absolute;
+      top: 3px;
+      left: 3px; /* 預設（深色主題）：ghost 顯示在左側（太陽，代表切過去會變淺色） */
+      z-index: 1;
+      width: 22px;
+      height: 22px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--cfc-color-close-text);
+      opacity: 0.28;
+      pointer-events: none;
+      transition: left 0.2s ease;
+    }
+    #cfc-overlay .cfc-theme-toggle-ghost svg { width: 12px; height: 12px; }
+    #cfc-overlay.cfc-theme-light .cfc-theme-toggle-ghost {
+      left: 31px; /* 淺色主題啟用時：ghost 換到右側，顯示月亮（代表切回去會變深色） */
+    }
+    #cfc-overlay .cfc-theme-toggle-ghost .cfc-theme-toggle-icon-sun { display: none; }
+    #cfc-overlay.cfc-theme-light .cfc-theme-toggle-ghost .cfc-theme-toggle-icon-sun { display: block; }
+    #cfc-overlay .cfc-theme-toggle-ghost .cfc-theme-toggle-icon-moon { display: block; }
+    #cfc-overlay.cfc-theme-light .cfc-theme-toggle-ghost .cfc-theme-toggle-icon-moon { display: none; }
 
     /* 常駐開啟按鈕：不在 #cfc-overlay 底下（overlay 關閉時會整個被移除），直接掛在 body 上。
        位置基準是右下角，實際位置 = 基準位置 + 可調偏移量（--cfc-reopen-offset-x/y，預設 0），
@@ -705,10 +729,7 @@
       #cfc-flipdown[data-phase="day-hour"] .rotor-group:nth-child(2),
       #cfc-flipdown[data-phase="hour-min"] .rotor-group:nth-child(3) { padding-right: 0; }
       #cfc-overlay .cfc-close { width: 40px; height: 40px; font-size: 16px; bottom: 16px; right: 16px; }
-      #cfc-overlay .cfc-theme-toggle { width: 76px; height: 40px; bottom: 16px; right: 76px; }
-      #cfc-overlay .cfc-theme-toggle-thumb { width: 32px; height: 32px; }
-      #cfc-overlay.cfc-theme-light .cfc-theme-toggle-thumb { transform: translateX(0); }
-      #cfc-overlay:not(.cfc-theme-light) .cfc-theme-toggle-thumb { transform: translateX(36px); }
+      #cfc-overlay .cfc-theme-toggle { top: 16px; right: 16px; }
       #cfc-overlay .cfc-title { font-size: 16px; }
       #cfc-overlay { gap: 24px; }
     }
@@ -807,9 +828,13 @@
       themeToggle.className = "cfc-theme-toggle";
       themeToggle.setAttribute("aria-label", "切換深色／淺色主題");
       themeToggle.innerHTML =
+        '<span class="cfc-theme-toggle-ghost">' +
+        '<svg class="cfc-theme-toggle-icon-sun" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2.5v3M12 18.5v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2.5 12h3M18.5 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>' +
+        '<svg class="cfc-theme-toggle-icon-moon" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5Z"/></svg>' +
+        "</span>" +
         '<span class="cfc-theme-toggle-thumb">' +
-        '<svg class="cfc-theme-toggle-icon-sun" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2.5v3M12 18.5v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2.5 12h3M18.5 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>' +
-        '<svg class="cfc-theme-toggle-icon-moon" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5Z"/></svg>' +
+        '<svg class="cfc-theme-toggle-icon-sun" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2.5v3M12 18.5v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2.5 12h3M18.5 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>' +
+        '<svg class="cfc-theme-toggle-icon-moon" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5Z"/></svg>' +
         "</span>";
       themeToggle.addEventListener("click", () => {
         const next = overlayEl.classList.toggle("cfc-theme-light") ? "light" : "dark";
