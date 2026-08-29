@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.16.0
+// @version      1.16.1
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -51,10 +51,11 @@
   const CFC_THEME = "dark";
   const THEME_STORAGE_KEY = "cfc_theme";
 
-  // 用量到這個百分比視為「這個視窗已經用盡」——沒有官方文件保證確切門檻，這是保守估計值，
-  // 之前用 95 太寬鬆，7 天視窗剩 5%（其實還能用）也被誤判成用盡，改成 97。
-  // 如果之後又遇到誤判，直接改這個數字，不用去改邏輯本身。
-  const EXHAUST_THRESHOLD = 97;
+  // 用量到這個百分比視為「這個視窗已經用盡」——沒有官方文件保證確切門檻，這是保守估計值。
+  // 短週期（five_hour）跟長週期（seven_day）各自獨立一個參數，不共用同一個數字——
+  // 兩個視窗的特性可能不一樣，之後如果只有其中一個誤判，可以只調那一個，不會互相牽動。
+  const EXHAUST_THRESHOLD_SHORT = 97; // 短週期（five_hour）
+  const EXHAUST_THRESHOLD_LONG = 97;  // 長週期（seven_day）
 
   function getCurrentTheme() {
     if (typeof GM_getValue !== "undefined") {
@@ -590,6 +591,12 @@
     #cfc-overlay.cfc-preview .cfc-title {
       color: rgba(74, 222, 128, 0.9); /* 柔和的綠色 */
     }
+    /* 重置時間文字：外殼的 flex gap 是對所有子元素一視同仁的固定值，但「標題→色塊」這段距離
+       其實還隔著「時/分」標籤本身的高度（112px），「色塊→這段文字」中間沒有對應的東西，
+       兩邊視覺間距天生不對稱。額外補上等於標籤高度的 margin-top，讓兩邊看起來一樣寬。 */
+    #cfc-overlay .cfc-reset-time {
+      margin-top: calc(var(--cfc-u) * 14); /* 112px，等於 .rotor-group-heading:before 的高度 */
+    }
     #cfc-overlay .cfc-close {
       position: absolute;
       bottom: calc(var(--cfc-u) * 3); /* 24px */
@@ -741,6 +748,7 @@
       #cfc-overlay .cfc-close { width: 40px; height: 40px; font-size: 16px; bottom: 16px; right: 16px; }
       #cfc-overlay .cfc-theme-toggle { top: 16px; right: 16px; }
       #cfc-overlay .cfc-title { font-size: 16px; }
+      #cfc-overlay .cfc-reset-time { margin-top: 24px; }
       #cfc-overlay { gap: 24px; }
     }
   `;
@@ -842,7 +850,7 @@
       // align-items:center 自動置中，不需要另外用 JS 量測寬度去手動置中。
       const resetTimeEl = document.createElement("div");
       resetTimeEl.className = "cfc-title cfc-reset-time";
-      resetTimeEl.textContent = "額度重計時間於 " + formatResetTime(epochSeconds);
+      resetTimeEl.textContent = "額度重計時間 " + formatResetTime(epochSeconds);
       overlayEl.appendChild(resetTimeEl);
 
       // 主題切換膠囊：日／月圖示，點擊切換深色／淺色，選擇會持久記住
@@ -1075,8 +1083,8 @@
   function pickBlockedEpoch(windows) {
     const fh = windows.five_hour;
     const sd = windows.seven_day;
-    const fhExhausted = fh && fh.utilization != null && fh.utilization >= EXHAUST_THRESHOLD;
-    const sdExhausted = sd && sd.utilization != null && sd.utilization >= EXHAUST_THRESHOLD;
+    const fhExhausted = fh && fh.utilization != null && fh.utilization >= EXHAUST_THRESHOLD_SHORT;
+    const sdExhausted = sd && sd.utilization != null && sd.utilization >= EXHAUST_THRESHOLD_LONG;
     const fhEpoch = fh ? toEpoch(fh.resets_at) : null;
     const sdEpoch = sd ? toEpoch(sd.resets_at) : null;
     if (fhExhausted && sdExhausted) {
@@ -1125,7 +1133,7 @@
       return;
     }
     const fh = windows.five_hour;
-    const looksBlocked = fh && fh.utilization != null && fh.utilization >= EXHAUST_THRESHOLD;
+    const looksBlocked = fh && fh.utilization != null && fh.utilization >= EXHAUST_THRESHOLD_SHORT;
     const epoch = looksBlocked ? pickBlockedEpoch(windows) : pickPreviewEpoch(windows);
     if (epoch == null) {
       alert("[Claude額度冷卻翻頁鐘] 查得到用量資料，但沒有 resets_at 可用。");
