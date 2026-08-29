@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.14.2
+// @version      1.14.3
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -608,15 +608,16 @@
 
     /* 主題切換膠囊開關：日／月圖示，放在右上角。
        邊距對齊規則：右邊距跟關閉鈕的右邊距相同（calc(*4)）；上邊距的數值等於關閉鈕的下邊距（calc(*3)）。
-       尺寸：高度比照關閉鈕（48px），維持 2:1 比例，寬度 96px；不再跟關閉鈕擠在同一排，放大後更好點擊、看得更清楚。
-       thumb（實心圓＋圖示）疊在最上層滑動，另一側用淺灰色的靜態圖示提示「切過去會變成什麼」。 */
+       尺寸：高度比照關閉鈕（48px），維持 2:1 比例，寬度 96px。
+       thumb（實心圓＋圖示）疊在最上層滑動，另一側用淺灰色的靜態圖示提示「切過去會變成什麼」——
+       這是 mockup 裡驗證過沒問題的結構，直接套用，不要再自己重新設計。 */
     #cfc-overlay .cfc-theme-toggle {
       position: absolute;
       top: calc(var(--cfc-u) * 3);   /* 24px，數值等於關閉鈕的 bottom */
       right: calc(var(--cfc-u) * 4); /* 32px，跟關閉鈕的 right 相同 */
       width: calc(var(--cfc-u) * 12);  /* 96px */
       height: calc(var(--cfc-u) * 6); /* 48px，跟關閉鈕同高 */
-      box-sizing: border-box; /* 明確宣告，不依賴頁面全域設定——邊框內縮的計算方式要固定，寬高才可預期 */
+      box-sizing: border-box;
       border-radius: calc(var(--cfc-u) * 6);
       border: 1px solid var(--cfc-color-close-border);
       background: var(--cfc-color-close-bg);
@@ -627,8 +628,10 @@
     #cfc-overlay .cfc-theme-toggle:hover { background: var(--cfc-color-close-bg-hover); }
     #cfc-overlay .cfc-theme-toggle-thumb {
       position: absolute;
-      top: 50%; /* 用置中定位法，不管膠囊實際框高是多少（不受 box-sizing 差異影響）都一定垂直置中 */
-      left: 53px; /* 預設（深色主題）：thumb 停在右側，96-5(邊距)-38(直徑)=53 */
+      top: 50%;
+      left: 51px; /* 預設（深色主題）：thumb 停在右側。box-sizing:border-box 讓 1px 邊框往內縮，
+                     實際可用內部寬度是 96-2(左右各1px邊框)=94px，94-5(邊距)-38(直徑)=51，
+                     不是單純用外框 96px 去算的 53（那樣會多推 2px，貼近邊框） */
       transform: translateY(-50%);
       z-index: 2;
       width: 38px;
@@ -647,8 +650,7 @@
     }
     #cfc-overlay .cfc-theme-toggle-thumb .cfc-theme-toggle-icon-sun,
     #cfc-overlay .cfc-theme-toggle-thumb .cfc-theme-toggle-icon-moon {
-      color: #1c1c1e; /* 固定深色，thumb 本身是淺色實心圓，圖示要用深色才有對比；
-                          之前誤用 var(--cfc-color-close-bg)，那個變數實際上是近乎透明的白色，等於沒有對比 */
+      color: #1c1c1e; /* 固定深色，thumb 本身是淺色實心圓，圖示要用深色才有對比 */
       opacity: 0;
       position: absolute;
       top: 50%;
@@ -662,7 +664,7 @@
     /* 未選中那端：淺灰色靜態圖示，淡淡提示切過去會變成什麼 */
     #cfc-overlay .cfc-theme-toggle-ghost {
       position: absolute;
-      top: 50%; /* 同樣改用置中定位法 */
+      top: 50%;
       left: 5px; /* 預設（深色主題）：ghost 顯示在左側（太陽，代表切過去會變淺色） */
       transform: translateY(-50%);
       z-index: 1;
@@ -678,7 +680,7 @@
     }
     #cfc-overlay .cfc-theme-toggle-ghost svg { width: 20px; height: 20px; }
     #cfc-overlay.cfc-theme-light .cfc-theme-toggle-ghost {
-      left: 53px; /* 淺色主題啟用時：ghost 換到右側，顯示月亮（代表切回去會變深色） */
+      left: 51px; /* 淺色主題啟用時：ghost 換到右側，顯示月亮（代表切回去會變深色）；同樣扣掉邊框內縮 */
     }
     #cfc-overlay .cfc-theme-toggle-ghost .cfc-theme-toggle-icon-sun { display: block; } /* 深色主題（預設）：ghost 顯示太陽，代表切過去會變淺色 */
     #cfc-overlay.cfc-theme-light .cfc-theme-toggle-ghost .cfc-theme-toggle-icon-sun { display: none; }
