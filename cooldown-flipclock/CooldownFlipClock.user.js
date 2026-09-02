@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.18.1
+// @version      1.18.2
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -525,14 +525,17 @@
          起點由 JS 在每次 _tick（翻頁鐘跳秒的同一時刻）重新啟動這段 animation 來校準——
          見 CFC 裡設定的 flipdownInstance._onTick，這樣冒號跟數字跳動是同一個事件驅動的，
          要卡一起卡，不會像兩個各自獨立的計時器那樣慢慢漂移。 */
-      animation: var(--cfc-colon-anim, cfc-colon-blink) 1s steps(1, end) infinite;
+      animation: var(--cfc-colon-anim, cfc-colon-blink) 1s linear infinite;
     }
     /* _tick 觸發的瞬間＝翻頁動畫開始的時刻，動畫長度 500ms 剛好佔每一輪的前半段（0~50%），
-       後半段才是翻完靜止的狀態。所以前半暗、後半亮，就是「動畫進行中不亮、靜止時才亮」。 */
+       後半段才是翻完靜止的狀態。所以前半暗、後半亮，就是「動畫進行中不亮、靜止時才亮」。
+       用「49.99%/50% 相鄰兩個關鍵影格」做硬切，不用 steps()——steps(1,end) 會把整段壓成單一階段、
+       讓中間的 50% 完全失效（整秒都停在起始值，最後一刻才跳），是之前改了沒效果的原因。 */
     @keyframes cfc-colon-blink {
-      0%   { opacity: 0.15; }
-      50%  { opacity: 1; }
-      100% { opacity: 1; }
+      0%      { opacity: 0.15; }
+      49.99%  { opacity: 0.15; }
+      50%     { opacity: 1; }
+      100%    { opacity: 1; }
     }
     #cfc-flipdown[data-phase="day-hour"] .rotor-group:nth-child(1)::before,
     #cfc-flipdown[data-phase="hour-min"] .rotor-group:nth-child(2)::before,
