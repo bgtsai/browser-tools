@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.16.1
+// @version      1.17.0
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -417,6 +417,10 @@
       position: absolute;
       width: calc(var(--cfc-u) * 30);  /* 240px */
       height: calc(var(--cfc-u) * 22); /* 176px */
+      /* 永久停留在 GPU 合成層，跟 rotor-leaf（因為有 transform + preserve-3d 而被提升到合成層的翻頁葉片）
+         用同一種渲染路徑——兩種路徑對文字的次像素定位處理方式不同，動畫結束時從葉片切換回這裡顯示，
+         文字落點會相差不到 1px，肉眼看起來就是往上跳一下。統一渲染路徑後就不會有這個落差。 */
+      transform: translateZ(0);
     }
     #cfc-flipdown .rotor-leaf {
       z-index: 1;
