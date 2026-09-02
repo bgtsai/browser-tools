@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.17.1
+// @version      1.18.0
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -296,6 +296,7 @@
                 (a -= 60 * this.clockValues.m),
                 (this.clockValues.s = b(a)),
                 this._updateClockValues(),
+                this._onTick && this._onTick(),
                 this._hasCountdownEnded();
             },
           },
@@ -518,21 +519,18 @@
       height: var(--cfc-colon-dot-size, calc(var(--cfc-u) * 2));
       border-radius: 50%;
       background: var(--cfc-color-colon);
-      opacity: 1;
-      transition: opacity 0.1s ease; /* 短暫過渡，避免硬切看起來太生硬，但仍然是 JS 事件驅動、不是自跑動畫 */
       pointer-events: none;
       transform: translateY(-50%); /* top 值代表圓心座標，這裡才會真正置中在那個座標上，不是用 top 當方塊上緣 */
+      /* 閃爍改用 CSS animation：交給瀏覽器合成執行緒跑，主執行緒忙碌時不會被延後、誤差也不會累積。
+         起點由 JS 在每次 _tick（翻頁鐘跳秒的同一時刻）重新啟動這段 animation 來校準——
+         見 CFC 裡設定的 flipdownInstance._onTick，這樣冒號跟數字跳動是同一個事件驅動的，
+         要卡一起卡，不會像兩個各自獨立的計時器那樣慢慢漂移。 */
+      animation: var(--cfc-colon-anim, cfc-colon-blink) 1s steps(1, end) infinite;
     }
-    /* 冒號亮暗由 JS 監看「秒的個位數」轉輪文字變化來驅動（見 syncColonToTick），
-       不管目前 phase 是不是顯示秒數，內部固定每秒跳一次，用這個當精準的「跳動事件」來源，
-       比自己跑一個沒有對齊真正跳動時間點的 CSS animation 更準確、更有意義的對應關係。 */
-    #cfc-flipdown.cfc-colon-off[data-phase="day-hour"] .rotor-group:nth-child(1)::before,
-    #cfc-flipdown.cfc-colon-off[data-phase="day-hour"] .rotor-group:nth-child(1)::after,
-    #cfc-flipdown.cfc-colon-off[data-phase="hour-min"] .rotor-group:nth-child(2)::before,
-    #cfc-flipdown.cfc-colon-off[data-phase="hour-min"] .rotor-group:nth-child(2)::after,
-    #cfc-flipdown.cfc-colon-off[data-phase="min-sec"] .rotor-group:nth-child(3)::before,
-    #cfc-flipdown.cfc-colon-off[data-phase="min-sec"] .rotor-group:nth-child(3)::after {
-      opacity: 0.15;
+    @keyframes cfc-colon-blink {
+      0%   { opacity: 0.15; }
+      50%  { opacity: 1; }
+      100% { opacity: 0.15; }
     }
     #cfc-flipdown[data-phase="day-hour"] .rotor-group:nth-child(1)::before,
     #cfc-flipdown[data-phase="hour-min"] .rotor-group:nth-child(2)::before,
@@ -765,7 +763,6 @@
     let overlayEl = null;
     let flipdownInstance = null;
     let phaseTimer = null;
-    let colonTimer = null;
     let lastEpoch = null; // 記錄目前倒數的目標時間，關閉後重新開啟時要沿用同一個目標，不能歸零重算
     let lastIsPreview = false; // 連同預覽模式狀態一起記住，重新開啟時樣式才不會跑掉
     let reopenBtn = null; // 常駐的重新開啟按鈕（不隨 overlay 一起被移除）
@@ -811,10 +808,6 @@
       if (phaseTimer) {
         clearInterval(phaseTimer);
         phaseTimer = null;
-      }
-      if (colonTimer) {
-        clearInterval(colonTimer);
-        colonTimer = null;
       }
       if (flipdownInstance && flipdownInstance.countdown) {
         clearInterval(flipdownInstance.countdown);
@@ -903,15 +896,17 @@
       updatePhase(epochSeconds);
       phaseTimer = setInterval(() => updatePhase(epochSeconds), 1000);
 
-      // 冒號閃爍：獨立的 500ms 計時器，亮 500ms、暗 500ms，合計一秒一輪——
-      // 之前誤把「每 1000ms 切換一次」當成「一秒一輪」，但那樣算出來的是亮一秒、暗一秒，合計兩秒一輪，是錯的。
-      let colonOn = false; // 初始為暗，讓亮/暗的時間點跟翻頁動作的相對關係跟原本對調
-      clockEl.classList.toggle("cfc-colon-off", !colonOn); // 開場就套用初始狀態，不用等 500ms 後第一次觸發
-      colonTimer = setInterval(() => {
-        colonOn = !colonOn;
-        const flipEl = document.getElementById("cfc-flipdown");
-        if (flipEl) flipEl.classList.toggle("cfc-colon-off", !colonOn);
-      }, 500);
+      // 冒號閃爍跟數字跳動同步：掛在函式庫內部的 _tick（跳秒的核心函式，我們在 vendored 原始碼裡
+      // 加了這個掛鉤點）上，每次跳秒就把 CSS animation 從頭重新播放一次。
+      // 為什麼要重啟：animation 本身由瀏覽器合成執行緒跑、節奏穩定，但如果放著不管，它的起點跟
+      // 數字跳動的時間點是各自獨立的，久了會漂移；每秒重新對時一次，兩者就永遠是同一個事件驅動的。
+      flipdownInstance._onTick = () => {
+        const el = document.getElementById("cfc-flipdown");
+        if (!el) return;
+        el.style.setProperty("--cfc-colon-anim", "none");
+        void el.offsetWidth; // 強制瀏覽器立刻重算樣式，animation 才會真的從頭開始，不是被合併掉
+        el.style.removeProperty("--cfc-colon-anim");
+      };
     }
 
     // 冒號圓點的大小／位置不用猜測值：實際量測目前生效的字型（可能被使用者的字型替換腳本蓋掉）
