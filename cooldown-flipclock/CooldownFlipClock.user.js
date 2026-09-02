@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.18.2
+// @version      1.18.3
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -521,17 +521,33 @@
       background: var(--cfc-color-colon);
       pointer-events: none;
       transform: translateY(-50%); /* top 值代表圓心座標，這裡才會真正置中在那個座標上，不是用 top 當方塊上緣 */
-      /* 閃爍改用 CSS animation：交給瀏覽器合成執行緒跑，主執行緒忙碌時不會被延後、誤差也不會累積。
-         起點由 JS 在每次 _tick（翻頁鐘跳秒的同一時刻）重新啟動這段 animation 來校準——
-         見 CFC 裡設定的 flipdownInstance._onTick，這樣冒號跟數字跳動是同一個事件驅動的，
-         要卡一起卡，不會像兩個各自獨立的計時器那樣慢慢漂移。 */
-      animation: var(--cfc-colon-anim, cfc-colon-blink) 1s linear infinite;
+      /* 閃爍用 CSS animation：交給瀏覽器合成執行緒跑，主執行緒忙碌時不會被延後、誤差也不會累積。
+         起點由 JS 在每次 _tick（翻頁鐘跳秒的同一時刻）切換 class 來校準，見 flipdownInstance._onTick。
+         為什麼要準備兩組名字不同、內容相同的動畫：瀏覽器只有在「動畫名稱真的改變」時才會從頭播放；
+         之前試過用 CSS 變數把 animation-name 設成 none 再還原，那被當成同一個動畫的屬性變更，
+         播放進度會繼續走、不會重啟，所以完全沒有達到對時的效果。 */
+      animation: cfc-colon-blink-a 1s linear infinite;
+    }
+    #cfc-flipdown.cfc-colon-b[data-phase="day-hour"] .rotor-group:nth-child(1)::before,
+    #cfc-flipdown.cfc-colon-b[data-phase="day-hour"] .rotor-group:nth-child(1)::after,
+    #cfc-flipdown.cfc-colon-b[data-phase="hour-min"] .rotor-group:nth-child(2)::before,
+    #cfc-flipdown.cfc-colon-b[data-phase="hour-min"] .rotor-group:nth-child(2)::after,
+    #cfc-flipdown.cfc-colon-b[data-phase="min-sec"] .rotor-group:nth-child(3)::before,
+    #cfc-flipdown.cfc-colon-b[data-phase="min-sec"] .rotor-group:nth-child(3)::after {
+      animation-name: cfc-colon-blink-b;
     }
     /* _tick 觸發的瞬間＝翻頁動畫開始的時刻，動畫長度 500ms 剛好佔每一輪的前半段（0~50%），
        後半段才是翻完靜止的狀態。所以前半暗、後半亮，就是「動畫進行中不亮、靜止時才亮」。
        用「49.99%/50% 相鄰兩個關鍵影格」做硬切，不用 steps()——steps(1,end) 會把整段壓成單一階段、
-       讓中間的 50% 完全失效（整秒都停在起始值，最後一刻才跳），是之前改了沒效果的原因。 */
-    @keyframes cfc-colon-blink {
+       讓中間的 50% 完全失效（整秒都停在起始值，最後一刻才跳）。
+       兩組 keyframes 內容必須完全一樣，差別只在名稱，純粹是為了觸發「重新播放」。 */
+    @keyframes cfc-colon-blink-a {
+      0%      { opacity: 0.15; }
+      49.99%  { opacity: 0.15; }
+      50%     { opacity: 1; }
+      100%    { opacity: 1; }
+    }
+    @keyframes cfc-colon-blink-b {
       0%      { opacity: 0.15; }
       49.99%  { opacity: 0.15; }
       50%     { opacity: 1; }
@@ -902,15 +918,12 @@
       phaseTimer = setInterval(() => updatePhase(epochSeconds), 1000);
 
       // 冒號閃爍跟數字跳動同步：掛在函式庫內部的 _tick（跳秒的核心函式，我們在 vendored 原始碼裡
-      // 加了這個掛鉤點）上，每次跳秒就把 CSS animation 從頭重新播放一次。
-      // 為什麼要重啟：animation 本身由瀏覽器合成執行緒跑、節奏穩定，但如果放著不管，它的起點跟
-      // 數字跳動的時間點是各自獨立的，久了會漂移；每秒重新對時一次，兩者就永遠是同一個事件驅動的。
+      // 加了這個掛鉤點）上，每次跳秒就在兩組動畫之間切換，強制從頭播放一次。
+      // 為什麼要這樣做：animation 本身由瀏覽器合成執行緒跑、節奏穩定，但起點如果不校準，
+      // 跟數字跳動的相對關係是隨機的；每秒切換一次動畫名稱，播放起點就永遠對齊跳秒的那一刻。
       flipdownInstance._onTick = () => {
         const el = document.getElementById("cfc-flipdown");
-        if (!el) return;
-        el.style.setProperty("--cfc-colon-anim", "none");
-        void el.offsetWidth; // 強制瀏覽器立刻重算樣式，animation 才會真的從頭開始，不是被合併掉
-        el.style.removeProperty("--cfc-colon-anim");
+        if (el) el.classList.toggle("cfc-colon-b");
       };
     }
 
