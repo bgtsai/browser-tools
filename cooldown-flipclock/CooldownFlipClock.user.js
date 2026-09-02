@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.18.3
+// @version      1.18.4
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -536,22 +536,26 @@
     #cfc-flipdown.cfc-colon-b[data-phase="min-sec"] .rotor-group:nth-child(3)::after {
       animation-name: cfc-colon-blink-b;
     }
-    /* _tick 觸發的瞬間＝翻頁動畫開始的時刻，動畫長度 500ms 剛好佔每一輪的前半段（0~50%），
-       後半段才是翻完靜止的狀態。所以前半暗、後半亮，就是「動畫進行中不亮、靜止時才亮」。
+    /* 實際時序（讀 vendored 原始碼 _updateClockValues 確認）：_tick 觸發後，函式庫是用
+       setTimeout(..., 500) 延遲半秒才加上 flipped class 開始翻頁動畫的。所以一輪 1 秒裡：
+         0~500ms   ＝ 畫面靜止（動畫還沒開始）
+         500~1000ms＝ 翻頁動畫進行中
+       要「動畫進行中不亮、靜止時才亮」，就是前半亮、後半暗。
+       （之前誤以為 _tick 觸發即動畫開始，把亮暗寫反了，才會一直是相反的結果。）
        用「49.99%/50% 相鄰兩個關鍵影格」做硬切，不用 steps()——steps(1,end) 會把整段壓成單一階段、
        讓中間的 50% 完全失效（整秒都停在起始值，最後一刻才跳）。
        兩組 keyframes 內容必須完全一樣，差別只在名稱，純粹是為了觸發「重新播放」。 */
     @keyframes cfc-colon-blink-a {
-      0%      { opacity: 0.15; }
-      49.99%  { opacity: 0.15; }
-      50%     { opacity: 1; }
-      100%    { opacity: 1; }
+      0%      { opacity: 1; }
+      49.99%  { opacity: 1; }
+      50%     { opacity: 0.15; }
+      100%    { opacity: 0.15; }
     }
     @keyframes cfc-colon-blink-b {
-      0%      { opacity: 0.15; }
-      49.99%  { opacity: 0.15; }
-      50%     { opacity: 1; }
-      100%    { opacity: 1; }
+      0%      { opacity: 1; }
+      49.99%  { opacity: 1; }
+      50%     { opacity: 0.15; }
+      100%    { opacity: 0.15; }
     }
     #cfc-flipdown[data-phase="day-hour"] .rotor-group:nth-child(1)::before,
     #cfc-flipdown[data-phase="hour-min"] .rotor-group:nth-child(2)::before,
