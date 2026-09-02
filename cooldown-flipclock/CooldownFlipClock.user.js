@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.17.0
+// @version      1.17.1
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -905,7 +905,8 @@
 
       // 冒號閃爍：獨立的 500ms 計時器，亮 500ms、暗 500ms，合計一秒一輪——
       // 之前誤把「每 1000ms 切換一次」當成「一秒一輪」，但那樣算出來的是亮一秒、暗一秒，合計兩秒一輪，是錯的。
-      let colonOn = true;
+      let colonOn = false; // 初始為暗，讓亮/暗的時間點跟翻頁動作的相對關係跟原本對調
+      clockEl.classList.toggle("cfc-colon-off", !colonOn); // 開場就套用初始狀態，不用等 500ms 後第一次觸發
       colonTimer = setInterval(() => {
         colonOn = !colonOn;
         const flipEl = document.getElementById("cfc-flipdown");
