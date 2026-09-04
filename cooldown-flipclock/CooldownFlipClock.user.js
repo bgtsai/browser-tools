@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.20.0
+// @version      1.20.1
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -342,7 +342,7 @@
                 }),
                 d
                   ? (a.call(this), b.call(this))
-                  : (setTimeout(a.bind(this), 560), setTimeout(b.bind(this), 500)),
+                  : (setTimeout(a.bind(this), 650), setTimeout(b.bind(this), 500)),
                 (this.prevClockValuesAsString = this.clockValuesAsString);
             },
           },
