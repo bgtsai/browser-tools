@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.18.4
+// @version      1.19.0
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -410,6 +410,8 @@
       font-size: calc(var(--cfc-u) * 32); /* 256px */
       text-align: center;
       perspective: calc(var(--cfc-u) * 100); /* 800px（原 288px）——加大透視距離，減少翻頁時「靠近放大」的畸變感 */
+      transform-style: preserve-3d; /* 讓底層(rotor-top/bottom)跟翻動葉片都待在同一個 3D 座標系，
+                                       前後關係由單一套規則決定，不會兩套機制打架 */
     }
     #cfc-flipdown .rotor:last-child { margin-right: 0; }
     #cfc-flipdown .rotor-top,
@@ -418,9 +420,11 @@
       position: absolute;
       width: calc(var(--cfc-u) * 30);  /* 240px */
       height: calc(var(--cfc-u) * 22); /* 176px */
-      /* 永久停留在 GPU 合成層，跟 rotor-leaf（因為有 transform + preserve-3d 而被提升到合成層的翻頁葉片）
-         用同一種渲染路徑——兩種路徑對文字的次像素定位處理方式不同，動畫結束時從葉片切換回這裡顯示，
-         文字落點會相差不到 1px，肉眼看起來就是往上跳一下。統一渲染路徑後就不會有這個落差。 */
+      /* 統一 3D 空間：父層 .rotor 有 transform-style:preserve-3d，這裡跟葉片都待在同一個 3D 座標系，
+         前後關係純粹由 Z 軸位置決定，不會出現「z-index 平面規則」跟「3D 深度」兩套機制同時作用、
+         在動畫啟動瞬間判斷不一致而讓底層短暫穿透到葉片前面的情況。
+         translateZ(0) 同時也解決了另一個問題：讓這裡跟葉片用同一種渲染路徑，
+         文字的次像素落點一致，動畫結束切換顯示時不會往上跳一下。 */
       transform: translateZ(0);
     }
     #cfc-flipdown .rotor-leaf {
@@ -556,6 +560,15 @@
       49.99%  { opacity: 1; }
       50%     { opacity: 0.15; }
       100%    { opacity: 0.15; }
+    }
+    /* 有顯示秒數（min-sec）時冒號常亮不閃爍：秒數本身每秒都在跳動，已經有足夠的「還在動」的回饋，
+       冒號再閃就顯得雜亂。閃爍只在天+時、時+分這兩個看不到秒數、畫面長時間靜止的 phase 才需要。 */
+    #cfc-flipdown[data-phase="min-sec"] .rotor-group:nth-child(3)::before,
+    #cfc-flipdown[data-phase="min-sec"] .rotor-group:nth-child(3)::after,
+    #cfc-flipdown.cfc-colon-b[data-phase="min-sec"] .rotor-group:nth-child(3)::before,
+    #cfc-flipdown.cfc-colon-b[data-phase="min-sec"] .rotor-group:nth-child(3)::after {
+      animation: none;
+      opacity: 1;
     }
     #cfc-flipdown[data-phase="day-hour"] .rotor-group:nth-child(1)::before,
     #cfc-flipdown[data-phase="hour-min"] .rotor-group:nth-child(2)::before,
