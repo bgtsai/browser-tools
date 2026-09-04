@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.20.1
+// @version      1.21.0
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -623,6 +623,12 @@
       --cfc-color-top-text: #1c1c1e;
       --cfc-color-bottom-bg: #e3e3e5;
       --cfc-color-bottom-text: #333336;
+    }
+    /* 深色底淺色字視覺上會顯得比較粗（irradiation effect：亮色部分在視網膜上會「溢出」到暗色區域），
+       淺色底深色字則顯得偏細——同樣的 font-weight，兩個主題看起來粗細不一致。
+       以深色主題（白字）為基準，淺色主題（黑字）加粗一級做補償。 */
+    #cfc-overlay.cfc-theme-light #cfc-flipdown.flipdown {
+      font-weight: 800;
     }
     #cfc-overlay .cfc-title {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
