@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.19.0
+// @version      1.20.0
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -342,7 +342,7 @@
                 }),
                 d
                   ? (a.call(this), b.call(this))
-                  : (setTimeout(a.bind(this), 500), setTimeout(b.bind(this), 500)),
+                  : (setTimeout(a.bind(this), 560), setTimeout(b.bind(this), 500)),
                 (this.prevClockValuesAsString = this.clockValuesAsString);
             },
           },
@@ -470,16 +470,19 @@
     #cfc-flipdown .rotor:after {
       /* 中線黑線：純色塊填滿，不用 border-top（避免旁邊 3D 旋轉造成的反鋸齒不穩定）。
          粗細 2px、往下偏移 1px，數值是使用者用可調面板實測確認的。
-         z-index 拉到跟 #cfc-overlay 同等級，確保絕對在最上層。 */
+         層級用 translateZ 而不是 z-index——父層 .rotor 是 preserve-3d 的 3D 空間，
+         前後關係由 Z 軸深度決定，z-index 在這裡不起作用（這是先前黑線會在動畫途中被葉片蓋住、
+         動畫結束才「跳」回最上層的原因）。葉片是繞中線這條軸旋轉的，旋轉軸上的點 Z 值恆為 0，
+         黑線剛好在中線，所以只要 2px 的正向 Z 就足以永遠保持在葉片前面；
+         透視放大幅度 800/798≈1.0025，可以忽略。 */
       content: '';
       position: absolute;
       left: 0;
       top: calc(50% + 1px);
       width: calc(var(--cfc-u) * 30); /* 240px，跟 rotor 同寬 */
       height: 2px;
-      transform: translateY(-50%);
+      transform: translateY(-50%) translateZ(2px);
       background-color: #000;
-      z-index: 2147483647;
       pointer-events: none;
     }
 
