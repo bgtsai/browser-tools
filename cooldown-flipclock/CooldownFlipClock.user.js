@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.21.1
+// @version      1.21.2
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -564,14 +564,14 @@
       50%     { opacity: 0.15; }
       100%    { opacity: 0.15; }
     }
-    /* 有顯示秒數（min-sec）時冒號常亮不閃爍：秒數本身每秒都在跳動，已經有足夠的「還在動」的回饋，
-       冒號再閃就顯得雜亂。閃爍只在天+時、時+分這兩個看不到秒數、畫面長時間靜止的 phase 才需要。 */
+    /* 有顯示秒數（min-sec）時冒號固定不亮：秒數本身每秒都在跳動，已經有足夠的「還在動」的回饋，
+       閃爍只在天+時、時+分這兩個看不到秒數、畫面長時間靜止的 phase 才需要。 */
     #cfc-flipdown[data-phase="min-sec"] .rotor-group:nth-child(3)::before,
     #cfc-flipdown[data-phase="min-sec"] .rotor-group:nth-child(3)::after,
     #cfc-flipdown.cfc-colon-b[data-phase="min-sec"] .rotor-group:nth-child(3)::before,
     #cfc-flipdown.cfc-colon-b[data-phase="min-sec"] .rotor-group:nth-child(3)::after {
       animation: none;
-      opacity: 1;
+      opacity: 0.15;
     }
     #cfc-flipdown[data-phase="day-hour"] .rotor-group:nth-child(1)::before,
     #cfc-flipdown[data-phase="hour-min"] .rotor-group:nth-child(2)::before,
