@@ -1,17 +1,5 @@
 [
   {
-    "created_at_tw": "2026-08-24T19:02:25+08:00",
-    "trigger_event": "schedule"
-  },
-  {
-    "created_at_tw": "2026-08-24T21:30:57+08:00",
-    "trigger_event": "schedule"
-  },
-  {
-    "created_at_tw": "2026-08-24T23:10:48+08:00",
-    "trigger_event": "schedule"
-  },
-  {
     "created_at_tw": "2026-08-25T01:05:32+08:00",
     "trigger_event": "schedule"
   },
@@ -365,6 +353,10 @@
   },
   {
     "created_at_tw": "2026-09-07T18:37:43+08:00",
+    "trigger_event": "schedule"
+  },
+  {
+    "created_at_tw": "2026-09-08T00:36:30+08:00",
     "trigger_event": "schedule"
   }
 ]
