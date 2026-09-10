@@ -1,9 +1,5 @@
 [
   {
-    "created_at_tw": "2026-08-27T08:58:14+08:00",
-    "trigger_event": "schedule"
-  },
-  {
     "created_at_tw": "2026-08-27T16:29:44+08:00",
     "trigger_event": "workflow_dispatch"
   },
@@ -301,6 +297,10 @@
   },
   {
     "created_at_tw": "2026-09-10T08:26:31+08:00",
+    "trigger_event": "schedule"
+  },
+  {
+    "created_at_tw": "2026-09-10T13:06:08+08:00",
     "trigger_event": "schedule"
   }
 ]
