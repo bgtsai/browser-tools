@@ -1,9 +1,5 @@
 [
   {
-    "created_at_tw": "2026-10-11T23:53:17+08:00",
-    "trigger_event": "schedule"
-  },
-  {
     "created_at_tw": "2026-10-12T04:29:26+08:00",
     "trigger_event": "schedule"
   },
@@ -285,6 +281,10 @@
   },
   {
     "created_at_tw": "2026-10-25T20:41:32+08:00",
+    "trigger_event": "schedule"
+  },
+  {
+    "created_at_tw": "2026-10-26T01:10:27+08:00",
     "trigger_event": "schedule"
   }
 ]
