@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 額度冷卻翻頁鐘
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.21.2
+// @version      1.21.3
 // @description  Claude.ai 額度用完時，全螢幕顯示翻頁鐘倒數剩餘冷卻時間
 // @author       bgtsai
 // @match        https://claude.ai/*
@@ -1135,10 +1135,14 @@
     return candidates.length ? Math.max(...candidates) : null;
   }
 
-  // 還有額度時（預覽模式）固定回報短期視窗，不管長期視窗
+  // 還有額度時（預覽模式）優先回報短期視窗；短期視窗沒有 resets_at（用量 0% 時 API 回 null）
+  // 就退回長期視窗，避免手動開啟時跳「沒有 resets_at」錯誤。
   function pickPreviewEpoch(windows) {
     const fh = windows.five_hour;
-    return fh ? toEpoch(fh.resets_at) : null;
+    const sd = windows.seven_day;
+    const fhEpoch = fh ? toEpoch(fh.resets_at) : null;
+    if (fhEpoch != null) return fhEpoch;
+    return sd ? toEpoch(sd.resets_at) : null;
   }
 
   async function handleLimitDetected() {
@@ -1162,8 +1166,10 @@
   // 頁面載入當下也檢查一次，避免腳本注入時額度剛好已經用完、錯過第一次觸發
   checkLimitDom();
 
-  // 手動觸發共用邏輯：查兩個視窗的資料，短期視窗用量到門檻就視為「真的用盡」，
-  // 回報邏輯照 pickBlockedEpoch；否則視為「還有額度」，回報短期視窗的 resets_at（預覽模式）。
+  // 手動觸發共用邏輯：查兩個視窗的資料，任一視窗用量到各自門檻就視為「真的用盡」，
+  // 回報邏輯照 pickBlockedEpoch；否則視為「還有額度」，走 pickPreviewEpoch（預覽模式）。
+  // 踩過的坑：原本只看短期視窗，5 小時 0%（resets_at=null）＋7 天 100% 時被判成預覽，
+  // 又只讀短期視窗的 null，結果跳出「沒有 resets_at」錯誤。
   async function manualCheckAndShow() {
     const windows = await fetchWindowsData();
     if (!windows) {
@@ -1171,7 +1177,10 @@
       return;
     }
     const fh = windows.five_hour;
-    const looksBlocked = fh && fh.utilization != null && fh.utilization >= EXHAUST_THRESHOLD_SHORT;
+    const sd = windows.seven_day;
+    const fhExhausted = !!(fh && fh.utilization != null && fh.utilization >= EXHAUST_THRESHOLD_SHORT);
+    const sdExhausted = !!(sd && sd.utilization != null && sd.utilization >= EXHAUST_THRESHOLD_LONG);
+    const looksBlocked = fhExhausted || sdExhausted;
     const epoch = looksBlocked ? pickBlockedEpoch(windows) : pickPreviewEpoch(windows);
     if (epoch == null) {
       alert("[Claude額度冷卻翻頁鐘] 查得到用量資料，但沒有 resets_at 可用。");
