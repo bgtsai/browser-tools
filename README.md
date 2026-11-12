@@ -8,6 +8,7 @@
 | 工具 | 說明 | 安裝 | 細節 |
 |---|---|---|---|
 | [診斷面板骨架](diagnostic-panel/DiagnosticPanel.user.js) | 可複用的診斷面板：相對時間戳、開始/停止、一鍵複製；任務專屬邏輯只需替換探針區塊 | [安裝](https://raw.githubusercontent.com/bgtsai/browser-tools/main/diagnostic-panel/DiagnosticPanel.user.js) | — |
+| [Claude 用量通道診斷](claude-usage-probe/ClaudeUsageProbe.user.js) | 診斷用：在 claude.ai 攔截網頁收到的資料，找出 token 用量欄位在哪個通道；結果只留在瀏覽器，不要把複製出來的結果放進任何 repo | [安裝](https://raw.githubusercontent.com/bgtsai/browser-tools/main/claude-usage-probe/ClaudeUsageProbe.user.js) | 測試：`claude-usage-probe/tests/`（先跑 server.py，再跑 test.py <腳本路徑>） |
 | [Route Rain 路線降雨預報](route-rain/RouteRain.user.js) | 在 Google Maps 路線面板加一顆「路雨」按鈕，列出沿途各鄉鎮在不同出發時間下的降雨機率 | [安裝](https://raw.githubusercontent.com/bgtsai/browser-tools/main/route-rain/RouteRain.user.js) | [route-rain/README.md](route-rain/README.md) |
 
 **資料夾底下有自己的 `README.md` 的，代表這個工具本身有值得另外說明的架構（例如背後有自動化資料管線、需要使用者自行設定的憑證）；只有一個檔案的簡單工具，這份總覽表格就是全部說明，不另開文件。**
