@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 用量通道診斷
 // @namespace    browser-tools
-// @version      1.1.0
+// @version      1.2.0
 // @description  診斷用：在 claude.ai 攔截網頁收到的資料（fetch 串流、XHR、WebSocket、EventSource），找出每次 API 呼叫的 token 用量欄位在哪個通道。結果只留在瀏覽器裡，按「複製結果」才進剪貼簿
 // @match        https://claude.ai/*
 // @grant        none
@@ -17,7 +17,7 @@
     // 網頁在載入時就開好的 WebSocket 已經拿到原生建構子，包不到（2026-11-12 實測只抓到 fetch）。
     // 為什麼 @grant none：要覆寫的是頁面自己的 fetch／WebSocket；宣告任何 @grant 會進沙盒，
     // window.fetch 改到的是沙盒副本，靜默失效（01 第⑤條）。
-    const VERSION = '1.1.0';
+    const VERSION = '1.2.0';
     const MAX_ENTRIES = 600;          // 記錄筆數上限，避免長時間開著吃記憶體
     const MAX_SAMPLES_PER_SOCKET = 8; // 每條 WebSocket／EventSource 留前幾則訊息的開頭，用來看格式
     const SAMPLE_LEN = 400;           // 每則樣本保留的字元數
@@ -26,6 +26,12 @@
     const POLL_INTERVAL_MS = 2000;    // 輪詢間隔 (ms)
     const POLL_IDLE_STOP = 15;        // 有變化之後，連續幾次沒變就停（約 30 秒）
     const POLL_MAX_MS = 10 * 60 * 1000; // 單次輪詢最長時間 (ms)，避免忘了停
+    // v1.2.0：StreamTimeline（connect+proto 二進位）原樣存進 window.__cupST，給 Claude 用 Claude in Chrome 讀回去離線解析
+    // 只放在頁面記憶體，不進複製結果、不送任何地方（內含對話內容）
+    const ST_MAX_BYTES = 4 * 1024 * 1024; // 存的總位元組上限
+    const ST_RE = /ConversationService\/StreamTimeline/;
+    window.__cupST = [];
+    let stBytes = 0;
 
     // 欄位名執行時才拼接：頁面上與網路上都會出現我（Claude）回覆裡的說明文字，
     // 寫成完整字串會命中自己（02「搜尋字串會命中自己的回覆」）。
@@ -84,11 +90,14 @@
             const rd = c.body && c.body.getReader ? c.body.getReader() : null;
             if (!rd) return;
             const d = new TextDecoder();
+            // 每個回應各自一筆，同網址的多條串流不會混在一起
+            const stR = ST_RE.test(u) ? (window.__cupST.push({ t: Date.now(), u, chunks: [] }), window.__cupST[window.__cupST.length - 1]) : null;
             let carry = '';
             (async () => {
                 for (;;) {
                     const { done, value } = await rd.read();
                     if (done) break;
+                    if (stR && stBytes < ST_MAX_BYTES) { stBytes += value.length; stR.chunks.push({ t: Date.now(), b: value.slice() }); }
                     const x = d.decode(value, { stream: true });
                     e.len += x.length; T.bytes += x.length;
                     scan(u.slice(0, 100), carry + x);
@@ -198,7 +207,7 @@
         if (Date.now() - pollStart > POLL_MAX_MS) return stopPoll('超過最長時間');
         try {
             PS.polls++;
-            const r = await origFetch(PS.sessionUrl, { credentials: 'include' });
+            const r = await origFetch(PS.sessionUrl, { credentials: 'include', headers: { 'anthropic-version': '2023-06-01' } }); // 沒帶這個標頭會回 400（2026-11-12 實測）
             const j = await r.json();
             const u = findUsage(j);
             if (!u) { PS.lastErr = '回應裡找不到 usage（HTTP ' + r.status + '）'; update(); return; }
