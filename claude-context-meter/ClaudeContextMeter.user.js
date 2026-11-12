@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 上下文用量
 // @namespace    browser-tools
-// @version      0.3.0
+// @version      0.4.0
 // @description  在 claude.ai 的 Claude Code 遠端工作階段顯示目前上下文用量（對話樹估算＋/context 校正），換新對話串划算或用量過高時提醒
 // @match        https://claude.ai/*
 // @grant        none
@@ -15,7 +15,7 @@
 
     // 為什麼 @grant none：要包的是頁面自己的 fetch；宣告任何 @grant 會進沙盒，window.fetch 改到沙盒副本、靜默失效。
     // 為什麼 document-start：網頁很早就存下原生 fetch；晚一步包，部分請求不會經過我們（2026-11-12 實測）。
-    const VERSION = '0.3.0';
+    const VERSION = '0.4.0';
 
     // 推導見 README「預設值」；2026-11-12 以 /context 實測
     const CFG = {
@@ -36,6 +36,7 @@
         AUTO_RECHECK_BELOW: 0.60,
         AUTO_MAX_PER_CHAT: 3,
         AUTO_MIN_GAP_MS: 15 * 60 * 1000,
+        TAG_ON_SEND: true,            // 送出訊息時在尾端附用量標記，讓 Claude 每輪讀得到（使用者定案，2026-11-12）
         REFRESH_THROTTLE_MS: 1500,    // 同一輪結束常連續觸發好幾次，合併成一次（節流，不是防手震）
     };
     const LS = 'ccm:';                // localStorage 前綴（專案前綴，避免撞名）
@@ -346,6 +347,45 @@
     // 換頁（單頁應用）時重新整理顯示
     let lastPath = '';
     setInterval(() => { if (location.pathname !== lastPath) { lastPath = location.pathname; state.last = null; render(); if (CHAT_RE.test(lastPath)) scheduleRefresh(); } }, 1000);
+    // ── 8. 送出時在訊息尾端附用量標記：[ctx 47%・47.2萬] ──
+    // Claude 在 claude.ai 遠端工作階段看不到 hook、也送不了 /context；附在使用者訊息裡是它每輪唯一讀得到的地方（01 第⑫條）。
+    // 做法：攔下送出（Enter、送出鈕）→ 游標移到尾端、新段落插入標記 → 下一格再按一次送出鈕（帶旗標放行）。
+    // 不在攔截當下直接放行：ProseMirror 讀 DOM 變動是非同步的，同一個事件裡送出可能送到加標記前的內容。
+    // 以 / 開頭的不加（/context 這類本機指令，加了會變成一般訊息）；已經有標記、還沒有估算值時也不加。
+    const TAG_RE = /\[ctx \d+%・[\d.]+萬\]\s*$/;
+    let passSend = false;
+    function tagText() { const L = state.last; return L ? '[ctx ' + Math.round(L.pct * 100) + '%・' + (L.C / 1e4).toFixed(1) + '萬]' : ''; }
+    function shouldTag(ed) {
+        if (!CFG.TAG_ON_SEND || passSend || state.autoPending || !ed || !CHAT_RE.test(location.pathname)) return false;
+        const t = ed.innerText.trim();
+        return !!t && !t.startsWith('/') && !TAG_RE.test(t) && !!tagText();
+    }
+    function tagAndSend(ed) {
+        ed.focus();
+        const sel = getSelection(); sel.selectAllChildren(ed); sel.collapseToEnd();
+        document.execCommand('insertText', false, '\n' + tagText());
+        setTimeout(() => {
+            const btn = document.querySelector(SEL.send);
+            if (!btn) { state.err = '用量標記：找不到送出鈕（標記已加在輸入框，請手動送出）'; render(); return; }
+            passSend = true; try { btn.click(); } finally { passSend = false; }
+        }, 60);
+    }
+    document.addEventListener('keydown', e => {
+        if (e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229) return; // 輸入法選字中的 Enter 不算送出
+        const ed = e.target && e.target.closest && e.target.closest(SEL.input);
+        if (!shouldTag(ed)) return;
+        e.preventDefault(); e.stopImmediatePropagation();
+        tagAndSend(ed);
+    }, true);
+    document.addEventListener('click', e => {
+        const btn = e.target && e.target.closest && e.target.closest(SEL.send);
+        if (!btn) return;
+        const ed = document.querySelector(SEL.input);
+        if (!shouldTag(ed)) return;
+        e.preventDefault(); e.stopImmediatePropagation();
+        tagAndSend(ed);
+    }, true);
+
     // 框架重繪頁首後補插（節流）
     let mountTimer = null;
     new MutationObserver(() => {

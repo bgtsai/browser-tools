@@ -42,6 +42,7 @@ fetch 攔截 ──► 看到工作階段 GET（＝一輪結束）──► 節�
                        ├─► 頁首標籤：⌄ 右邊、「交接對話串」左邊（v0.2.0）
                        ├─► 點標籤：詳細面板（主數字 → 判斷 → 依據 →〔校正〕手動送 /context）（v0.3.0）
                        ├─► 視窗底部燈帶，一直呼吸：紅 ≥80% ＞ 黃 ≥70% ＞ 藍 建議換串（v0.3.0）
+                       ├─► 送出訊息時在尾端附 [ctx NN%・X萬]，Claude 每輪讀得到（v0.4.0；/ 開頭、已有標記時不加）
                        └─► 自動送 /context（見下）
 ```
 
@@ -71,4 +72,4 @@ fetch 攔截 ──► 看到工作階段 GET（＝一輪結束）──► 節�
 
 ## 測試
 
-先跑 `tests/server.py`，再跑 `python3 tests/test.py ClaudeContextMeter.user.js`（計算與頁首）和 `python3 tests/test_ui.py ClaudeContextMeter.user.js`（面板、校正鈕、燈帶）。
+先跑 `tests/server.py`，再跑 `python3 tests/test.py ClaudeContextMeter.user.js`（計算與頁首）、`python3 tests/test_ui.py ClaudeContextMeter.user.js`（面板、校正鈕、燈帶）和 `python3 tests/test_tag.py ClaudeContextMeter.user.js`（用量標記）。
