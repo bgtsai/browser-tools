@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 上下文用量
 // @namespace    browser-tools
-// @version      0.1.0
+// @version      0.2.0
 // @description  在 claude.ai 的 Claude Code 遠端工作階段顯示目前上下文用量（對話樹估算＋/context 校正），換新對話串划算或用量過高時提醒
 // @match        https://claude.ai/*
 // @grant        none
@@ -15,7 +15,7 @@
 
     // 為什麼 @grant none：要包的是頁面自己的 fetch；宣告任何 @grant 會進沙盒，window.fetch 改到沙盒副本、靜默失效。
     // 為什麼 document-start：網頁很早就存下原生 fetch；晚一步包，部分請求不會經過我們（2026-11-12 實測）。
-    const VERSION = '0.1.0';
+    const VERSION = '0.2.0';
 
     // 推導見 README「預設值」；2026-11-12 以 /context 實測
     const CFG = {
@@ -27,7 +27,8 @@
         WORK_W: 40000,                // W：新對話串要重讀的工作資料
         NEXT_ROUNDS: 15,              // 下一階段預估輪數（沒有其他資訊時的預設）
         K_READ: 0.1, K_WRITE: 1.25,   // 快取讀取／寫入相對正常價的比例（01 第⑫條）
-        WARN_PCT: 0.70,               // 開始提醒的用量
+        WARN_PCT: 0.70,               // 開始提醒的用量（黃）
+        HIGH_PCT: 0.80,               // 紅：再往上可能來不及歸檔＋交接就被自動壓縮（96.7 萬壓縮 − 歸檔交接約 15 萬，推測值，待實測）
         WARN_STEP: 0.10,              // 之後每增加多少再提醒一次
         AUTO_CTX: true,               // 自動送 /context 校正
         AUTO_FIRST_MIN_MSGS: 2,       // 沒有校正點時，至少幾則訊息才送
@@ -42,7 +43,11 @@
     const ORG_RE = /\/api\/organizations\/([0-9a-f-]{36})\//;
     const CHAT_RE = /\/chat\/([0-9a-f-]{36})/;
     const CTX_HEAD = '## Context' + ' Usage'; // 拆開寫：避免本檔被別的工具用文字搜尋時誤判
-    const SEL = { input: '[data-testid="chat-input"]', send: 'button[data-testid="chat-input-send"]' };
+    const SEL = {
+        input: '[data-testid="chat-input"]', send: 'button[data-testid="chat-input-send"]',
+        titleSplit: '[data-testid="session-title-split"]', // 頁首「標題 ⌄」那一排（跟 claude-chat-handover 同一組選擇器）
+        moreBtn: 'button[aria-haspopup="menu"]',          // 標題旁的 ⌄
+    };
 
     const state = { orgId: null, last: null, err: null, autoPending: false };
     window.__ccm = state; // 給除錯用（Claude in Chrome 讀得到）
@@ -185,31 +190,45 @@
     }
     const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-    // ── 5. 標籤（暫定介面）──
+    // ── 5. 頁首標籤：⌄ 右邊、「交接對話串」左邊 ──
+    // 那一排是 claude.ai 框架管的；重繪會把我們的節點清掉，所以用 MutationObserver 補插（做法同 claude-chat-handover）。
+    // 永遠插在 ⌄ 正後面；交接鈕 v1.2.0 起看到 .ccm-meter 會排在它後面，兩邊各自補插也不會互換位置。
+    // 字級、高度照同一排的既有元件（03 第⑮節）：2026-11-12 量到 14px／行高 20、⌄ 高 28、交接鈕左邊距 8、圓角 8。
     let el = null;
+    function mount() {
+        const split = document.querySelector(SEL.titleSplit);
+        const more = split && split.querySelector(SEL.moreBtn);
+        if (!more) return false;
+        if (!el) {
+            el = document.createElement('span');
+            el.id = 'ccm-badge';
+            el.className = 'ccm-meter';
+        }
+        if (more.nextElementSibling !== el) {
+            const h = Math.round(more.getBoundingClientRect().height) || 28;
+            el.style.cssText = 'display:inline-flex;align-items:center;flex:0 0 auto;white-space:nowrap;box-sizing:border-box;'
+                + 'height:' + h + 'px;margin-left:8px;padding:0 10px;border-radius:8px;font-size:14px;line-height:20px;cursor:default';
+            more.after(el);
+        }
+        return true;
+    }
     function render() {
         if (!document.body) return;
-        if (!el) {
-            el = document.createElement('div');
-            el.id = 'ccm-badge';
-            el.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:2147483646;font:13px/18px system-ui,sans-serif;padding:3px 8px;border-radius:6px;box-sizing:border-box;pointer-events:auto;cursor:default';
-            document.body.append(el);
-        }
-        const L = state.last;
         const onChat = CHAT_RE.test(location.pathname);
-        el.style.display = onChat && (L || state.err) ? '' : 'none';
-        if (!L) { el.textContent = '上下文 —'; el.title = state.err || ''; paint('normal'); return; }
-        const man = n => (n / 1e4).toFixed(1) + '萬';
-        el.textContent = '上下文 ' + Math.round(L.pct * 100) + '%・' + man(L.C) + (L.switchWorth ? '・建議換串' : '');
+        if (!onChat || !mount()) { if (el) el.style.display = 'none'; return; }
+        const L = state.last;
+        el.style.display = L || state.err ? 'inline-flex' : 'none';
+        if (!L) { el.textContent = '—'; el.title = state.err || ''; paint('normal'); return; }
+        el.textContent = Math.round(L.pct * 100) + '%' + (L.switchWorth ? '・建議換串' : '');
         el.title = [
-            '估算 ' + L.C.toLocaleString() + ' / ' + L.win.toLocaleString() + '（' + (L.pct * 100).toFixed(1) + '%）',
+            '上下文用量（估算）' + L.C.toLocaleString() + ' / ' + L.win.toLocaleString() + '（' + (L.pct * 100).toFixed(1) + '%）',
             '校正來源：' + L.source + (L.calib ? '（' + L.calib.ago + ' 則訊息前）' : ''),
             '固定部分 F ' + L.fixed.toLocaleString() + '，係數 k ' + L.k,
             '換串回本輪數 N* ' + (isFinite(L.nStar) ? L.nStar.toFixed(1) : '—') + '（下一階段預設 ' + CFG.NEXT_ROUNDS + ' 輪）',
             state.err ? '⚠ ' + state.err : '',
             'v' + VERSION,
         ].filter(Boolean).join('\n');
-        paint(L.pct >= 0.85 ? 'high' : (L.pct >= CFG.WARN_PCT || L.switchWorth) ? 'warn' : 'normal');
+        paint(L.pct >= CFG.HIGH_PCT ? 'high' : (L.pct >= CFG.WARN_PCT || L.switchWorth) ? 'warn' : 'normal');
     }
     function paint(level) {
         // 依頁面底色判斷深淺（常駐介面跟網站一致：03 第①節）
@@ -226,6 +245,12 @@
     // 換頁（單頁應用）時重新整理顯示
     let lastPath = '';
     setInterval(() => { if (location.pathname !== lastPath) { lastPath = location.pathname; state.last = null; render(); if (CHAT_RE.test(lastPath)) scheduleRefresh(); } }, 1000);
+    // 框架重繪頁首後補插（節流）
+    let mountTimer = null;
+    new MutationObserver(() => {
+        if (mountTimer) return;
+        mountTimer = setTimeout(() => { mountTimer = null; try { const split = document.querySelector(SEL.titleSplit); if (split && (!el || !split.contains(el))) render(); } catch (e) { console.log('[ClaudeContextMeter] 掛標籤失敗', e); } }, 300);
+    }).observe(document, { childList: true, subtree: true }); // 觀察 document 本身：Chromium 在 document-start 時 documentElement 可能還是 null，observe 會丟例外、後面的程式整段不跑（測試實測）
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', render, { once: true }); else render();
     console.log('[ClaudeContextMeter] v' + VERSION + ' 已載入');
 })();

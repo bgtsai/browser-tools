@@ -16,7 +16,8 @@ def tree(cid):
     # 分支外的訊息不應計入
     side={"uuid":'x1',"parent_message_uuid":'m1',"sender":'assistant',"content":[{"type":"text","text":"中"*99999}]}
     return {"current_leaf_message_uuid":msgs[-1]["uuid"],"chat_messages":msgs+[side]}
-PAGE='''<html><body style="background:#fff"><div data-testid="chat-input" contenteditable="true"></div>
+PAGE='''<html><body style="background:#fff"><div data-testid="chat-header"><div data-testid="session-title-split" style="display:flex;align-items:center"><h2><button>標題</button></h2><button aria-haspopup="menu" style="width:28px;height:28px">v</button><button class="cho-btn">交接對話串</button></div></div>
+<script>window.__redraw=()=>{const s=document.querySelector('[data-testid=session-title-split]');s.innerHTML=s.innerHTML.replace(/<span[^>]*ccm-meter[^>]*>.*?<\/span>/,'')}</script><div data-testid="chat-input" contenteditable="true"></div>
 <button data-testid="chat-input-send" onclick="window.__sent=(window.__sent||[]).concat(document.querySelector('[data-testid=chat-input]').innerText);document.querySelector('[data-testid=chat-input]').innerText=''">send</button>
 <script>fetch("/api/organizations/%s/ping").then(()=>fetch("/v1/code/sessions/cse_TEST?omit_bound_device=true"));</script></body></html>'''%ORG
 class H(http.server.BaseHTTPRequestHandler):
