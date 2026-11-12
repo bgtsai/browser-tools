@@ -8,12 +8,24 @@ const x=new XMLHttpRequest();x.open('GET','/xhr');x.onload=()=>window.__xhrDone=
 const es=new EventSource('/sse');es.onmessage=()=>{window.__esDone=1;es.close()};
 fetch('/decoy').then(r=>r.text());
 </script></body></html>'''
+ORG='11111111-2222-3333-4444-555555555555';CID='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';N={'n':0}
+PAGE2=('<html><body><script>fetch("/api/organizations/'+ORG+'/ping");fetch("/v1/code/sessions/cse_TEST?omit_bound_device=true").then(()=>fetch("/claudeai-rpc/anthropic.bard.api.v1alpha.ConversationService/PerformAction",{method:"POST"}));</script></body></html>').encode()
 class H(http.server.BaseHTTPRequestHandler):
     protocol_version='HTTP/1.1'
     def log_message(self,*a):pass
+    def do_POST(self):
+        self._send(b'ok','application/proto')
     def do_GET(self):
         p=self.path
         if p=='/':self._send(PAGE,'text/html')
+        elif p=='/reset':N['n']=0;self._send(b'ok','text/plain')
+        elif p=='/chat/'+CID:self._send(PAGE2,'text/html')
+        elif p.startswith('/api/organizations/'+ORG+'/ping'):self._send(b'{}','application/json')
+        elif p.startswith('/v1/code/sessions/cse_TEST'):
+            N['n']+=1;k=min(N['n'],6)//2
+            self._send(json.dumps({"data":{"usage":{"cache_read_tokens":1000+k*100,"cache_write_tokens":10,"input_tokens":1,"output_tokens":5+k}},"status_category":"working"}).encode(),'application/json')
+        elif p.startswith('/api/organizations/'+ORG+'/chat_conversations/'+CID):
+            self._send(json.dumps({"uuid":CID,"chat_messages":[{"uuid":"m1","content":[{"type":"text","text":"SECRET"},{"type":"tool_use"}]}]}).encode(),'application/json')
         elif p=='/stream':
             self.send_response(200);self.send_header('content-type','text/event-stream');self.send_header('transfer-encoding','chunked');self.end_headers()
             s=b'{"x":{"cache_read_input_tokens":555}}';cut=s.index(b"cache_read")+4

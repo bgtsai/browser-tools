@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 用量通道診斷
 // @namespace    browser-tools
-// @version      1.0.0
+// @version      1.1.0
 // @description  診斷用：在 claude.ai 攔截網頁收到的資料（fetch 串流、XHR、WebSocket、EventSource），找出每次 API 呼叫的 token 用量欄位在哪個通道。結果只留在瀏覽器裡，按「複製結果」才進剪貼簿
 // @match        https://claude.ai/*
 // @grant        none
@@ -17,11 +17,15 @@
     // 網頁在載入時就開好的 WebSocket 已經拿到原生建構子，包不到（2026-11-12 實測只抓到 fetch）。
     // 為什麼 @grant none：要覆寫的是頁面自己的 fetch／WebSocket；宣告任何 @grant 會進沙盒，
     // window.fetch 改到的是沙盒副本，靜默失效（01 第⑤條）。
-    const VERSION = '1.0.0';
+    const VERSION = '1.1.0';
     const MAX_ENTRIES = 600;          // 記錄筆數上限，避免長時間開著吃記憶體
     const MAX_SAMPLES_PER_SOCKET = 8; // 每條 WebSocket／EventSource 留前幾則訊息的開頭，用來看格式
     const SAMPLE_LEN = 400;           // 每則樣本保留的字元數
     const CARRY_LEN = 400;            // 串流分塊時保留上一塊尾巴的字元數，避免欄位被切在兩塊之間
+    // v1.1.0 輪詢：送出訊息（PerformAction）後主動查工作階段 GET，看累計用量是「每次 API 呼叫」就更新，還是整輪結束才更新
+    const POLL_INTERVAL_MS = 2000;    // 輪詢間隔 (ms)
+    const POLL_IDLE_STOP = 15;        // 有變化之後，連續幾次沒變就停（約 30 秒）
+    const POLL_MAX_MS = 10 * 60 * 1000; // 單次輪詢最長時間 (ms)，避免忘了停
 
     // 欄位名執行時才拼接：頁面上與網路上都會出現我（Claude）回覆裡的說明文字，
     // 寫成完整字串會命中自己（02「搜尋字串會命中自己的回覆」）。
@@ -71,6 +75,7 @@
         guard('fetch', () => {
             const u = String(a[0] && a[0].url || a[0]);
             const me = (a[1] && a[1].method) || (a[0] && a[0].method) || 'GET';
+            noteUrl(u, me);
             T.req++;
             const e = { t: tm(), clock: now(), kind: 'fetch', u: u.slice(0, 200), me, st: r.status, ct: r.headers.get('content-type'), len: 0 };
             push(e);
@@ -157,10 +162,109 @@
         window.EventSource.prototype = OE.prototype;
     }
 
+    // ── v1.1.0：輪詢工作階段累計用量 ──
+    // 自己發的請求一律用 origFetch，不經過上面的攔截，不會被重複記錄
+    const SESSION_RE = /\/v1\/code\/sessions\/(cse_[A-Za-z0-9]+)/;
+    const ORG_RE = /\/api\/organizations\/([0-9a-f-]{36})\//;
+    const POLLS = [];      // 只記「累計值有變」的那幾次
+    const PS = { sessionUrl: null, orgId: null, runs: 0, polls: 0, changes: 0, active: false, lastErr: null };
+    let pollTimer = null, pollStart = 0, idle = 0, sawChange = false, last = null;
+
+    function noteUrl(u, me) {
+        const ms = u.match(SESSION_RE);
+        if (ms && !PS.sessionUrl) PS.sessionUrl = '/v1/code/sessions/' + ms[1] + '?omit_bound_device=true';
+        const mo = u.match(ORG_RE);
+        if (mo && !PS.orgId) { PS.orgId = mo[1]; setTimeout(probeTree, 0); }
+        if (me === 'POST' && /ConversationService\/PerformAction/.test(u)) startPoll('PerformAction');
+    }
+
+    function startPoll(why) {
+        if (!PS.sessionUrl) { PS.lastErr = '還沒看到工作階段網址，無法輪詢（' + why + '）'; update(); return; }
+        pollStart = Date.now(); idle = 0; sawChange = false;
+        if (pollTimer) return; // 已在輪詢中：只延長，不重開
+        PS.runs++; PS.active = true;
+        POLLS.push({ clock: now(), t: tm(), event: '開始輪詢（' + why + '）' });
+        pollTimer = setInterval(pollOnce, POLL_INTERVAL_MS);
+        pollOnce();
+    }
+
+    function stopPoll(why) {
+        clearInterval(pollTimer); pollTimer = null; PS.active = false;
+        POLLS.push({ clock: now(), t: tm(), event: '停止輪詢（' + why + '）' });
+        update();
+    }
+
+    async function pollOnce() {
+        if (Date.now() - pollStart > POLL_MAX_MS) return stopPoll('超過最長時間');
+        try {
+            PS.polls++;
+            const r = await origFetch(PS.sessionUrl, { credentials: 'include' });
+            const j = await r.json();
+            const u = findUsage(j);
+            if (!u) { PS.lastErr = '回應裡找不到 usage（HTTP ' + r.status + '）'; update(); return; }
+            const sum = (u.cache_read_tokens || 0) + (u.cache_write_tokens || 0) + (u.input_tokens || 0);
+            const st = findKey(j, 'status_category');
+            if (!last || sum !== last.sum || u.output_tokens !== last.out) {
+                PS.changes++;
+                POLLS.push({ clock: now(), t: tm(), usage: u, status: st, delta_in: last ? sum - last.sum : null, delta_out: last ? u.output_tokens - last.out : null });
+                if (last) sawChange = true;
+                last = { sum, out: u.output_tokens };
+                idle = 0;
+            } else if (sawChange && ++idle >= POLL_IDLE_STOP) {
+                stopPoll('連續 ' + POLL_IDLE_STOP + ' 次沒變化');
+            }
+            update();
+        } catch (er) { PS.lastErr = 'poll: ' + er; update(); }
+    }
+
+    // 不假設欄位在哪一層：深度優先找第一個名為 usage 且帶數字的物件
+    function findUsage(o, depth = 0) {
+        if (!o || typeof o !== 'object' || depth > 6) return null;
+        if (o.usage && typeof o.usage === 'object' && typeof o.usage.cache_read_tokens === 'number') return o.usage;
+        for (const k of Object.keys(o)) { const f = findUsage(o[k], depth + 1); if (f) return f; }
+        return null;
+    }
+    function findKey(o, key, depth = 0) {
+        if (!o || typeof o !== 'object' || depth > 6) return null;
+        if (key in o) return o[key];
+        for (const k of Object.keys(o)) { const f = findKey(o[k], key, depth + 1); if (f !== null) return f; }
+        return null;
+    }
+
+    // ── v1.1.0：Claude Counter 那條路（對話樹）在這個介面能不能用 ──
+    // 只記結構（欄位名、訊息數、內容區塊種類），不記內容
+    let TREE = null;
+    async function probeTree() {
+        if (TREE) return;
+        const cm = location.pathname.match(/\/chat\/([0-9a-f-]{36})/);
+        if (!cm || !PS.orgId) return;
+        TREE = { pending: true };
+        try {
+            const r = await origFetch('/api/organizations/' + PS.orgId + '/chat_conversations/' + cm[1] + '?tree=true&rendering_mode=messages&render_all_tools=true', { credentials: 'include' });
+            const txt = await r.text();
+            TREE = { status: r.status, ct: r.headers.get('content-type'), len: txt.length };
+            try {
+                const j = JSON.parse(txt);
+                TREE.topKeys = Object.keys(j);
+                const msgs = Array.isArray(j.chat_messages) ? j.chat_messages : null;
+                TREE.messages = msgs ? msgs.length : 'chat_messages 不存在';
+                if (msgs && msgs.length) {
+                    TREE.msgKeys = Object.keys(msgs[msgs.length - 1]);
+                    const types = {};
+                    msgs.forEach(m => (Array.isArray(m.content) ? m.content : []).forEach(c => { types[c && c.type] = (types[c && c.type] || 0) + 1; }));
+                    TREE.contentTypes = types;
+                }
+            } catch (er) { TREE.parseErr = String(er); }
+        } catch (er) { TREE = { err: String(er) }; }
+        update();
+    }
+
     // ── 面板（body 出現後才建立）──
     let statusEl = null;
     function update() {
-        if (statusEl) statusEl.textContent = '請求 ' + T.req + '（WS ' + T.ws + '／ES ' + T.es + '）｜讀到 ' + T.bytes + ' 字元｜命中 ' + T.hit + ' 筆';
+        if (statusEl) statusEl.textContent = '請求 ' + T.req + '（WS ' + T.ws + '／ES ' + T.es + '）｜讀到 ' + T.bytes + ' 字元｜命中 ' + T.hit + ' 筆\n'
+            + '輪詢 ' + (PS.active ? '進行中' : '停止') + '｜查 ' + PS.polls + ' 次｜變化 ' + PS.changes + ' 次｜對話樹 ' + (TREE ? (TREE.status || (TREE.pending ? '查詢中' : '失敗')) : '未查')
+            + (PS.lastErr ? '\n⚠ ' + PS.lastErr : '');
     }
 
     function buildPanel() {
@@ -171,18 +275,19 @@
         title.textContent = '用量通道診斷 v' + VERSION;
         title.style.cssText = 'font-weight:bold;margin-bottom:4px';
         statusEl = document.createElement('div');
+        statusEl.style.whiteSpace = 'pre-wrap';
         const row = document.createElement('div');
         row.style.cssText = 'margin-top:6px;display:flex;gap:6px';
         const mk = (label, fn) => { const b = document.createElement('button'); b.textContent = label; b.style.cssText = 'font:13px sans-serif;padding:2px 8px;cursor:pointer'; b.onclick = fn; row.append(b); return b; };
         const copyBtn = mk('複製結果', () => {
-            const out = JSON.stringify({ version: VERSION, ua: navigator.userAgent, page: location.pathname, fetchWasNative, hasEventSource: !!OE, T, L }, null, 1);
+            const out = JSON.stringify({ version: VERSION, ua: navigator.userAgent, page: location.pathname, fetchWasNative, hasEventSource: !!OE, T, PS, POLLS, TREE, L }, null, 1);
             const done = (label) => { copyBtn.textContent = label; setTimeout(() => { copyBtn.textContent = '複製結果'; }, 1500); };
             navigator.clipboard.writeText(out).then(() => done('已複製'), () => {
                 const ta = document.createElement('textarea'); ta.value = out; document.body.append(ta); ta.select();
                 document.execCommand('copy'); ta.remove(); done('已複製（備援）');
             });
         });
-        mk('清空', () => { L.length = 0; Object.keys(T).forEach(k => { T[k] = 0; }); update(); });
+        mk('清空', () => { L.length = 0; POLLS.length = 0; Object.keys(T).forEach(k => { T[k] = 0; }); update(); });
         mk('收合', function () { const hide = statusEl.style.display !== 'none'; statusEl.style.display = hide ? 'none' : ''; this.textContent = hide ? '展開' : '收合'; });
         P.append(title, statusEl, row);
         document.body.append(P);
