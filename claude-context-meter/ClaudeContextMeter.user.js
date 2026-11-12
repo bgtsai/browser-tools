@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude 上下文用量
 // @namespace    browser-tools
-// @version      0.2.0
+// @version      0.3.0
 // @description  在 claude.ai 的 Claude Code 遠端工作階段顯示目前上下文用量（對話樹估算＋/context 校正），換新對話串划算或用量過高時提醒
 // @match        https://claude.ai/*
 // @grant        none
@@ -15,7 +15,7 @@
 
     // 為什麼 @grant none：要包的是頁面自己的 fetch；宣告任何 @grant 會進沙盒，window.fetch 改到沙盒副本、靜默失效。
     // 為什麼 document-start：網頁很早就存下原生 fetch；晚一步包，部分請求不會經過我們（2026-11-12 實測）。
-    const VERSION = '0.2.0';
+    const VERSION = '0.3.0';
 
     // 推導見 README「預設值」；2026-11-12 以 /context 實測
     const CFG = {
@@ -171,7 +171,13 @@
         if (!need) return;
         const ed = document.querySelector(SEL.input);
         if (!ed || ed.innerText.trim()) return; // 使用者有沒送出的字就不動，下一輪再說
-        state.autoPending = true;
+        if (await sendContext('自動 /context')) save('auto:' + cid, { n: rec.n + 1, t: Date.now() });
+    }
+    // 送一次 /context（自動與〔校正〕共用）；輸入框有字時不送。成功回 true
+    async function sendContext(who) {
+        const ed = document.querySelector(SEL.input);
+        if (!ed || ed.innerText.trim() || state.autoPending) return false;
+        state.autoPending = true; render();
         try {
             ed.focus();
             const dt = new DataTransfer(); dt.setData('text/plain', '/context');
@@ -179,13 +185,14 @@
             await sleep(300);
             if (!ed.innerText.trim().startsWith('/context')) document.execCommand('insertText', false, '/context');
             await sleep(300);
-            if (ed.innerText.trim() !== '/context') { state.err = '自動 /context：填入失敗'; return; }
+            if (ed.innerText.trim() !== '/context') { state.err = who + '：填入失敗'; return false; }
             const btn = document.querySelector(SEL.send);
-            if (!btn) { state.err = '自動 /context：找不到送出鈕'; return; }
+            if (!btn) { state.err = who + '：找不到送出鈕'; return false; }
             btn.click();
             await sleep(1500);
-            if (ed.innerText.trim()) { state.err = '自動 /context：送出後輸入框沒清空'; return; }
-            save('auto:' + cid, { n: rec.n + 1, t: Date.now() });
+            if (ed.innerText.trim()) { state.err = who + '：送出後輸入框沒清空'; return false; }
+            state.calibWait = { idx: state.last && state.last.calib ? state.last.calib.idx : -1, t: Date.now() };
+            return true;
         } finally { state.autoPending = false; render(); }
     }
     const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -203,11 +210,13 @@
             el = document.createElement('span');
             el.id = 'ccm-badge';
             el.className = 'ccm-meter';
+            el.setAttribute('role', 'button');
+            el.addEventListener('click', e => { e.stopPropagation(); togglePanel(); });
         }
         if (more.nextElementSibling !== el) {
             const h = Math.round(more.getBoundingClientRect().height) || 28;
             el.style.cssText = 'display:inline-flex;align-items:center;flex:0 0 auto;white-space:nowrap;box-sizing:border-box;'
-                + 'height:' + h + 'px;margin-left:8px;padding:0 10px;border-radius:8px;font-size:14px;line-height:20px;cursor:default';
+                + 'height:' + h + 'px;margin-left:8px;padding:0 10px;border-radius:8px;font-size:14px;line-height:20px;cursor:pointer';
             more.after(el);
         }
         return true;
@@ -215,20 +224,112 @@
     function render() {
         if (!document.body) return;
         const onChat = CHAT_RE.test(location.pathname);
-        if (!onChat || !mount()) { if (el) el.style.display = 'none'; return; }
+        if (!onChat || !mount()) { if (el) el.style.display = 'none'; if (strip) renderStrip(null); closePanel(); return; }
         const L = state.last;
         el.style.display = L || state.err ? 'inline-flex' : 'none';
-        if (!L) { el.textContent = '—'; el.title = state.err || ''; paint('normal'); return; }
+        if (!L) { el.textContent = '—'; el.title = state.err || ''; paint('normal'); renderStrip(null); renderPanel(); return; }
         el.textContent = Math.round(L.pct * 100) + '%' + (L.switchWorth ? '・建議換串' : '');
-        el.title = [
-            '上下文用量（估算）' + L.C.toLocaleString() + ' / ' + L.win.toLocaleString() + '（' + (L.pct * 100).toFixed(1) + '%）',
-            '校正來源：' + L.source + (L.calib ? '（' + L.calib.ago + ' 則訊息前）' : ''),
-            '固定部分 F ' + L.fixed.toLocaleString() + '，係數 k ' + L.k,
-            '換串回本輪數 N* ' + (isFinite(L.nStar) ? L.nStar.toFixed(1) : '—') + '（下一階段預設 ' + CFG.NEXT_ROUNDS + ' 輪）',
-            state.err ? '⚠ ' + state.err : '',
-            'v' + VERSION,
-        ].filter(Boolean).join('\n');
+        el.title = '點一下看詳細資料';
         paint(L.pct >= CFG.HIGH_PCT ? 'high' : (L.pct >= CFG.WARN_PCT || L.switchWorth) ? 'warn' : 'normal');
+        renderStrip(L.pct >= CFG.HIGH_PCT ? 'red' : L.pct >= CFG.WARN_PCT ? 'yellow' : L.switchWorth ? 'blue' : null);
+        renderPanel();
+    }
+
+    // ── 6. 詳細面板（點標籤開關）：主數字 → 判斷 → 依據 → 〔校正〕（mockup【28_圖】定案）──
+    // 掛在 body、fixed 對齊標籤左下：放進框架那一排會被重繪清掉（03 第⑨節）。
+    let panel = null;
+    const isDark = () => { const bg = getComputedStyle(document.body).backgroundColor.match(/\d+/g) || [255, 255, 255]; return (0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]) < 128; };
+    const man = n => (n / 1e4).toFixed(1).replace(/\.0$/, '') + ' 萬';
+    function onEsc(e) { if (e.key === 'Escape' && panel) { e.preventDefault(); e.stopPropagation(); closePanel(); } }
+    function onOutside(e) { if (panel && !panel.contains(e.target) && !(el && el.contains(e.target))) closePanel(); }
+    function closePanel() {
+        if (!panel) return;
+        panel.remove(); panel = null;
+        document.removeEventListener('keydown', onEsc, true);
+        document.removeEventListener('pointerdown', onOutside, true);
+    }
+    function togglePanel() {
+        if (panel) { closePanel(); return; }
+        panel = document.createElement('div');
+        panel.className = 'ccm-panel';
+        document.body.append(panel);
+        document.addEventListener('keydown', onEsc, true);      // 捕獲階段：一次只關最上層（03 第⑮節）
+        document.addEventListener('pointerdown', onOutside, true);
+        renderPanel();
+    }
+    function renderPanel() {
+        if (!panel) return;
+        if (!el || !el.isConnected || el.style.display === 'none') { closePanel(); return; }
+        const L = state.last, d = isDark();
+        const r = el.getBoundingClientRect();
+        const fg = d ? '#eeeeee' : '#1f1f1f', dim = d ? '#a6a6a6' : '#767676', line = d ? 'rgba(255,255,255,.16)' : 'rgba(0,0,0,.10)';
+        panel.style.cssText = 'position:fixed;z-index:2147483646;box-sizing:border-box;width:340px;padding:12px 14px;border-radius:8px;'
+            + 'font-size:14px;line-height:20px;left:' + Math.round(r.left) + 'px;top:' + Math.round(r.bottom + 8) + 'px;'
+            + 'background:' + (d ? '#30302e' : '#f4f4f2') + ';color:' + fg + ';border:1px solid ' + line + ';box-shadow:0 4px 16px rgba(0,0,0,' + (d ? '.5' : '.14') + ')';
+        const busy = state.autoPending || !!state.calibWait;
+        const ed = document.querySelector(SEL.input);
+        const typing = !!(ed && ed.innerText.trim());
+        const row = (txt, css) => { const x = document.createElement('div'); x.style.cssText = css || ''; x.textContent = txt; return x; };
+        const parts = [];
+        if (L) {
+            parts.push(row(man(L.C) + ' / ' + man(L.win) + '（' + Math.round(L.pct * 100) + '%）', 'font-weight:600'));
+            const j = document.createElement('div'); j.style.marginTop = '8px';
+            j.append('換新對話串約 ', Object.assign(document.createElement('b'), { textContent: (isFinite(L.nStar) ? Math.ceil(L.nStar) : '—') + ' 輪' }),
+                '後回本，下一階段預估 ' + CFG.NEXT_ROUNDS + ' 輪', document.createElement('br'),
+                Object.assign(document.createElement('b'), { textContent: L.switchWorth ? '建議換' : '不用換' }));
+            parts.push(j);
+            const basis = row('', 'margin-top:8px;padding-top:8px;border-top:1px solid ' + line + ';color:' + dim);
+            basis.append('校正：' + L.source + (L.calib ? '（' + L.calib.ago + ' 則訊息前）' : ''), document.createElement('br'),
+                '固定部分 F ' + man(L.fixed) + '・係數 k ' + L.k + '・v' + VERSION);
+            parts.push(basis);
+        } else parts.push(row(state.err ? '⚠ ' + state.err : '還沒有資料', 'color:' + dim));
+        if (L && state.err) parts.push(row('⚠ ' + state.err, 'margin-top:6px;color:' + (d ? '#ffd37a' : '#9a5b00')));
+        const act = row('', 'margin-top:10px;display:flex;align-items:center;gap:10px');
+        const b = document.createElement('button');
+        b.type = 'button'; b.className = 'ccm-calib';
+        b.textContent = busy ? '校正中…' : '校正';
+        const off = busy || typing;
+        b.style.cssText = 'height:28px;padding:0 12px;border-radius:8px;box-sizing:border-box;font:inherit;color:inherit;cursor:' + (off ? 'default' : 'pointer') + ';'
+            + 'background:' + (d ? '#3a3a3a' : '#ffffff') + ';border:1px solid ' + (d ? 'rgba(255,255,255,.25)' : 'rgba(0,0,0,.25)') + ';opacity:' + (off ? '.45' : '1');
+        b.setAttribute('aria-disabled', off ? 'true' : 'false');
+        const why = row(typing && !busy ? '輸入框有字，先送出或清空' : '', 'color:' + (d ? '#ffd37a' : '#9a5b00'));
+        why.className = 'ccm-why';
+        b.addEventListener('click', () => { if (!off) sendContext('校正'); });
+        act.append(b, why);
+        parts.push(act);
+        panel.replaceChildren(...parts);
+    }
+    // 面板開著時，輸入框打字／清空要即時反映到〔校正〕的停用狀態
+    setInterval(() => {
+        if (state.calibWait && (Date.now() - state.calibWait.t > 90000 || (state.last && state.last.calib && state.last.calib.idx > state.calibWait.idx))) { state.calibWait = null; renderPanel(); }
+        if (panel) { const ed = document.querySelector(SEL.input); const t = !!(ed && ed.innerText.trim()); if (t !== panel.__typing) { panel.__typing = t; renderPanel(); } }
+    }, 500);
+
+    // ── 7. 視窗底部燈帶（Z-Library 工具箱的底部燈帶同一套做法）：紅 ≥80% > 黃 ≥70% > 藍 建議換串，一直呼吸 ──
+    // 外層只管淡入淡出、內層只管上色與呼吸：呼吸會動 opacity，跟淡入淡出放同一個元素會互相打架。
+    const STRIP = {
+        blue:   { color: '#2979FF', white: 0.4,  alpha: 0.65 },
+        yellow: { color: '#F2B705', white: 0.6,  alpha: 0.65 }, // Z-Library 沒有黃，新調（mockup 定案）
+        red:    { color: '#FF0000', white: 0.28, alpha: 0.65 },
+    };
+    let strip = null;
+    function renderStrip(kind) {
+        if (!strip) {
+            const st = document.createElement('style');
+            st.textContent = '@keyframes ccmBreathe{0%,100%{opacity:.35}50%{opacity:1}}';
+            (document.head || document.documentElement).append(st);
+            strip = document.createElement('div');
+            strip.className = 'ccm-strip';
+            strip.style.cssText = 'position:fixed;left:0;bottom:0;width:100%;height:4px;z-index:2147483000;pointer-events:none;opacity:0;transition:opacity 180ms ease';
+            strip.append(document.createElement('div'));
+            document.body.append(strip);
+        }
+        strip.dataset.kind = kind || '';
+        if (!kind) { strip.style.opacity = '0'; return; }
+        const c = STRIP[kind], rgb = c.color.match(/\w\w/g).map(h => parseInt(h, 16)).join(',');
+        strip.firstChild.style.cssText = 'height:100%;width:100%;background:' + c.color + ';animation:ccmBreathe 1.4s ease-in-out infinite;'
+            + 'box-shadow:0 0 7px 1.4px rgba(255,255,255,' + c.white + '),0 0 9.8px 2.8px rgba(' + rgb + ',' + c.alpha + ')';
+        strip.style.opacity = '1';
     }
     function paint(level) {
         // 依頁面底色判斷深淺（常駐介面跟網站一致：03 第①節）

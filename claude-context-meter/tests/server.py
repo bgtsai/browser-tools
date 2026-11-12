@@ -9,9 +9,10 @@ def tree(cid):
         msgs.append({"uuid":uuid,"parent_message_uuid":msgs[-1]["uuid"] if msgs else "00000000-0000-4000-8000-000000000000","sender":sender,"content":content,"attachments":[]})
     add('m1','human',[{"type":"text","text":"a"*35000}])          # 35000/3.5 = 10000
     add('m2','assistant',[{"type":"text","text":"中"*5000}])       # 5000
-    if MODE['tree']=='calib':
+    if MODE['tree'] in ('calib','y','r'):   # y：74% 黃、r：85% 紅；固定部分約 14 萬，讓「建議換串」也成立，才驗得到優先序 紅＞黃＞藍
+        ctx={'calib':CTX,'y':CTX.replace('404.4k','740k').replace('269.5k','600k'),'r':CTX.replace('404.4k','850k').replace('269.5k','710k')}[MODE['tree']]
         add('m3','human',[{"type":"text","text":"/context"}])
-        add('m4','assistant',[{"type":"text","text":CTX}])
+        add('m4','assistant',[{"type":"text","text":ctx}])
     add('m5','human',[{"type":"text","text":"中"*1000}])           # 1000
     # 分支外的訊息不應計入
     side={"uuid":'x1',"parent_message_uuid":'m1',"sender":'assistant',"content":[{"type":"text","text":"中"*99999}]}
