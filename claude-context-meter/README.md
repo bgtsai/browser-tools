@@ -1,5 +1,7 @@
 # Claude 上下文用量（claude-context-meter）
 
+> **已合併進 [Claude 對話工具（bgtsai/claude-chat-tools）](https://github.com/bgtsai/claude-chat-tools)，這裡不再更新。** 請改裝新腳本，並移除這支。
+
 在 claude.ai 跑 Claude Code 遠端工作階段（Cowork／Project 對話）時，畫面上顯示這個對話串目前的上下文用量，
 並在「換新對話串比較划算」或用量過高時主動提醒。不需要 hook、不需要使用者手動跑 `/context`。
 

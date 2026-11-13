@@ -2,7 +2,7 @@
 
 每支工具各自一個資料夾，總覽見 README.md。這裡只放「進行中」工具的交接。
 
-## claude-context-meter（Claude 上下文用量）— 進行中
+## claude-context-meter（Claude 上下文用量）— 已合併進 bgtsai/claude-chat-tools（2026-11-13），之後在那邊開發；以下是合併前的紀錄
 
 ### 目前狀態（2026-11-12）
 - v0.4.0：送出訊息時尾端附 `[ctx NN%・X萬]`（Enter 與送出鈕都攔，下一格再按送出鈕放行；/ 開頭、已有標記不加）。真實編輯器是 tiptap／ProseMirror，插入會變新段落（實測）；Firefox 實機送出已確認。
