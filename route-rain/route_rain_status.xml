@@ -3,6 +3,13 @@
 <title>Route Rain 氣象快取更新狀態</title>
 <description>路線降雨預報 — GitHub Actions 氣象快取抓取執行紀錄</description>
 <link>https://github.com/bgtsai/browser-tools</link>
+<item><title>🟡 22:24 2026.11.14｜抓取重試</title><description><![CDATA[【摘要】成功 22/22 縣市<br>
+<br>
+【重試紀錄】<br>
+14:24:49 新北市 重試成功<br>
+<br>
+【失敗紀錄】<br>
+（本次無）]]></description><pubDate>Sat, 14 Nov 2026 14:28:40 +0000</pubDate><guid isPermaLink="false">route-rain-1794666520</guid></item>
 <item><title>🟢 14:53 2026.11.14｜一切正常</title><description><![CDATA[【摘要】成功 22/22 縣市<br>
 <br>
 【重試紀錄】<br>
@@ -139,11 +146,4 @@
 <br>
 【失敗紀錄】<br>
 （本次無）]]></description><pubDate>Sun, 08 Nov 2026 19:57:34 +0000</pubDate><guid isPermaLink="false">route-rain-1794167854</guid></item>
-<item><title>🟢 23:29 2026.11.08｜一切正常</title><description><![CDATA[【摘要】成功 22/22 縣市<br>
-<br>
-【重試紀錄】<br>
-（本次無）<br>
-<br>
-【失敗紀錄】<br>
-（本次無）]]></description><pubDate>Sun, 08 Nov 2026 15:32:24 +0000</pubDate><guid isPermaLink="false">route-rain-1794151944</guid></item>
 </channel></rss>
