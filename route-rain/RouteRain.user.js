@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.76.0
+// @version      0.76.1
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -543,6 +543,41 @@
         }
         state.capturedDirections = { text, at: Date.now(), url: String(url), altCount: usable.length };
         log('已收下路線資料', (text.length / 1024).toFixed(1) + 'KB｜可用路線', usable.length, '條');
+    }
+
+    /**
+     * 頁面初次載入時，Google 有時用 HTML 裡的 <link rel=preload> 預先抓路線資料，
+     * 網頁之後直接用那份、不再經過 fetch／XHR，攔截器就完全看不到（實測 2026-11-18，
+     * 10 個途經點的機車路線：整頁只有一個 initiatorType=link 的 directions 請求）。
+     * 而且那個網址帶 sig= 參數，回應是二進位（application/octet-stream），不是 JSON。
+     * 實測拿掉 sig 重送同一個網址就回 JSON，內容跟 Google 自己切換交通方式時
+     * 發的 XHR 完全一致（距離、時間、座標數都相同）。
+     * 所以攔截器沒收到東西時，改從頁面找出那個 preload 網址、拿掉 sig 自己請求一次。
+     */
+    async function refetchPreloadedDirections() {
+        const isDir = u => DIRECTIONS_URL_RE.test(String(u || ''));
+        const urls = [...document.querySelectorAll('link[href]')].map(l => l.href).filter(isDir);
+        try {
+            for (const e of performance.getEntriesByType('resource')) {
+                if (isDir(e.name) && !urls.includes(e.name)) urls.push(e.name);
+            }
+        } catch (err) { log('讀不到 performance 紀錄｜', err.message); }
+        if (!urls.length) { log('頁面上找不到 preload 的路線網址'); return; }
+        for (const raw of urls) {
+            try {
+                const u = new URL(raw, location.href);
+                u.searchParams.delete('sig');
+                const res = await pageWindow().fetch(u.href, { credentials: 'include' });
+                const text = await res.text();
+                keepIfDirections(u.href, text);   // 內部會驗證能解析才收下
+                if (state.capturedDirections) {
+                    log('攔截器沒收到，改用頁面 preload 網址（去掉 sig）重新取得路線資料');
+                    return;
+                }
+            } catch (err) {
+                log('重抓 preload 路線網址失敗｜', err.message);
+            }
+        }
     }
 
     /** 真正的網頁 window。用了 GM_* 授權後腳本跑在沙箱裡，很多操作必須經由它才有效 */
@@ -2152,6 +2187,7 @@ ${field('API 授權碼',
 
         clearBody(wrap);
         showMessage(wrap, '處理中…');
+        if (!state.capturedDirections) await refetchPreloadedDirections();
         if (!state.capturedDirections) {
             clearBody(wrap);
             showMessage(wrap,
