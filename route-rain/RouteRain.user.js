@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.76.1
+// @version      0.77.0
 // @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -680,13 +680,21 @@
             // 後半段的節點被壓縮進那段時間裡，目的地卻用摘要的總時程，落差就露出來。
             const segments = (alts[r][1] || []).filter(s => Array.isArray(s));
             const steps = [];
+            // 每段（停靠點之間）的兩種時間：[0][3] 不含路況、[0][10][0] 依路況。
+            // 步驟層只有不含路況的秒數，依路況時間只到路段這一層（見 applyPanelTiming）。
+            const segTimes = segments.map(seg => ({
+                freeSec: (seg[0] && seg[0][3] && seg[0][3][0]) || 0,
+                trafficSec: (seg[0] && seg[0][10] && seg[0][10][0] && seg[0][10][0][0]) || 0,
+            }));
             // 注意：leg 的分界**不是**使用者設定的停靠點。實測只有起訖兩點的路線，
             // Google 仍會切成兩個 leg（第二個只有一步、三百多公尺，是抵達前的最後一小段）。
             // 停靠點要從網址的 data= 段取得，那裡才明確區分「停靠站」與「拖曳控制點」。
-            for (const seg of segments) {
+            for (let si = 0; si < segments.length; si++) {
+                const seg = segments[si];
                 for (const leg of (seg[1] || [])) {
                     for (const st of (leg[1] || [])) {
                         steps.push({
+                            seg: si,
                             meters: (st[0] && st[0][2] && st[0][2][0]) || 0,
                             sec: (st[0] && st[0][3] && st[0][3][0]) || 0,
                             roads: roadNamesOf(st),
@@ -704,9 +712,48 @@
                 totalSec: (summary[3] && summary[3][0]) || 0,
                 distanceText: (summary[2] && summary[2][1]) || '',
                 durationText: (summary[3] && summary[3][1]) || '',
+                segTimes,
+                // 摘要的 [10][0] 是面板顯示的依路況時間；[3] 是不含路況
+                trafficSec: (summary[10] && summary[10][0] && summary[10][0][0]) || 0,
+                trafficText: (summary[10] && summary[10][0] && summary[10][0][1]) || '',
             });
         }
         return out;
+    }
+
+    /**
+     * 讓時程跟面板上使用者看到的時間一致。
+     *
+     * 回應裡同時有兩種時間：摘要 [3]（不含路況）與 [10][0]（依路況，面板通常顯示這個）。
+     * 實測（2026-11-18，107 公里機車路線）：[3] = 3 小時 29 分，[10][0] = 2 小時 46 分 = 面板。
+     * 不寫死用哪一種：拿面板顯示的時間去比，哪一種比較接近就用哪一種——
+     * 交通方式、出發時間設定不同時，面板顯示的可能是任一種。
+     *
+     * 選到依路況時，步驟層沒有依路況的秒數，只有路段（停靠點之間）有，
+     * 所以每段裡的步驟秒數依該段比例縮放（各段比例 0.74～0.87 不等，不能整條同一個比例）。
+     * 某段沒有依路況時間時，那段沿用原本秒數。
+     */
+    function applyPanelTiming(alt, selected) {
+        const panelSec = selected && selected.durationSec;
+        let useTraffic = alt.trafficSec > 0;
+        if (useTraffic && panelSec) {
+            useTraffic = Math.abs(alt.trafficSec - panelSec) <= Math.abs(alt.totalSec - panelSec);
+        }
+        if (!useTraffic) {
+            alt.timeBasis = alt.trafficSec > 0 ? '不含路況（與面板較接近）' : '不含路況（資料沒有路況時間）';
+            return alt;
+        }
+        const steps = alt.steps.map(st => {
+            const seg = alt.segTimes && alt.segTimes[st.seg];
+            const ratio = seg && seg.freeSec > 0 && seg.trafficSec > 0 ? seg.trafficSec / seg.freeSec : 1;
+            return { ...st, sec: st.sec * ratio };
+        });
+        return {
+            ...alt, steps,
+            totalSec: alt.trafficSec,
+            durationText: alt.trafficText || alt.durationText,
+            timeBasis: '依路況',
+        };
     }
 
     /** 從替代路線中挑出面板上選中的那一條：用面板顯示的距離與時間比對 */
@@ -2205,7 +2252,9 @@ ${field('API 授權碼',
             return;
         }
         const picked = pickAlternative(alts, selected);
-        const alt = picked.alt;
+        const alt = applyPanelTiming(picked.alt, selected);
+        log('時間依據：', alt.timeBasis, '｜總時程', Math.round(alt.totalSec / 60), '分',
+            selected && selected.durationText ? `｜面板 ${selected.durationText}` : '');
 
         state.routePoints = alt.points;   // 供計算安全按下點
         const { timeline, steps, totalSec } = buildTimeline(alt);
@@ -2291,6 +2340,7 @@ ${field('API 授權碼',
             nodes, departures, forecast, totalSec,
             meta: {
                 matchNote: picked.matchNote,
+                timeBasis: alt.timeBasis,
                 routeDistanceMeters: alt.totalMeters,
                 capturedAt: state.capturedDirections.at,
                 mode: modeInfo,
@@ -2439,6 +2489,7 @@ ${field('API 授權碼',
                 }[meta.source] || meta.source || '未知來源'}取得，呼叫 ${meta.callCount} 次`,
             `交通方式 ${meta.mode.mode}（判斷依據：${meta.mode.via}）`,
             `路線比對：${meta.matchNote}`,
+            `時間依據：${meta.timeBasis || '不含路況'}`,
         ];
         // 安全網：先用距離判斷交通方式有沒有搞錯（距離不受路況影響），
         // 距離吻合才進一步看時間差，而時間差多半只是「含不含即時路況」的差異。
@@ -2458,8 +2509,8 @@ ${field('API 授權碼',
         if (!distMismatch && shownDur) {
             const diff = Math.abs(totalSec - shownDur) / shownDur;
             if (diff > DURATION_MISMATCH_RATIO) {
-                lines.push(`面板時間「${meta.selected.durationText}」含即時路況；` +
-                    `本表以無路況時間 ${Math.round(totalSec / 60)} 分計算，抵達時刻可能偏早。`);
+                lines.push(`面板時間「${meta.selected.durationText}」與本表的` +
+                    `${Math.round(totalSec / 60)} 分差距較大，抵達時刻可能有偏差。`);
             }
         }
         if (meta.failures && meta.failures.length) {
