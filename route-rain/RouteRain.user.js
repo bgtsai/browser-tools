@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      0.77.0
-// @description  在 Google Maps 路線面板加一個「路雨」按鈕，顯示沿途各鄉鎮在不同出發時間下的降雨機率表格
+// @version      1.0.0
+// @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
 // @icon         https://www.google.com/maps/about/images/icons/maps_512dp.png
@@ -48,12 +48,31 @@
     const MIN_DWELL_SEC = 60;                  // 累加停留低於此秒數的鄉鎮不產生節點（切到邊角）
     const ROAD_NAME_MAX_GAP_SEC = 300;         // 節點所在 step 無路名時，前後找路名的時間差上限
 
-    // 表格呈現
-    const CELL_PX = 20;                        // 色塊邊長
-    const GAP_PX = 4;                          // 色塊間隔
-    const PITCH_PX = CELL_PX + GAP_PX;         // 每欄節距
-    const ROWH_W_PX = 126;                     // 左側地點欄寬度
-    const INFO_MAX_W_PX = 860;                 // 資訊區的最大寬度（面板本身不再加寬）
+    // 底部時間軸面板（v1.0.0 介面重構；數值照 mockup v3，1512×888 視窗 1:1）
+    // 96 欄要一次放下：欄距 13（色塊 12＋間距 1）× 96 ＝ 1248，加地點欄 140 ＝ 1388，
+    // 1512 寬的視窗扣掉右側 64 還有 1448，放得下。
+    const PANEL_RIGHT_GAP_PX = 64;             // 右側讓出給 Google 的縮放鈕與街景小人
+    const PANEL_TITLE_H_PX = 40;               // 標題列高度（收合時整個面板只剩這麼高）
+    const PANEL_DEFAULT_H_PX = 288;            // 使用者還沒拖拉過時的面板高度
+    const PANEL_MAP_MIN_PX = 80;               // 拖拉上限：面板上方至少留這麼多地圖
+    const PANEL_MIN_ROWS = 3;                  // 拖拉下限：至少看得到這麼多列
+    const CELL_PX = 12;                        // 色塊邊長
+    const COL_PITCH_PX = 13;                   // 每欄節距（色塊＋1px 間距）
+    const ROW_PITCH_PX = 16;                   // 每列節距
+    const LABEL_W_PX = 140;                    // 左側地點欄寬度（sticky）
+    const LABEL_TIME_W_PX = 36;                // 地點欄裡時間的固定寬度，靠右對齊才排得整齊
+    // 標頭各層的 y。整點圓 18、15 分小點 4 都是偶數，軸線也取 2px，
+    // 圓心才會落在線的正中、而且左右也對得上 12px 色塊的中心（03 第④節奇偶數原則）。
+    // mockup 的軸線 1px、小點 3px 會落在半像素，這裡各加 1px。
+    const PIN_Y_PX = 1;                        // 已釘住那一欄的 ▼
+    const SUM_Y_PX = 12;                       // 「沿路最濕」摘要條
+    const SUM_H_PX = 8;
+    const AXIS_Y_PX = 34;                      // 時間軸線（2px 高，中心在 35）
+    const HOUR_DOT_PX = 18;                    // 整點圓
+    const QUARTER_DOT_PX = 4;                  // 15 分小點
+    const HEAD_H_PX = 52;                      // 標頭總高（sticky）
+    const GRID_BOTTOM_PAD_PX = 8;              // 最後一列下方的留白
+    const COLBOX_PAD_PX = 2;                   // 欄框比色塊每邊多出的寬度
     const HOVER_SETTLE_MS = 160;               // 送出移動事件後，等命中判定跑完再點擊
     // 與 Google 自己一致：實測點路線節點時，它一律縮放到整數 17.00
     //（18.03→17.00、16.17→17.00，一個往下一個往上都精準落在 17）
@@ -113,12 +132,7 @@
     const DEPART_COLUMNS_MAX = 96;             // 欄數上限（96 欄 × 15 分 = 24 小時）
                                                // 預報涵蓋 96 小時、可排到約 370 欄，但步行模式節點多，
                                                // 格數會上萬；第一版先封頂，確認效能後再放寬
-    const TIMELINE_AXIS_Y_PX = 27;             // 時間軸線距標頭頂端的距離
-    const HEADER_H_PX = 72;                    // 標頭列高度；要容得下整點圓與其下方的時間標籤，
-                                               // 太矮的話標籤會壓到第一列資料
     const SIDEBAR_MAX_X_PX = 520;              // 左側面板的寬度上限；用來篩掉地圖上的搜尋框
-    const HOUR_DOT_PX = 20;                    // 整點圓直徑；加上 2px 外環後為 24px，
-                                               // 剛好等於欄節距，不會溢出到鄰欄被蓋掉
 
     // 預報資料
     const FORECAST_HORIZON_HOURS = 96;         // 「未來3天」資料集實測涵蓋 96 小時
@@ -131,6 +145,7 @@
     const KEY_CWA_CACHE = 'cwaForecastCache';
     const KEY_PLACE_CACHE = 'placeNameCache';
     const KEY_SOURCE_MODE = 'forecastSourceMode';   // 'github'（預設）｜'api'
+    const KEY_PANEL_HEIGHT = 'panelHeight';         // 使用者拖拉過的面板高度（px）
 
     function getSourceMode() {
         const v = GM_getValue(KEY_SOURCE_MODE, 'github');
@@ -148,6 +163,9 @@
         routeRowClassHint: 'UgZKXd',                   // 單一條路線那一列
         durationClassHint: 'Fk3sm',                     // 「8 小時 44 分」
         distanceClassHint: 'ivN21e',                    // 「35.8 公里」
+        // 左側面板的收合／展開鈕（2026-11-24 實測；收起後 aria-label 換成「展開」）
+        sidebarCollapse: 'button[aria-label="收合側邊面板"]',
+        sidebarExpand: 'button[aria-label="展開側邊面板"]',
     };
 
     // 縣市 → 「鄉鎮天氣預報-未來3天」dataid
@@ -163,35 +181,34 @@
         '連江縣': 'F-D0047-081',
     };
 
-    // 降雨機率色階（藍，11 級）與兩級洋紅疊加後的預混實色
-    // 預混而非用半透明疊層：疊層在小色塊上會有合成成本，且預混值可直接查表
-    const PALETTE = {
-        0: ['#f2f7fb', '#f5c6e9', '#f78fd5'],
-        10: ['#daebf9', '#e1bce7', '#ea88d4'],
-        20: ['#c2dff7', '#ceb2e6', '#dc81d2'],
-        30: ['#aad3f3', '#bba9e2', '#ce7ad0'],
-        40: ['#94c6ef', '#a99edf', '#c173ce'],
-        50: ['#7fbae9', '#9995da', '#b56cca'],
-        60: ['#6bade1', '#898ad4', '#a964c6'],
-        70: ['#59a0d7', '#7a80cc', '#9f5dc0'],
-        80: ['#4993cc', '#6d76c3', '#9555ba'],
-        90: ['#3a87c0', '#616cba', '#8d4eb3'],
-        100: ['#2b7ab4', '#5562b0', '#8447ac'],
-    };
+    // 降雨機率色階：配色 I（2026-11-24 使用者選定），四級、級內不分深淺。
+    // 由淺到深要「一級比一級重」：先固定每級亮度再挑色相，中間級避開黃橘（使用者嫌髒），
+    // 選色過程見知識庫 03 第⑩節。白色那級在地圖上保留 Google 的藍框才看得出路線。
+    const RAIN_LEVELS = [
+        { maxPct: 20, color: '#ffffff' },     // 0～20%：不太會淋到
+        { maxPct: 40, color: '#48e7ff' },     // 30～40%：淺青
+        { maxPct: 60, color: '#ff72d1' },     // 50～60%：桃紅
+        { maxPct: 100, color: '#af00e0' },    // 70% 以上：紫
+    ];
+    const RAIN_NA_COLOR = '#eceff1';          // 查不到預報的格子
+    // 雷雨、大雨不是機率問題，是後果問題：機率加這麼多再查表（剛好往上一級，紫封頂）
+    const RAIN_BUMP_PCT = 20;
 
     const state = {
         instanceId: Math.random().toString(36).slice(2, 8),  // 區分同一支腳本的不同次載入
         active: false,
-        container: null,
-        hiddenBlocks: [],
-        originalPanelWidth: '',
+        panel: null,                // 底部面板的根元素（掛在 document.body）
+        body: null,                 // 面板裡放格線或訊息的那一層
+        view: null,                 // 目前畫出來的資料與互動狀態，見 render()
+        collapsed: false,           // 使用者按了〔收合〕
+        pinnedMs: null,             // 已釘住那一欄的出發時刻；重算後用它找回同一欄
+        sidebarCollapsedByUs: false,// Google 左側面板是我們收起來的（關閉時才展開回去）
+        lastSelected: null,         // { key, selected, names }：左側面板收著時讀不到，沿用上次的
         lastRouteKey: '',
         capturedDirections: null,   // 攔截到的 /maps/preview/directions 回應
         gToken: '',                 // Google 內部端點的 session 權杖
         routePoints: null,          // 目前顯示路線的座標，用來算出離路線夠遠的按下點
         rerunTimer: null,
-        panelOriginalOverflow: undefined,
-        optionsClickHandler: null,
         townCache: null,
     };
 
@@ -1222,27 +1239,31 @@
     }
 
     // ════════════════════════════════════════════════════════════════
-    // 天氣現象 → 兩檔嚴重度
+    // 天氣 → 顏色級數
     // ════════════════════════════════════════════════════════════════
 
-    const SEV_HEDGE = ['局部', '短暫', '或'];   // 空間／時間／替代性的保留字眼
     const SEEN_WEATHER_CODES = new Set();       // 記錄實際出現過的代碼，用真實使用補完官方拿不到的完整清單
 
     /**
-     * 0 = 無降水；1 = 有可能；2 = 基本上會遇到／後果嚴重
-     * 官方預報代碼表拿不到完整版（動態頁面抓不到、編號有跳號可證不完整），
-     * 所以改用構詞規則：中文描述是「雲量狀態＋降水型態」的組合，規律穩定，
-     * 對沒見過的代碼也能安全降級。
+     * 一格預報 → { pop, eff, level, baseLevel, color, reason }；沒有機率時回 null。
+     *
+     * 取代 v0.x 的 severityOf()＋洋紅疊色：第二個變數疊在色相上，四級配色時
+     * 一格會有 8 種顏色，在 12px 的格子上分不出來。改成「雷雨／大雨就把機率提高
+     * RAIN_BUMP_PCT 再查表」，顏色只剩四種，往上一級的意思是「當成更可能淋到」。
+     * 官方天氣現象代碼表拿不到完整版，所以看中文描述裡的字，不看代碼。
      */
-    function severityOf(weatherText, weatherCode) {
-        if (!weatherText) return 0;
-        if (weatherCode) SEEN_WEATHER_CODES.add(weatherCode);
-        const hasThunder = weatherText.includes('雷');
-        const hasFrozen = weatherText.includes('雪') || weatherText.includes('積冰');
-        const hasRain = weatherText.includes('雨');
-        if (!hasThunder && !hasFrozen && !hasRain) return 0;
-        if (hasThunder || hasFrozen) return 2;      // 不是機率問題，是後果問題
-        return SEV_HEDGE.some(h => weatherText.includes(h)) ? 1 : 2;
+    function rainOf(row) {
+        if (!row || row.pop == null) return null;
+        if (row.code) SEEN_WEATHER_CODES.add(row.code);
+        const text = row.weather || '';
+        const reason = text.includes('雷') ? '雷陣雨'
+            : text.includes('豪雨') ? '豪雨'
+            : text.includes('大雨') ? '大雨' : '';
+        const pop = Math.round(row.pop / 10) * 10;
+        const eff = Math.min(100, pop + (reason ? RAIN_BUMP_PCT : 0));
+        const levelOf = pct => RAIN_LEVELS.findIndex(l => pct <= l.maxPct);
+        const level = levelOf(eff);
+        return { pop: row.pop, eff, level, baseLevel: levelOf(pop), color: RAIN_LEVELS[level].color, reason };
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -1625,14 +1646,7 @@ ${field('API 授權碼',
                 GM_setValue(KEY_SOURCE_MODE, modeValue);
                 back.remove();
                 log('設定已儲存');
-                if (state.active && state.container) {
-                    clearBody(state.container);
-                    run(state.container).catch(err => {
-                        warn(err);
-                        clearBody(state.container);
-                        showMessage(state.container, '出錯了：' + err.message);
-                    });
-                }
+                rerun();
             }
         });
         back.addEventListener('click', ev => { if (ev.target === back) back.remove(); });
@@ -1671,12 +1685,7 @@ ${field('API 授權碼',
 
     function injectStyle() {
         if (document.getElementById(PREFIX + '-style')) return;
-        const rules = [];
-        for (const p of Object.keys(PALETTE)) {
-            PALETTE[p].forEach((hex, sev) => {
-                rules.push(`.${PREFIX}-c.${PREFIX}-s${sev}-${p}{background:${hex}}`);
-            });
-        }
+        const P = PREFIX;
         const css = `
 /* 清空文字節點後仍會與原文疊字，代表原本的字可能來自虛擬元素的 content，
    這裡一併壓掉；另外標示啟用狀態 */
@@ -1691,7 +1700,6 @@ ${field('API 授權碼',
   flex:0 0 auto !important;float:none !important;white-space:nowrap !important;
   transform:none !important}
 [data-${PREFIX}-btn][data-${PREFIX}-on="1"]{background:#e8f0fe;border-radius:8px}
-.${PREFIX}-wrap{font-family:inherit;display:flex;flex-direction:column;padding-top:8px}
 .${PREFIX}-modal-back{position:fixed;inset:0;background:rgba(32,33,36,.45);z-index:2147483100;
   display:flex;align-items:center;justify-content:center}
 .${PREFIX}-modal{background:#fff;border-radius:12px;padding:22px 24px;width:420px;max-width:92vw;
@@ -1730,121 +1738,100 @@ ${field('API 授權碼',
 .${PREFIX}-mbtn:hover{background:#f1f3f4}
 .${PREFIX}-mbtn.${PREFIX}-primary{background:#1a73e8;color:#fff}
 .${PREFIX}-mbtn.${PREFIX}-primary:hover{background:#1765cc}
-/* 標題列與分隔線都拿掉了，只留一點上方留白讓表格不要貼著上緣 */
-/* scroll-padding-top 讓吸附時把黏在頂端的標頭高度算進去，
-   否則列會被標頭切掉一半（就是「不完整的色塊」） */
-/* scroll-padding 把「黏在頂端／左側」的標頭尺寸算進去，否則吸附後仍會被標頭切掉半格。
-   橫向只保證左側切齊（右側視畫面寬度自然截斷，這是刻意取捨） */
-/* overflow-anchor:none 關掉瀏覽器的捲動錨定——內容一有變動它就會自行調整捲動位置，
-   跟 scroll-snap 疊在一起會互相打架、造成畫面亂跳 */
-.${PREFIX}-scroll{overflow:auto;max-height:calc(100vh - 300px);overflow-anchor:none;
-  scroll-snap-type:both mandatory;overscroll-behavior:contain;
-  scroll-padding-top:${HEADER_H_PX}px;scroll-padding-left:${ROWH_W_PX}px}
-.${PREFIX}-msg{padding:14px 12px;font-size:13px;color:#3c4043;line-height:1.7;white-space:pre-wrap}
-.${PREFIX}-msg b{color:#1a73e8}
-/* 第一列必須明確給標頭的高度。只設 grid-auto-rows 的話，標頭那一列也只有
-   PITCH_PX 高，而標頭本身是 HEADER_H_PX——溢出的部分會往下蓋住資料列，
-   蓋掉的列數正好是 (HEADER_H_PX − PITCH_PX) ÷ PITCH_PX。
-   實測 72px 標頭配 24px 節距，前兩列完全看不到。 */
-.${PREFIX}-grid{display:grid;grid-template-rows:${HEADER_H_PX}px;
-  grid-auto-rows:${PITCH_PX}px;width:max-content;
-  grid-template-columns:${ROWH_W_PX}px repeat(var(--${PREFIX}-cols),${PITCH_PX}px)}
-.${PREFIX}-corner{position:sticky;top:0;left:0;z-index:40;background:#fff;height:${HEADER_H_PX}px;
-  border-bottom:1px solid #e8eaed;border-right:1px solid #e8eaed;
-  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;
-  padding:0 8px;box-sizing:border-box}
-/* 地名擷取的進度。放在左上角那格——它本來就是空的，而且是 sticky，捲動時一直看得到 */
-.${PREFIX}-prog{font-size:10.5px;color:#5f6368;line-height:1.45;text-align:center;white-space:nowrap}
-.${PREFIX}-prog b{color:#1a73e8;font-weight:600}
-.${PREFIX}-cnt b{color:#1a73e8;font-weight:600}
-.${PREFIX}-cnt{font-size:11px;color:#3c4043;text-align:center;white-space:nowrap;
+/* ── 底部時間軸面板 ──
+   掛在 document.body、fixed 定位，不進 Google 的渲染範圍（理由見 positionButton 的註解）。
+   文字層次只用字級與顏色分，不用字重：很多預設字型沒有粗體，粗細差異看不出來。 */
+.${P}-panel{position:fixed;left:0;bottom:0;z-index:2147482000;background:#fff;
+  border-top:1px solid rgba(0,0,0,.10);border-right:1px solid rgba(0,0,0,.10);border-radius:0 8px 0 0;
+  box-shadow:0 -2px 10px rgba(0,0,0,.10);display:flex;flex-direction:column;box-sizing:border-box;
+  font-family:"Google Sans Text",Roboto,"Noto Sans TC",Arial,sans-serif;color:#202124}
+.${P}-panel *{box-sizing:border-box}
+.${P}-grip{position:absolute;top:0;left:0;right:0;height:8px;cursor:ns-resize;z-index:5;touch-action:none}
+.${P}-grip::after{content:"";position:absolute;left:50%;top:3px;width:32px;height:4px;margin-left:-16px;
+  border-radius:2px;background:#dadce0}
+.${P}-grip:hover::after,.${P}-panel.${P}-dragging .${P}-grip::after{background:#9aa0a6}
+.${P}-panel.${P}-collapsed .${P}-grip{display:none}
+.${P}-title{height:${PANEL_TITLE_H_PX}px;flex:0 0 auto;display:flex;align-items:center;gap:14px;
+  padding:6px 12px 0 16px;white-space:nowrap;overflow:hidden}
+.${P}-name{font-size:16px;color:#202124}
+.${P}-sel{font-size:14px;color:#3c4043;font-variant-numeric:tabular-nums}
+.${P}-max{font-size:14px;color:#3c4043;display:inline-flex;align-items:center;gap:6px}
+.${P}-max i{width:12px;height:12px;border-radius:2px;display:inline-block;box-shadow:inset 0 0 0 1px rgba(0,0,0,.12)}
+.${P}-sp{flex:1}
+.${P}-ib,.${P}-tb{height:28px;border-radius:14px;border:1px solid #dadce0;background:#fff;cursor:pointer;
+  display:inline-flex;align-items:center;justify-content:center;padding:0;font-family:inherit;flex:0 0 auto}
+.${P}-ib{width:28px;color:#5f6368}
+.${P}-ib.${P}-has-warn{border-color:#d93025;color:#d93025}
+.${P}-tb{width:56px;color:#1a73e8;font-size:13px}
+.${P}-ib:hover,.${P}-tb:hover{background:#f1f3f4}
+.${P}-ib[aria-expanded="true"]{background:#e8f0fe}
+.${P}-body{flex:1;min-height:0;position:relative}
+.${P}-panel.${P}-collapsed .${P}-body{display:none}
+/* overflow-anchor:none：內容一變動瀏覽器就會自己調捲動位置，地名陸續補上時會亂跳 */
+.${P}-scroll{position:absolute;inset:0;overflow:auto;overscroll-behavior:contain;overflow-anchor:none}
+.${P}-inner{position:relative}
+.${P}-head{position:sticky;top:0;z-index:4;height:${HEAD_H_PX}px;background:#fff;display:flex}
+/* 標頭左側那格：sticky 疊在標頭的 sticky 裡，橫捲時也留在左邊 */
+.${P}-corner{position:sticky;left:0;z-index:3;width:${LABEL_W_PX}px;flex:0 0 ${LABEL_W_PX}px;height:100%;
+  background:#fff;padding:0 8px 0 16px}
+.${P}-sumlab{position:absolute;left:16px;top:${SUM_Y_PX + SUM_H_PX / 2 - 8}px;height:16px;line-height:16px;
+  font-size:11px;color:#80868b}
+.${P}-prog{position:absolute;left:16px;top:${AXIS_Y_PX + 1 - 8}px;height:16px;line-height:16px;
+  font-size:11px;color:#80868b;font-variant-numeric:tabular-nums;transition:opacity .5s ease}
+.${P}-prog.${P}-done{opacity:0}
+.${P}-marks{position:absolute;left:0;top:0;height:100%}
+.${P}-sum{position:absolute;top:${SUM_Y_PX}px;width:${CELL_PX}px;height:${SUM_H_PX}px;border-radius:1px;
+  box-shadow:inset 0 0 0 1px rgba(0,0,0,.12)}
+.${P}-axis{position:absolute;top:${AXIS_Y_PX}px;height:2px;background:#dadce0}
+.${P}-hour{position:absolute;top:${AXIS_Y_PX + 1 - HOUR_DOT_PX / 2}px;width:${HOUR_DOT_PX}px;height:${HOUR_DOT_PX}px;
+  border-radius:50%;background:#fff;border:1px solid #9aa0a6;font-size:11px;color:#3c4043;
+  display:flex;align-items:center;justify-content:center;font-variant-numeric:tabular-nums}
+.${P}-q{position:absolute;top:${AXIS_Y_PX + 1 - QUARTER_DOT_PX / 2}px;width:${QUARTER_DOT_PX}px;
+  height:${QUARTER_DOT_PX}px;border-radius:50%;background:#9aa0a6}
+.${P}-pin{position:absolute;top:${PIN_Y_PX}px;width:${CELL_PX}px;height:8px;display:none;pointer-events:none}
+.${P}-pin svg{display:block}
+.${P}-rows{position:relative}
+.${P}-row{display:flex;height:${ROW_PITCH_PX}px}
+.${P}-lab{position:sticky;left:0;z-index:2;width:${LABEL_W_PX}px;flex:0 0 ${LABEL_W_PX}px;height:${ROW_PITCH_PX}px;
+  padding:0 8px 0 16px;display:flex;align-items:center;gap:4px;background:#fff}
+.${P}-lab.${P}-hl{background:#e8f0fe}
+.${P}-p{font-size:12px;color:#3c4043;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 0;min-width:0}
+.${P}-m{font-size:11px;color:#80868b;flex:0 0 ${LABEL_TIME_W_PX}px;text-align:right;white-space:nowrap;
   font-variant-numeric:tabular-nums}
-.${PREFIX}-bar{width:${ROWH_W_PX - 24}px;height:3px;border-radius:2px;background:#e8eaed;overflow:hidden}
-.${PREFIX}-bar i{display:block;height:100%;background:#1a73e8;border-radius:2px;
-  width:0;transition:width .2s ease}
-/* 淡出只能套在「內容」上，絕不能套在格子本身。
-   這一格是左側地名欄的遮罩：往下捲時地名會從它底下經過，
-   靠它的白底擋住。若讓格子本身 opacity 歸零（而且用了 forwards 永久保持），
-   遮罩就失效，地名會透出來跟時間軸並排——實測踩過。 */
-.${PREFIX}-corner > *{transition:opacity .5s ease}
-.${PREFIX}-corner.${PREFIX}-done > *{opacity:0}
-/* 只吸附橫向（inline）。此元素縱向是 sticky，若連縱向也吸附，
-   它的吸附區會永遠等於當下捲動位置，瀏覽器就不斷把 Y 軸對回它 → 一 hover 就跳回最上面 */
-.${PREFIX}-h{position:sticky;top:0;z-index:20;background:#fff;height:${HEADER_H_PX}px;
-  border-bottom:1px solid #e8eaed;scroll-snap-align:none start}
-.${PREFIX}-h::before{content:"";position:absolute;left:0;right:0;top:${TIMELINE_AXIS_Y_PX}px;height:2px;background:#c7d9fb}
-.${PREFIX}-h.${PREFIX}-first::before{left:50%}
-.${PREFIX}-h.${PREFIX}-last::before{right:50%}
-/* 整點欄疊在鄰欄之上，否則鄰欄的不透明白底會蓋掉圓圈外環，看起來像被裁切 */
-.${PREFIX}-h.${PREFIX}-oclock{z-index:21}
-.${PREFIX}-dot{position:absolute;top:${TIMELINE_AXIS_Y_PX}px;left:50%;transform:translate(-50%,-50%);
-  width:7px;height:7px;border-radius:50%;background:#a9c2e8;box-shadow:0 0 0 3px #fff;
-  transition:transform .08s,background .08s}
-.${PREFIX}-hour{position:absolute;top:${TIMELINE_AXIS_Y_PX}px;left:50%;transform:translate(-50%,-50%);
-  width:${HOUR_DOT_PX}px;height:${HOUR_DOT_PX}px;border-radius:50%;background:#1a73e8;color:#fff;
-  font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;
-  box-shadow:0 0 0 2px #fff;transition:box-shadow .08s,transform .08s}
-.${PREFIX}-h.${PREFIX}-hl{z-index:30}
-.${PREFIX}-h.${PREFIX}-hl .${PREFIX}-dot{background:#1a73e8;transform:translate(-50%,-50%) scale(1.9)}
-.${PREFIX}-h.${PREFIX}-hl .${PREFIX}-hour{transform:translate(-50%,-50%) scale(1.15);
-  box-shadow:0 0 0 2px #fff,0 0 0 5px rgba(26,115,232,.42)}
-/* 用 visibility 而非 display 切換：display 會改變版面，一改就觸發回流，
-   scroll-snap 隨即重新對位——這正是「滑鼠一離開表格就跳回最上面」的來源。
-   visibility 不影響版面，切換時不會回流。 */
-/* 距離要算 hover 放大後的尺寸：圓放大 1.15 倍再加 5px 光暈，底緣在軸心 +16.5px。
-   原本設 +16，標籤的白底正好切掉光暈最下緣。 */
-.${PREFIX}-tl{position:absolute;top:${TIMELINE_AXIS_Y_PX + 22}px;left:50%;transform:translateX(-50%);
-  font-size:11px;font-weight:700;color:#1a73e8;white-space:nowrap;background:#fff;
-  padding:1px 4px;border-radius:3px;visibility:hidden}
-.${PREFIX}-h.${PREFIX}-hl .${PREFIX}-tl{visibility:visible}
-/* 列標頭：不透明白底＋往左延伸的陰影，避免捲動時內容從左緣露出來 */
-/* 只吸附縱向（block）。橫向是 sticky，理由同上 */
-.${PREFIX}-rh{position:sticky;left:0;z-index:10;background:#fff;scroll-snap-align:start none;
-  display:flex;align-items:center;
-  justify-content:flex-end;padding-right:8px;font-size:12px;white-space:nowrap;
-  border-right:1px solid #e8eaed;transition:background .08s;gap:6px;
-  box-shadow:-20px 0 0 #fff}
-.${PREFIX}-rh.${PREFIX}-hl{background:#e8f0fe;box-shadow:-20px 0 0 #e8f0fe}
-.${PREFIX}-rh .${PREFIX}-t{font-weight:600;color:#202124}
-/* 使用者自己規劃的位置（出發／停靠／抵達）用顏色區分，不加標籤佔空間 */
-.${PREFIX}-t.${PREFIX}-key{color:#1a73e8}
-/* 固定寬度＋等寬數字：hover 時整欄標籤要在「+504分」與「05:19」之間切換，
-   寬度只要有變化就會觸發回流，捲動錨定與 scroll-snap 會跟著重新對位，
-   表現出來就是「滑鼠移回表格時整個跳到最上面」。寬度鎖死才不會回流。 */
-.${PREFIX}-rh .${PREFIX}-m{color:#80868b;font-size:11px;text-align:right;
-  width:46px;flex:0 0 46px;font-variant-numeric:tabular-nums}
-.${PREFIX}-rh.${PREFIX}-hl .${PREFIX}-m{color:#1a73e8;font-weight:700}
-.${PREFIX}-d{display:flex;align-items:center;justify-content:center}
-.${PREFIX}-c{width:${CELL_PX}px;height:${CELL_PX}px;border-radius:2px;cursor:pointer;display:block}
-.${PREFIX}-c.${PREFIX}-na{background:repeating-linear-gradient(45deg,#f1f3f4 0 4px,#e0e3e6 4px 8px)}
-/* 說明區接在格線正下方、同一個捲動流（不另外開捲軸）；
-   sticky left 讓它橫向捲動時始終貼齊左側地點欄，不會被推出畫面 */
-.${PREFIX}-info{position:sticky;left:0;width:max-content;max-width:${INFO_MAX_W_PX}px;
-  padding:12px 12px 16px;border-top:1px solid #e8eaed;background:#fff}
-.${PREFIX}-legend{display:flex;flex-direction:column;gap:6px;font-size:12px;color:#3c4043}
-.${PREFIX}-legend div{display:flex;align-items:center}
-.${PREFIX}-legend span.${PREFIX}-sw{width:18px;height:18px;border-radius:3px;display:inline-block;
-  margin-right:8px;flex:0 0 auto}
-.${PREFIX}-scale{display:flex;align-items:center;gap:2px;padding-bottom:10px;font-size:11px;color:#5f6368}
-.${PREFIX}-scale i{width:16px;height:14px;display:inline-block}
-.${PREFIX}-ttl{font-size:14px;font-weight:600;color:#fff;line-height:1.35;margin-bottom:2px}
-/* 標籤放在名稱左側，字級與名稱相同（14px）——同級才夠醒目 */
-.${PREFIX}-ttl em{display:inline-block;margin-right:8px;padding:1px 9px;border-radius:11px;
-  background:rgba(138,180,248,.25);color:#aecbfa;font-size:14px;font-style:normal;
-  font-weight:600;white-space:nowrap}
-/* 行政區是次要資訊：字小一級、亮度降下來，才有主次之分 */
-.${PREFIX}-sub{font-size:11.5px;color:rgba(255,255,255,.62);line-height:1.4;margin-bottom:6px}
+.${P}-c{width:${CELL_PX}px;height:${CELL_PX}px;flex:0 0 ${CELL_PX}px;margin:${(ROW_PITCH_PX - CELL_PX) / 2}px
+  ${COL_PITCH_PX - CELL_PX}px 0 0;border-radius:2px;box-shadow:inset 0 0 0 1px rgba(0,0,0,.12)}
+/* 欄框分成標頭與格線兩段：標頭是 sticky，畫成一整塊的話上下捲動時會跟標頭錯開 */
+.${P}-cbh,.${P}-cbr{position:absolute;width:${CELL_PX + COLBOX_PAD_PX * 2}px;border:2px solid #202124;
+  pointer-events:none;display:none;z-index:3}
+.${P}-cbh{top:${SUM_Y_PX - COLBOX_PAD_PX}px;bottom:0;border-bottom:0;border-radius:3px 3px 0 0}
+.${P}-cbr{top:0;border-top:0;border-radius:0 0 3px 3px}
+.${P}-cbh.${P}-hov,.${P}-cbr.${P}-hov{border-color:#1a73e8;z-index:4}
+.${P}-msg{padding:12px 16px;font-size:13px;color:#3c4043;line-height:1.7;white-space:pre-wrap}
+.${P}-msg b{color:#1a73e8}
+/* ⓘ 點開的說明：圖例與資料來源 */
+.${P}-pop{position:absolute;right:12px;bottom:calc(100% + 8px);width:380px;background:#fff;border-radius:8px;
+  box-shadow:0 2px 12px rgba(0,0,0,.25);padding:12px 14px;font-size:12px;color:#3c4043;line-height:1.7;display:none}
+.${P}-pop.${P}-open{display:block}
+.${P}-pop h4{margin:0 0 6px;font-size:14px;font-weight:400;color:#202124}
+.${P}-lg{display:flex;flex-wrap:wrap;gap:4px 14px;margin-bottom:6px}
+.${P}-lg span{display:inline-flex;align-items:center;gap:5px}
+.${P}-lg i{width:12px;height:12px;border-radius:2px;display:inline-block;box-shadow:inset 0 0 0 1px rgba(0,0,0,.12)}
+.${P}-note{font-size:11px;color:#80868b;border-top:1px solid #e8eaed;margin-top:8px;padding-top:6px}
+.${P}-warn{color:#c5221f}
 .${PREFIX}-tip{position:fixed;z-index:2147483000;pointer-events:none;display:none;background:#202124;
   color:#fff;border-radius:8px;padding:9px 12px;font-size:12px;line-height:1.6;
-  box-shadow:0 6px 20px rgba(0,0,0,.25);max-width:280px}
+  box-shadow:0 6px 20px rgba(0,0,0,.25);max-width:300px}
 .${PREFIX}-tip .${PREFIX}-k{color:#9aa0a6;display:inline-block;min-width:60px}
-.${PREFIX}-note{font-size:11.5px;color:#80868b;padding-top:10px;line-height:1.7}
-.${PREFIX}-note div{margin-bottom:3px}
-.${PREFIX}-warn{color:#c5221f;font-weight:600}
+.${PREFIX}-ttl{font-size:14px;color:#fff;line-height:1.35;margin-bottom:2px}
+/* 標籤放在名稱左側，字級與名稱相同（14px）——同級才夠醒目 */
+.${PREFIX}-ttl em{display:inline-block;margin-right:8px;padding:1px 9px;border-radius:11px;
+  background:rgba(138,180,248,.25);color:#aecbfa;font-size:14px;font-style:normal;white-space:nowrap}
+/* 行政區是次要資訊：字小一級、亮度降下來，才有主次之分 */
+.${PREFIX}-sub{font-size:11.5px;color:rgba(255,255,255,.62);line-height:1.4;margin-bottom:6px}
 `;
         const el = document.createElement('style');
         el.id = PREFIX + '-style';
-        el.textContent = css + rules.join('\n');
+        el.textContent = css;
         document.head.appendChild(el);
     }
 
@@ -1998,6 +1985,28 @@ ${field('API 授權碼',
     }
 
     // ════════════════════════════════════════════════════════════════
+    // Google 左側面板：打開時收起、關閉時展開回去
+    // ════════════════════════════════════════════════════════════════
+
+    const isShown = el => !!el && el.getClientRects().length > 0;
+
+    function collapseGoogleSidebar() {
+        const btn = document.querySelector(SITE_SELECTORS.sidebarCollapse);
+        if (!isShown(btn)) return;
+        btn.click();
+        state.sidebarCollapsedByUs = true;
+        log('已收起 Google 左側面板');
+    }
+
+    /** 只展開我們自己收起來的；使用者自己收的不動 */
+    function restoreGoogleSidebar() {
+        if (!state.sidebarCollapsedByUs) return;
+        state.sidebarCollapsedByUs = false;
+        const btn = document.querySelector(SITE_SELECTORS.sidebarExpand);
+        if (isShown(btn)) { btn.click(); log('已展開 Google 左側面板'); }
+    }
+
+    // ════════════════════════════════════════════════════════════════
     // 面板切換
     // ════════════════════════════════════════════════════════════════
 
@@ -2007,16 +2016,6 @@ ${field('API 授權碼',
         activate();
     }
 
-    /**
-     * 隱藏「灰線以下」的所有區塊。
-     * 用結構判斷而非比對 class：找出「選項」那一列，把它之後的兄弟節點全部隱藏，
-     * 這樣不管 Google 之後再加什麼區塊都會一併蓋掉（例如「探索附近的地點」）。
-     *
-     * 必須可重複呼叫：點擊格子會改寫網址並送出 popstate，Google 的路由收到後
-     * 會重新渲染整個面板、建立<strong>新的</strong>元素——我們當初設在舊元素上的
-     * display:none 對新元素無效，被隱藏的區塊就會重新冒出來把表格往下擠。
-     * 因此面板每次變動都要重新套用一次。
-     */
     /**
      * 路線的簽章：停靠站與控制點的座標序列，加上交通方式。
      *
@@ -2037,96 +2036,157 @@ ${field('API 授權碼',
             .join('|') + '|3e' + (parsed.urlTravelCode || '');
     }
 
-    /** 開著表格時偵測到路線改變（例如切換交通方式）就重跑一次 */
+    /** 開著面板時偵測到路線改變（例如切換交通方式）就重跑一次 */
     function scheduleRerunIfRouteChanged() {
-        if (!state.active || !state.container) return;
+        if (!state.active || !state.body) return;
         const key = routeSignature(location.href);
         if (!key || key === state.lastRouteKey) return;
-        log('偵測到路線改變，重新計算表格');
+        log('偵測到路線改變，重新計算');
         state.lastRouteKey = key;
         clearTimeout(state.rerunTimer);
         // 切換交通方式時網址可能連續變動幾次，等安定下來再跑，避免重複請求
-        state.rerunTimer = setTimeout(() => {
-            if (!state.active || !state.container) return;
-            clearBody(state.container);
-            run(state.container).catch(err => {
-                warn(err);
-                clearBody(state.container);
-                showMessage(state.container, '出錯了：' + err.message);
-            });
-        }, ROUTE_CHANGE_DEBOUNCE_MS);
+        state.rerunTimer = setTimeout(rerun, ROUTE_CHANGE_DEBOUNCE_MS);
     }
 
-    function applyHiding(panel) {
-        const optionsBtn = findOptionsButton();
-        const optionsRow = optionsBtn
-            ? [...panel.children].find(ch => ch.contains(optionsBtn))
-            : null;
-        if (!optionsRow) { warn('找不到「選項」那一列，無法判斷要隱藏哪些區塊'); return; }
-        const kids = [...panel.children];
-        const startIdx = kids.indexOf(optionsRow) + 1;
-        for (let i = startIdx; i < kids.length; i++) {
-            const el = kids[i];
-            if (el === state.container) continue;                 // 我們自己的內容不能藏
-            if (state.hiddenBlocks.some(h => h.el === el)) {       // 已記錄過就只補上隱藏
-                el.style.display = 'none';
-                continue;
-            }
-            state.hiddenBlocks.push({ el, display: el.style.display });
-            el.style.display = 'none';
-        }
+    function rerun() {
+        if (!state.active || !state.body) return;
+        const body = state.body;
+        clearBody(body);
+        run(body).catch(err => {
+            warn(err);
+            clearBody(body);
+            showMessage(body, '出錯了：' + err.message);
+        });
     }
 
-    // 量出「選項」以上到我們表格開始之間的高度（Google 自己的標頭），
-    // 把 panel 本身的捲動鎖住、固定在剛好露出表格頂端的位置，讓標頭（含「選項」）
-    // 永遠留在畫面上、不再隨捲動移動；真正的捲動全部交給表格自己的 .rr-scroll 處理。
-    // PANEL_BOTTOM_PADDING_PX 是給 Google 自己面板下緣留的緩衝，避免算太滿。
-    const PANEL_BOTTOM_PADDING_PX = 16;
-    const MIN_SCROLL_HEIGHT_PX = 200;   // 可視窗過矮時的下限，避免表格被壓成看不出東西
+    const ICON_INFO = '<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">' +
+        '<circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" stroke-width="1.4"/>' +
+        '<rect x="6.3" y="6" width="1.4" height="4.5" rx=".7" fill="currentColor"/>' +
+        '<circle cx="7" cy="4" r=".9" fill="currentColor"/></svg>';
+    const ICON_PIN = '<svg width="12" height="8" viewBox="0 0 12 8" aria-hidden="true">' +
+        '<path d="M1 0h10L6 7z" fill="#202124"/></svg>';
 
-    function lockPanelScroll(panel, wrap) {
-        if (!panel || !wrap) return;
-        const scrollEl = wrap.querySelector('.' + PREFIX + '-scroll');
-        if (!scrollEl) return;   // 資料還沒渲染出表格（例如還在顯示「處理中」訊息）
-
-        if (state.panelOriginalOverflow === undefined) {
-            state.panelOriginalOverflow = panel.style.overflow;
-        }
-        const headerHeight = wrap.offsetTop;
-        const available = window.innerHeight - headerHeight - PANEL_BOTTOM_PADDING_PX;
-        scrollEl.style.maxHeight = Math.max(available, MIN_SCROLL_HEIGHT_PX) + 'px';
-
-        panel.scrollTop = headerHeight;
-        panel.style.setProperty('overflow', 'hidden', 'important');
+    function buildPanel() {
+        const P = PREFIX;
+        const panel = document.createElement('div');
+        panel.id = P + '-panel';
+        panel.className = P + '-panel';
+        panel.innerHTML =
+            `<div class="${P}-grip" title="拖拉調整高度"></div>` +
+            `<div class="${P}-title">` +
+            `<span class="${P}-name">${BUTTON_LABEL}</span>` +
+            `<span class="${P}-sel"></span>` +
+            `<span class="${P}-max"></span>` +
+            `<span class="${P}-sp"></span>` +
+            `<button type="button" class="${P}-ib" data-${P}-act="info" aria-expanded="false" ` +
+            `title="圖例與資料來源">${ICON_INFO}</button>` +
+            `<button type="button" class="${P}-tb" data-${P}-act="collapse">收合</button>` +
+            `<button type="button" class="${P}-tb" data-${P}-act="settings">設定</button>` +
+            `<button type="button" class="${P}-tb" data-${P}-act="close">關閉</button>` +
+            `</div>` +
+            `<div class="${P}-body"></div>` +
+            `<div class="${P}-pop" role="dialog"></div>`;
+        panel.addEventListener('click', ev => {
+            const b = ev.target.closest('[data-' + P + '-act]');
+            if (!b) return;
+            const act = b.getAttribute('data-' + P + '-act');
+            if (act === 'close') deactivate();
+            else if (act === 'collapse') setCollapsed(!state.collapsed);
+            else if (act === 'settings') openSettings();
+            else if (act === 'info') toggleInfo();
+        });
+        bindGrip(panel);
+        return panel;
     }
 
-    function unlockPanelScroll(panel) {
+    function toggleInfo(force) {
+        const pop = state.panel && state.panel.querySelector('.' + PREFIX + '-pop');
+        const ib = state.panel && state.panel.querySelector('.' + PREFIX + '-ib');
+        if (!pop || !ib) return;
+        const open = force !== undefined ? force : !pop.classList.contains(PREFIX + '-open');
+        pop.classList.toggle(PREFIX + '-open', open);
+        ib.setAttribute('aria-expanded', String(open));
+    }
+
+    function setCollapsed(on) {
+        state.collapsed = on;
+        if (!state.panel) return;
+        state.panel.classList.toggle(PREFIX + '-collapsed', on);
+        const b = state.panel.querySelector('[data-' + PREFIX + '-act="collapse"]');
+        if (b) b.textContent = on ? '展開' : '收合';
+        hideTip();
+        layoutPanel();
+    }
+
+    /** 格線完整畫出來要多高（標題列＋標頭＋全部列＋留白） */
+    function contentHeight() {
+        const v = state.view;
+        if (!v) return PANEL_DEFAULT_H_PX;
+        return PANEL_TITLE_H_PX + HEAD_H_PX + v.nodes.length * ROW_PITCH_PX + GRID_BOTTOM_PAD_PX +
+            (v.scrollbarH || 0);
+    }
+
+    function heightBounds() {
+        const full = contentHeight();
+        const v = state.view;
+        const minRows = v ? Math.min(PANEL_MIN_ROWS, v.nodes.length) : PANEL_MIN_ROWS;
+        const min = Math.min(full, PANEL_TITLE_H_PX + HEAD_H_PX + minRows * ROW_PITCH_PX);
+        const max = Math.max(min, Math.min(full, innerHeight - PANEL_MAP_MIN_PX));
+        return { min, max };
+    }
+
+    /** 依視窗、使用者拖拉的高度、收合狀態排面板；可以重複呼叫 */
+    function layoutPanel() {
+        const panel = state.panel;
         if (!panel) return;
-        if (state.panelOriginalOverflow !== undefined) {
-            if (state.panelOriginalOverflow) panel.style.overflow = state.panelOriginalOverflow;
-            else panel.style.removeProperty('overflow');
-            state.panelOriginalOverflow = undefined;
-        }
-        panel.scrollTop = 0;
+        panel.style.width = Math.max(0, innerWidth - PANEL_RIGHT_GAP_PX) + 'px';
+        if (state.collapsed) { panel.style.height = PANEL_TITLE_H_PX + 'px'; return; }
+        // 還在顯示訊息（處理中、錯誤）時不撐高，只要訊息放得下
+        if (!state.view) { panel.style.height = 'auto'; return; }
+        const { min, max } = heightBounds();
+        const want = GM_getValue(KEY_PANEL_HEIGHT, PANEL_DEFAULT_H_PX);
+        panel.style.height = Math.round(Math.max(min, Math.min(max, want))) + 'px';
+    }
+
+    function bindGrip(panel) {
+        const grip = panel.querySelector('.' + PREFIX + '-grip');
+        grip.addEventListener('pointerdown', ev => {
+            if (ev.button !== 0) return;
+            ev.preventDefault();
+            grip.setPointerCapture(ev.pointerId);
+            panel.classList.add(PREFIX + '-dragging');
+            const startY = ev.clientY;
+            const startH = panel.getBoundingClientRect().height;
+            const { min, max } = heightBounds();
+            let h = startH;
+            const move = e => {
+                h = Math.round(Math.max(min, Math.min(max, startH + (startY - e.clientY))));
+                panel.style.height = h + 'px';
+            };
+            const up = () => {
+                grip.removeEventListener('pointermove', move);
+                grip.removeEventListener('pointerup', up);
+                grip.removeEventListener('pointercancel', up);
+                panel.classList.remove(PREFIX + '-dragging');
+                // 拖到底（整張都放得下）就記成「放得下就全放」，下次換一條更長的路線也是滿的
+                GM_setValue(KEY_PANEL_HEIGHT, h >= max ? 99999 : h);
+            };
+            grip.addEventListener('pointermove', move);
+            grip.addEventListener('pointerup', up);
+            grip.addEventListener('pointercancel', up);
+        });
     }
 
     function deactivate() {
-        if (state.optionsClickHandler) {
-            document.removeEventListener('click', state.optionsClickHandler, true);
-            state.optionsClickHandler = null;
-        }
+        clearTimeout(state.rerunTimer);
         const btn = document.querySelector('[data-' + PREFIX + '-btn]');
         if (btn) btn.removeAttribute('data-' + PREFIX + '-on');
-        state.hiddenBlocks.forEach(({ el, display }) => { el.style.display = display; });
-        state.hiddenBlocks = [];
-        if (state.container) { state.container.remove(); state.container = null; }
-        const panel = findPanel();
-        unlockPanelScroll(panel);
-        if (panel && state.originalPanelWidth !== undefined) {
-            panel.style.width = state.originalPanelWidth;
-        }
-        const tip = document.getElementById(PREFIX + '-tip');
-        if (tip) tip.remove();
+        if (state.panel) state.panel.remove();
+        state.panel = null;
+        state.body = null;
+        state.view = null;
+        hideTip();
+        restoreGoogleSidebar();
         state.active = false;
         ensureButton();
         log('已關閉');
@@ -2134,51 +2194,26 @@ ${field('API 授權碼',
 
     function activate() {
         injectStyle();
-        const panel = findPanel();
-        if (!panel) { alert('找不到路線面板，請先在 Google Maps 規劃好路線。'); return; }
+        if (!findPanel()) { alert('找不到路線面板，請先在 Google Maps 規劃好路線。'); return; }
 
         state.lastRouteKey = routeSignature(location.href);
-        state.hiddenBlocks = [];
-        applyHiding(panel);
-        // 先前會把面板加寬到固定寬度，但實測加寬只影響某一層容器、
-        // 表格顯示寬度沒有跟著變，反而把靠右對齊的「選項」推到畫面中央，
-        // 連帶讓貼著它定位的關閉按鈕也跑掉。第一版先不動寬度，用橫向捲動即可。
-        state.originalPanelWidth = panel.style.width;
-
-        const wrap = document.createElement('div');
-        wrap.className = PREFIX + '-wrap';
-        wrap.id = PREFIX + '-wrap';
-
-        panel.appendChild(wrap);
-        state.container = wrap;
+        state.collapsed = false;
+        const panel = buildPanel();
+        document.body.appendChild(panel);
+        state.panel = panel;
+        state.body = panel.querySelector('.' + PREFIX + '-body');
+        state.view = null;
         state.active = true;
+        layoutPanel();
         const btn = document.querySelector('[data-' + PREFIX + '-btn]');
         if (btn) btn.setAttribute('data-' + PREFIX + '-on', '1');
         ensureButton();
-
-        // Google 的「選項」面板就展開在灰線以下，而那整段正是我們啟用時隱藏掉的範圍。
-        // 若不處理，使用者按「選項」會覺得「沒反應／還是我們的表格」——其實面板開了、只是被藏著。
-        // 因此偵測到點擊原本的「選項」時，先把我們的表格收起來，把版面還給它。
-        state.optionsClickHandler = ev => {
-            const target = ev.target;
-            if (!target || !target.closest) return;
-            const btnEl = target.closest('button');
-            if (!btnEl || btnEl.hasAttribute('data-' + PREFIX + '-btn')) return;
-            if (btnEl.textContent.trim() !== SITE_SELECTORS.optionsButtonText) return;
-            log('偵測到點擊原本的「選項」，先收起表格把版面讓出來');
-            deactivate();
-        };
-        document.addEventListener('click', state.optionsClickHandler, true);
-
-        run(wrap).catch(err => {
-            warn(err);
-            clearBody(wrap);
-            showMessage(wrap, '出錯了：' + err.message);
-        });
+        rerun();
     }
 
     function clearBody(wrap) {
         wrap.innerHTML = '';
+        if (wrap === state.body) { state.view = null; hideTip(); layoutPanel(); }
     }
 
     function showMessage(wrap, html) {
@@ -2186,6 +2221,7 @@ ${field('API 授權碼',
         d.className = PREFIX + '-msg';
         d.innerHTML = html;
         wrap.appendChild(d);
+        if (wrap === state.body) layoutPanel();
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -2193,6 +2229,7 @@ ${field('API 授權碼',
     // ════════════════════════════════════════════════════════════════
 
     async function run(wrap) {
+        const routeKey = routeSignature(location.href);
         const keys = getKeys();
         const sourceMode = getSourceMode();
         if (sourceMode === 'api' && !keys.cwa) {
@@ -2220,8 +2257,9 @@ ${field('API 授權碼',
             showMessage(wrap, '從網址讀不到路線。請確認已經規劃好路線（網址裡要有 <code>/data=</code> 那一段）。');
             return;
         }
-        const panel = findPanel();
-        const selected = readSelectedRoute(panel);
+        // 左側面板收著時讀不到選中的路線與地點名稱（尺寸是 0），同一條路線就沿用上次讀到的
+        const cachedSel = state.lastSelected && state.lastSelected.key === routeKey ? state.lastSelected : null;
+        const selected = readSelectedRoute(findPanel()) || (cachedSel && cachedSel.selected) || null;
         const modeInfo = detectTravelMode(parsed.urlTravelCode);
         log('網址解析：停靠站/控制點共', parsed.points.length, '個；選中路線', selected);
         if (modeInfo.mode === null) {
@@ -2261,7 +2299,12 @@ ${field('API 授權碼',
         if (!timeline.length) throw new Error('Routes API 回傳的路徑沒有可用的座標');
         // 起點、使用者設定的停靠點、目的地——這三類是使用者自己規劃的位置，
         // 一定要出現在表格裡，不能因為「取中點」而被略過
-        const names = readEndpointNames();
+        let names = readEndpointNames();
+        if (!names.length && cachedSel) names = cachedSel.names;
+        state.lastSelected = { key: routeKey, selected, names };
+        // 資料都讀完了才收 Google 的左側面板：收起後路線面板尺寸變 0，選中的路線、
+        // 起訖名稱都讀不到（2026-11-24 實測）
+        collapseGoogleSidebar();
         if (names.length) {
             log('面板讀到的地點名稱：', names.join(' ／ '));
         } else {
@@ -2321,7 +2364,7 @@ ${field('API 授權碼',
         if (!departures.length) {
             clearBody(wrap);
             showMessage(wrap, '這條路線的行程時間超過預報可涵蓋的範圍（' +
-                FORECAST_HORIZON_HOURS + ' 小時），無法產生表格。');
+                FORECAST_HORIZON_HOURS + ' 小時），無法產生時間軸。');
             return;
         }
 
@@ -2353,37 +2396,20 @@ ${field('API 授權碼',
                 altCount: alts.length,
             },
         });
-        // 表格結構剛出來，量出實際高度、把 Google 的面板捲動鎖住。
-        // 用 rAF 等這輪排版真的定案，量到的高度才準確。
-        requestAnimationFrame(() => lockPanelScroll(findPanel(), wrap));
-
-        // 表格先出現，地點名稱在背景陸續補上——36 個節點要十幾秒，
-        // 讓使用者盯著「處理中」等那麼久沒有必要。名稱是寫進節點物件的，
-        // tooltip 下次開啟時自然會拿到新值，不需要重繪整張表。
-        const corner = document.getElementById(PREFIX + '-corner');
-        if (corner) {
-            corner.innerHTML =
-                `<span class="${PREFIX}-prog">地名擷取中</span>` +
-                `<span class="${PREFIX}-cnt"><b>0</b> / ${nodes.length}</span>` +
-                `<span class="${PREFIX}-bar"><i></i></span>`;
-        }
+        // 格線先出現，地點名稱在背景陸續補上——36 個節點要十幾秒，
+        // 讓使用者盯著「處理中」等那麼久沒有必要。名稱寫進節點物件，
+        // 每補一批就重寫地點欄的文字（只動文字，不重畫格子）。
+        const view = state.view;
+        const prog = wrap.querySelector('.' + PREFIX + '-prog');
+        if (prog) prog.textContent = `地名 0／${nodes.length}`;
         fillPlaceNames(nodes, (done, total) => {
-            if (!corner || !corner.isConnected) return;
-            const num = corner.querySelector('.' + PREFIX + '-cnt b');
-            const bar = corner.querySelector('.' + PREFIX + '-bar i');
-            if (num) num.textContent = String(done);
-            if (bar) bar.style.width = Math.round(done / total * 100) + '%';
+            if (!view || state.view !== view) return;          // 已經重算過，這批是舊的
+            refreshRowLabels(view);
+            if (!prog || !prog.isConnected) return;
+            prog.textContent = `地名 ${done}／${total}`;
             if (done >= total) {
-                const p = corner.querySelector('.' + PREFIX + '-prog');
-                const cnt = corner.querySelector('.' + PREFIX + '-cnt');
-                if (p) p.textContent = '地名已就緒';
-                if (cnt) cnt.remove();
-                corner.classList.add(PREFIX + '-done');
-                setTimeout(() => {
-                    if (!corner.isConnected) return;
-                    corner.innerHTML = '';
-                    corner.classList.remove(PREFIX + '-done');   // 不留殘留狀態
-                }, 1300);
+                prog.classList.add(PREFIX + '-done');
+                setTimeout(() => { if (prog.isConnected) prog.textContent = ''; }, 600);
             }
         }).catch(err => warn('地點名稱查詢失敗：', err.message));
 
@@ -2403,82 +2429,182 @@ ${field('API 授權碼',
     const pad2 = n => String(n).padStart(2, '0');
     const clockOf = d => pad2(d.getHours()) + ':' + pad2(d.getMinutes());
 
+    /**
+     * 節點要顯示的名稱：使用者自己設的名稱 ＞ Google 反向地理編碼 ＞ 鄉鎮名。
+     * 第二行（addr）照 Google 彈窗的排法放行政區；查不到才退回導航指示的路名。
+     */
+    function nodeTitle(n) {
+        let title, addr = '';
+        if (n.placeName) {
+            // 面板輸入框的內容是「名稱＋地址」連在一起（例如
+            // 「乾華十八王公廟 253新北市石門區乾華里阿里磅1-1號」），以郵遞區號為界拆開。
+            // 只在「名稱 空白 郵遞區號…」這種形式才拆：像「住家（103臺北市…）」
+            // 的地址是包在括號裡的別名，拆了會變成「住家（」這種殘缺的標題。
+            const m = /[（(]/.test(n.placeName)
+                ? null
+                : n.placeName.match(/^(.+?)\s+(\d{3}\s*[一-龥]{2,3}[市縣].*)$/);
+            if (m) { title = m[1].trim(); addr = m[2].trim(); }
+            else { title = n.placeName; addr = (n.county || '') + (n.town || ''); }
+        } else if (n.place && n.place.title) {
+            title = n.place.title;
+            addr = n.place.area || '';
+        } else {
+            title = (n.county || '') + (n.town || '（未知區域）');
+            addr = n.road ? n.road + (n.roadBorrowed ? '（附近）' : '') : '';
+        }
+        return { title, addr };
+    }
+
+    /** 地點欄右側的時間：起點寫「出發」、終點寫「抵達」，中間寫出發後幾分 */
+    function nodeTimeLabel(n) {
+        if (n.kind === 'origin') return KIND_LABEL.origin;
+        if (n.kind === 'destination') return KIND_LABEL.destination;
+        return '+' + Math.round(n.sec / 60) + '分';
+    }
+
+    function refreshRowLabels(view) {
+        view.rowEls.forEach((rowEl, ri) => {
+            const p = rowEl.querySelector('.' + PREFIX + '-p');
+            const t = nodeTitle(view.nodes[ri]).title;
+            if (p.textContent !== t) { p.textContent = t; p.title = t; }
+        });
+    }
+
     function render(wrap, data) {
+        const P = PREFIX;
         const { nodes, departures, forecast, totalSec, meta } = data;
+        const cols = departures.length;
+        const colX = ci => LABEL_W_PX + ci * COL_PITCH_PX;       // 第 ci 欄色塊的左緣
 
-        // 捲動容器只包格線；色階、圖例、備註放在容器外，才不會跟著資料一起捲走
-        const scroll = document.createElement('div');
-        scroll.className = PREFIX + '-scroll';
-
-        const grid = document.createElement('div');
-        grid.className = PREFIX + '-grid';
-        grid.style.setProperty('--' + PREFIX + '-cols', String(departures.length));
-
-        const parts = ['<div class="' + PREFIX + '-corner" id="' + PREFIX + '-corner"></div>'];
-        departures.forEach((d, i) => {
-            const isHour = d.getMinutes() === 0;
-            const cls = [PREFIX + '-h'];
-            if (isHour) cls.push(PREFIX + '-oclock');
-            if (i === 0) cls.push(PREFIX + '-first');
-            if (i === departures.length - 1) cls.push(PREFIX + '-last');
-            parts.push(
-                `<div class="${cls.join(' ')}" data-${PREFIX}-h="${i}">` +
-                (isHour
-                    ? `<span class="${PREFIX}-hour">${d.getHours()}</span>`
-                    : `<span class="${PREFIX}-dot"></span>`) +
-                `<span class="${PREFIX}-tl">${clockOf(d)}</span></div>`);
-        });
-
-        nodes.forEach((n, ri) => {
-            const cum = '+' + Math.round(n.sec / 60) + '分';
-            parts.push(
-                `<div class="${PREFIX}-rh" data-${PREFIX}-rh="${ri}">` +
-                `<span class="${PREFIX}-m" data-${PREFIX}-cum="${cum}">${cum}</span>` +
-                `<span class="${PREFIX}-t${n.kind ? ' ' + PREFIX + '-key' : ''}">` +
-                `${(n.county || '') + (n.town || '（未知區域）')}</span></div>`);
-            for (let ci = 0; ci < departures.length; ci++) {
-                const whenMs = departures[ci].getTime() + n.sec * 1000;
-                const row = lookupForecast(forecast, n.county, n.town, whenMs);
-                let cls;
-                if (!row || row.pop == null) {
-                    cls = `${PREFIX}-c ${PREFIX}-na`;
-                } else {
-                    const pop = Math.round(row.pop / 10) * 10;
-                    const sev = severityOf(row.weather, row.code);
-                    cls = `${PREFIX}-c ${PREFIX}-s${sev}-${pop}`;
+        // 先算好每一格的級數，互動時只查表
+        const cells = nodes.map(n => departures.map(d =>
+            rainOf(lookupForecast(forecast, n.county, n.town, d.getTime() + n.sec * 1000))));
+        // 每欄「沿路最濕」：提高級數之後最濕的那一格（同級取機率較高的）
+        const wettest = departures.map((_, ci) => {
+            let best = null, bestRow = -1;
+            cells.forEach((row, ri) => {
+                const c = row[ci];
+                if (c && (!best || c.eff > best.eff || (c.eff === best.eff && c.pop > best.pop))) {
+                    best = c; bestRow = ri;
                 }
-                parts.push(
-                    `<div class="${PREFIX}-d"><span class="${cls}" ` +
-                    `data-${PREFIX}-r="${ri}" data-${PREFIX}-c="${ci}"></span></div>`);
-            }
+            });
+            return { rain: best, row: bestRow };
         });
-        grid.innerHTML = parts.join('');
-        scroll.appendChild(grid);
 
-        const info = document.createElement('div');
-        info.className = PREFIX + '-info';
+        const innerW = colX(cols) + GRID_BOTTOM_PAD_PX;
+        const rowsH = nodes.length * ROW_PITCH_PX;
+        const parts = [];
+        parts.push(`<div class="${P}-scroll"><div class="${P}-inner" style="width:${innerW}px">`);
+        // 標頭：摘要條、時間刻度、▼、標頭那一段的欄框
+        parts.push(`<div class="${P}-head" style="width:${innerW}px"><div class="${P}-marks" style="width:${innerW}px">`);
+        wettest.forEach((w, ci) => {
+            parts.push(`<div class="${P}-sum" style="left:${colX(ci)}px;background:` +
+                `${w.rain ? w.rain.color : RAIN_NA_COLOR}"></div>`);
+        });
+        parts.push(`<div class="${P}-axis" style="left:${colX(0)}px;width:${cols * COL_PITCH_PX - 1}px"></div>`);
+        departures.forEach((d, ci) => {
+            const cx = colX(ci) + CELL_PX / 2;
+            parts.push(d.getMinutes() === 0
+                ? `<div class="${P}-hour" style="left:${cx - HOUR_DOT_PX / 2}px">${d.getHours()}</div>`
+                : `<div class="${P}-q" style="left:${cx - QUARTER_DOT_PX / 2}px"></div>`);
+        });
+        parts.push(`<div class="${P}-pin">${ICON_PIN}</div>`);
+        parts.push(`<div class="${P}-cbh ${P}-pinbox"></div><div class="${P}-cbh ${P}-hov"></div>`);
+        parts.push(`</div><div class="${P}-corner"><span class="${P}-sumlab">沿路最濕</span>` +
+            `<span class="${P}-prog"></span></div></div>`);
+        // 格線
+        parts.push(`<div class="${P}-rows" style="height:${rowsH}px">`);
+        nodes.forEach((n, ri) => {
+            const t = nodeTitle(n).title;
+            parts.push(`<div class="${P}-row"><div class="${P}-lab">` +
+                `<span class="${P}-p" title="${escapeHtml(t)}">${escapeHtml(t)}</span>` +
+                `<span class="${P}-m">${nodeTimeLabel(n)}</span></div>`);
+            for (let ci = 0; ci < cols; ci++) {
+                const c = cells[ri][ci];
+                parts.push(`<span class="${P}-c" style="background:${c ? c.color : RAIN_NA_COLOR}"></span>`);
+            }
+            parts.push('</div>');
+        });
+        parts.push(`<div class="${P}-cbr ${P}-pinbox" style="height:${rowsH + COLBOX_PAD_PX}px"></div>` +
+            `<div class="${P}-cbr ${P}-hov" style="height:${rowsH + COLBOX_PAD_PX}px"></div>`);
+        parts.push('</div></div></div>');
+        wrap.innerHTML = parts.join('');
 
-        const scale = document.createElement('div');
-        scale.className = PREFIX + '-scale';
-        scale.innerHTML = '降雨機率 ' +
-            Object.keys(PALETTE).map(p => `<i style="background:${PALETTE[p][0]}"></i>`).join('') +
-            ' 0→100%';
-        info.appendChild(scale);
+        const scroll = wrap.querySelector('.' + P + '-scroll');
+        const view = {
+            nodes, departures, forecast, totalSec, meta, cells, wettest,
+            scroll,
+            rowEls: [...wrap.querySelectorAll('.' + P + '-row')],
+            hoverCol: null, hoverRow: null,
+            pinnedCol: null,
+            scrollbarH: 0,
+        };
+        // 已釘住的欄重算後找回同一個出發時刻；不在新的範圍內就取消
+        if (state.pinnedMs != null) {
+            const ci = departures.findIndex(d => d.getTime() === state.pinnedMs);
+            if (ci >= 0) view.pinnedCol = ci; else state.pinnedMs = null;
+        }
+        state.view = view;
+        fillInfo(view);
+        layoutPanel();
+        // 橫向放不下時會多一條捲軸，高度要把它算進去，不然最後一列被捲軸蓋住
+        view.scrollbarH = scroll.offsetHeight - scroll.clientHeight;
+        if (view.scrollbarH) layoutPanel();
+        updateShownColumn();
+        bindInteractions(view);
+    }
 
-        const legend = document.createElement('div');
-        legend.className = PREFIX + '-legend';
-        legend.innerHTML =
-            `<div><span class="${PREFIX}-sw" style="background:${PALETTE[60][0]}"></span>不會下雨的天氣型態</div>` +
-            `<div><span class="${PREFIX}-sw" style="background:${PALETTE[60][1]}"></span>有可能（局部／短暫／或）</div>` +
-            `<div><span class="${PREFIX}-sw" style="background:${PALETTE[60][2]}"></span>基本上會遇到／雷雨・雪</div>`;
-        info.appendChild(legend);
+    const escapeHtml = s => String(s).replace(/[&<>"]/g, c =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
-        const note = document.createElement('div');
-        note.className = PREFIX + '-note';
+    /** 目前顯示哪一欄：滑鼠指到的 ＞ 已釘住的 ＞ 最早一欄 */
+    function shownColumn(view) {
+        if (view.hoverCol != null) return view.hoverCol;
+        if (view.pinnedCol != null) return view.pinnedCol;
+        return 0;
+    }
+
+    function updateShownColumn() {
+        const view = state.view;
+        if (!view || !state.panel) return;
+        const P = PREFIX;
+        const ci = shownColumn(view);
+        const dep = view.departures[ci];
+        const arrive = new Date(dep.getTime() + view.totalSec * 1000);
+        state.panel.querySelector('.' + P + '-sel').textContent =
+            `${clockOf(dep)} 出發 → ${clockOf(arrive)} 抵達`;
+        const w = view.wettest[ci].rain;
+        state.panel.querySelector('.' + P + '-max').innerHTML = w
+            ? `<i style="background:${w.color}"></i>沿路最高 ${w.pop}%${w.reason ? '・' + w.reason : ''}`
+            : '';
+        const place = (sel, col) => {
+            view.scroll.querySelectorAll(sel).forEach(el => {
+                if (col == null) { el.style.display = 'none'; return; }
+                el.style.display = 'block';
+                el.style.left = (LABEL_W_PX + col * COL_PITCH_PX - COLBOX_PAD_PX) + 'px';
+            });
+        };
+        place('.' + P + '-pinbox', view.pinnedCol);
+        place('.' + P + '-hov', view.hoverCol);
+        const pin = view.scroll.querySelector('.' + P + '-pin');
+        if (view.pinnedCol == null) pin.style.display = 'none';
+        else {
+            pin.style.display = 'block';
+            pin.style.left = (LABEL_W_PX + view.pinnedCol * COL_PITCH_PX) + 'px';
+        }
+        // 第 2 批：地圖上的路線色帶跟著這一欄重畫
+    }
+
+    /** ⓘ 的內容：圖例、資料來源、警告（有警告時 ⓘ 變紅） */
+    function fillInfo(view) {
+        const P = PREFIX;
+        const { nodes, totalSec, meta } = view;
+        const pop = state.panel.querySelector('.' + P + '-pop');
+        const ib = state.panel.querySelector('.' + P + '-ib');
+        const chip = (color, text) => `<span><i style="background:${color}"></i>${text}</span>`;
         const lines = [
-            `節點 ${nodes.length} 個`,
-            `涵蓋 ${new Set(nodes.map(n => n.county + n.town)).size} 個鄉鎮`,
-            `總行程 ${Math.round(totalSec / 60)} 分`,
+            `節點 ${nodes.length} 個，涵蓋 ${new Set(nodes.map(n => n.county + n.town)).size} 個鄉鎮，` +
+                `總行程 ${Math.round(totalSec / 60)} 分`,
             `路徑資料：取自頁面本身（${Math.round((Date.now() - meta.capturedAt) / 1000)} 秒前攔截），未呼叫任何 API`,
             meta.fromCache
                 ? `氣象資料：沿用本機快取（${Math.round((Date.now() - meta.fetchedAt) / 60000)} 分鐘前取得）`
@@ -2491,6 +2617,7 @@ ${field('API 授權碼',
             `路線比對：${meta.matchNote}`,
             `時間依據：${meta.timeBasis || '不含路況'}`,
         ];
+        const warnings = [];
         // 安全網：先用距離判斷交通方式有沒有搞錯（距離不受路況影響），
         // 距離吻合才進一步看時間差，而時間差多半只是「含不含即時路況」的差異。
         const shownDist = meta.selected && meta.selected.distanceMeters;
@@ -2500,140 +2627,121 @@ ${field('API 授權碼',
             const diff = Math.abs(meta.routeDistanceMeters - shownDist) / shownDist;
             if (diff > DISTANCE_MISMATCH_RATIO) {
                 distMismatch = true;
-                lines.push(`<span class="${PREFIX}-warn">⚠ 面板顯示 ${meta.selected.distanceText}，` +
+                warnings.push(`⚠ 面板顯示 ${meta.selected.distanceText}，` +
                     `但算出來是 ${(meta.routeDistanceMeters / 1000).toFixed(1)} 公里` +
-                    `（差 ${Math.round(diff * 100)}%）——交通方式或路線可能判斷錯誤，` +
-                    `這張表的抵達時刻不可信。</span>`);
+                    `（差 ${Math.round(diff * 100)}%）——交通方式或路線可能判斷錯誤，抵達時刻不可信。`);
             }
         }
         if (!distMismatch && shownDur) {
             const diff = Math.abs(totalSec - shownDur) / shownDur;
             if (diff > DURATION_MISMATCH_RATIO) {
-                lines.push(`面板時間「${meta.selected.durationText}」與本表的` +
+                lines.push(`面板時間「${meta.selected.durationText}」與這裡算的` +
                     `${Math.round(totalSec / 60)} 分差距較大，抵達時刻可能有偏差。`);
             }
         }
-        if (meta.failures && meta.failures.length) {
-            lines.push(`<span class="${PREFIX}-warn">取得失敗：${meta.failures.join('、')}</span>`);
-        }
-        note.innerHTML = lines.map(l => `<div>${l}</div>`).join('');
-        info.appendChild(note);
-        // 資訊區放進捲動容器、接在格線之後，才不會多出一條獨立捲軸
-        scroll.appendChild(info);
-        wrap.appendChild(scroll);
-
-        bindInteractions(grid, nodes, departures, forecast);
+        if (meta.failures && meta.failures.length) warnings.push(`取得失敗：${meta.failures.join('、')}`);
+        pop.innerHTML =
+            `<h4>降雨機率</h4><div class="${P}-lg">` +
+            chip(RAIN_LEVELS[0].color, '0～20%') + chip(RAIN_LEVELS[1].color, '30・40%') +
+            chip(RAIN_LEVELS[2].color, '50・60%') + chip(RAIN_LEVELS[3].color, '70% 以上') +
+            chip(RAIN_NA_COLOR, '無資料') + '</div>' +
+            `<div>有雷陣雨、大雨或豪雨時，顏色提高一級（紫色封頂）。</div>` +
+            `<div>每一列是路線上的一個點、每一欄是一個出發時間；「沿路最濕」是那個出發時間沿路最濕的一格。</div>` +
+            warnings.map(w => `<div class="${P}-warn">${w}</div>`).join('') +
+            `<div class="${P}-note">${lines.map(l => `<div>${l}</div>`).join('')}</div>`;
+        ib.classList.toggle(P + '-has-warn', warnings.length > 0);
     }
 
-    /** tooltip、hover 連動、點擊：全部用事件委派，整張表只掛 4 個 listener */
-    function bindInteractions(grid, nodes, departures, forecast) {
-        let tip = document.getElementById(PREFIX + '-tip');
+    function hideTip() {
+        const tip = document.getElementById(PREFIX + '-tip');
+        if (tip) tip.style.display = 'none';
+    }
+
+    /** 指到、點擊：全部掛在捲動容器上委派，格子本身不掛任何 listener */
+    function bindInteractions(view) {
+        const P = PREFIX;
+        let tip = document.getElementById(P + '-tip');
         if (!tip) {
             tip = document.createElement('div');
-            tip.id = PREFIX + '-tip';
-            tip.className = PREFIX + '-tip';
+            tip.id = P + '-tip';
+            tip.className = P + '-tip';
             document.body.appendChild(tip);
         }
-        const heads = [...grid.querySelectorAll('.' + PREFIX + '-h')];
-        const rhs = [...grid.querySelectorAll('.' + PREFIX + '-rh')];
-        let curH = null;
+        const scroll = view.scroll;
+        const inner = scroll.firstElementChild;
 
-        const restoreRowLabels = () => {
-            rhs.forEach(rh => {
-                const m = rh.querySelector('.' + PREFIX + '-m');
-                m.textContent = m.getAttribute('data-' + PREFIX + '-cum');
-                rh.classList.remove(PREFIX + '-hl');
-            });
+        /** 游標落在哪一欄、哪一列（標頭與地點欄是 sticky，要用可見位置判斷） */
+        const hit = ev => {
+            const sr = scroll.getBoundingClientRect();
+            const ir = inner.getBoundingClientRect();
+            const vx = ev.clientX - sr.left, vy = ev.clientY - sr.top;
+            if (vx < LABEL_W_PX || vx >= scroll.clientWidth || vy >= scroll.clientHeight) return null;
+            const x = ev.clientX - ir.left - LABEL_W_PX;
+            const ci = Math.floor(x / COL_PITCH_PX);
+            if (ci < 0 || ci >= view.departures.length) return null;
+            if (vy < HEAD_H_PX) return { ci, ri: null, onCell: false };
+            const ri = Math.floor((ev.clientY - ir.top - HEAD_H_PX) / ROW_PITCH_PX);
+            if (ri < 0 || ri >= view.nodes.length) return { ci, ri: null, onCell: false };
+            // 色塊之間的 1px 間距也算同一格，免得滑過去 tooltip 一閃一閃
+            return { ci, ri, onCell: true };
         };
 
-        grid.addEventListener('mouseover', ev => {
-            const cell = ev.target.closest('.' + PREFIX + '-c');
-            if (!cell) return;
-            const ri = +cell.getAttribute('data-' + PREFIX + '-r');
-            const ci = +cell.getAttribute('data-' + PREFIX + '-c');
-            const dep = departures[ci];
-
-            if (curH !== ci) {
-                if (curH !== null) heads[curH].classList.remove(PREFIX + '-hl');
-                heads[ci].classList.add(PREFIX + '-hl');
-                curH = ci;
+        const setHover = (ci, ri) => {
+            if (view.hoverRow !== ri) {
+                if (view.hoverRow != null) view.rowEls[view.hoverRow].firstElementChild.classList.remove(P + '-hl');
+                if (ri != null) view.rowEls[ri].firstElementChild.classList.add(P + '-hl');
+                view.hoverRow = ri;
             }
-            // 整欄的列標籤都換成「以這個出發時間計算，各自的抵達時刻」，
-            // 這樣一眼就能讀出整趟行程的時刻表
-            nodes.forEach((n, i) => {
-                const m = rhs[i].querySelector('.' + PREFIX + '-m');
-                m.textContent = clockOf(new Date(dep.getTime() + n.sec * 1000));
-            });
-            rhs.forEach((rh, i) => rh.classList.toggle(PREFIX + '-hl', i === ri));
+            if (view.hoverCol !== ci) { view.hoverCol = ci; updateShownColumn(); }
+        };
 
-            const n = nodes[ri];
+        const showTip = (ci, ri, ev) => {
+            const n = view.nodes[ri];
+            const dep = view.departures[ci];
             const arrive = new Date(dep.getTime() + n.sec * 1000);
-            const row = lookupForecast(forecast, n.county, n.town, arrive.getTime());
-            const sev = row ? severityOf(row.weather, row.code) : 0;
-            const sevLabel = ['—', '有可能', '基本上會遇到'][sev];
-            const k = s => `<span class="${PREFIX}-k">${s}</span>`;
+            const row = lookupForecast(view.forecast, n.county, n.town, arrive.getTime());
+            const rain = view.cells[ri][ci];
+            const k = s => `<span class="${P}-k">${s}</span>`;
+            const { title, addr } = nodeTitle(n);
             tip.innerHTML =
-                // 顯示順序：使用者自己設的名稱 ＞ Google 反向地理編碼 ＞ 鄉鎮名。
-                // 第二行照 Google 彈窗的排法放行政區；查不到才退回導航指示的路名。
-                // 照 Google 彈窗的排法：主名稱大而亮、行政區小而暗，拉開主次
-                (() => {
-                    // 面板輸入框的內容是「名稱＋地址」連在一起（例如
-                    // 「乾華十八王公廟 253新北市石門區乾華里阿里磅1-1號」），
-                    // 直接整串當標題會又長又擠，還把標籤推到第二行。
-                    // 以郵遞區號為界拆開：前段當主名稱、後段當地址。
-                    let title, addr = '';
-                    if (n.placeName) {
-                        // 只在「名稱 空白 郵遞區號…」這種形式才拆。
-                        // 像「住家（103臺北市…）」的地址是包在括號裡的別名，
-                        // 拆了會變成「住家（」這種殘缺的標題。
-                        const m = /[（(]/.test(n.placeName)
-                            ? null
-                            : n.placeName.match(/^(.+?)\s+(\d{3}\s*[\u4e00-\u9fa5]{2,3}[市縣].*)$/);
-                        if (m) { title = m[1].trim(); addr = m[2].trim(); }
-                        else { title = n.placeName; addr = (n.county || '') + (n.town || ''); }
-                    } else if (n.place && n.place.title) {
-                        title = n.place.title;
-                        addr = n.place.area || '';
-                    } else {
-                        title = (n.county || '') + (n.town || '（未知區域）');
-                        addr = n.road ? n.road + (n.roadBorrowed ? '（附近）' : '') : '';
-                    }
-                    return `<div class="${PREFIX}-ttl">` +
-                        (n.kind ? `<em>${KIND_LABEL[n.kind]}</em>` : '') + title + '</div>' +
-                        (addr ? `<div class="${PREFIX}-sub">${addr}</div>` : '');
-                })() +
+                `<div class="${P}-ttl">` + (n.kind ? `<em>${KIND_LABEL[n.kind]}</em>` : '') +
+                escapeHtml(title) + '</div>' +
+                (addr ? `<div class="${P}-sub">${escapeHtml(addr)}</div>` : '') +
                 k('出發時間') + clockOf(dep) + '<br>' +
                 k('抵達時刻') + clockOf(arrive) + `（出發後 ${Math.round(n.sec / 60)} 分）<br>` +
-                k('降雨機率') + (row && row.pop != null ? row.pop + '%' : '無資料') + '<br>' +
-                k('天氣現象') + (row && row.weather ? row.weather : '—') + '<br>' +
-                k('雨勢判定') + sevLabel +
+                k('降雨機率') + (rain
+                    ? rain.pop + '%' + (rain.reason ? '・' + rain.reason +
+                        (rain.level > rain.baseLevel ? '（顏色提高一級）' : '') : '')
+                    : '無資料') + '<br>' +
+                k('天氣現象') + (row && row.weather ? escapeHtml(row.weather) : '—') +
                 (n.part[1] > 1 ? `<br>${k('本鄉鎮')}第 ${n.part[0]}／${n.part[1]} 個取樣點` : '') +
                 (n.isFlap ? `<br>${k('備註')}此處為行政區交界，來回穿越` : '');
             tip.style.display = 'block';
-        });
-
-        grid.addEventListener('mousemove', ev => {
-            if (tip.style.display !== 'block') return;
             const off = 14;
-            let x = ev.clientX + off, y = ev.clientY + off;
             const r = tip.getBoundingClientRect();
+            let x = ev.clientX + off, y = ev.clientY + off;
             if (x + r.width > innerWidth - 8) x = ev.clientX - r.width - off;
             if (y + r.height > innerHeight - 8) y = ev.clientY - r.height - off;
             tip.style.left = x + 'px';
             tip.style.top = y + 'px';
-        });
+        };
 
-        grid.addEventListener('mouseleave', () => {
-            tip.style.display = 'none';
-            if (curH !== null) { heads[curH].classList.remove(PREFIX + '-hl'); curH = null; }
-            restoreRowLabels();
+        scroll.addEventListener('mousemove', ev => {
+            const h = hit(ev);
+            if (!h) { setHover(null, null); tip.style.display = 'none'; return; }
+            setHover(h.ci, h.ri);
+            if (h.onCell) showTip(h.ci, h.ri, ev); else tip.style.display = 'none';
         });
-
-        grid.addEventListener('click', ev => {
-            const cell = ev.target.closest('.' + PREFIX + '-c');
-            if (!cell) return;
-            const n = nodes[+cell.getAttribute('data-' + PREFIX + '-r')];
-            onNodeClick(n);
+        scroll.addEventListener('mouseleave', () => { setHover(null, null); tip.style.display = 'none'; });
+        // 捲動時游標下的格子換了，但不會有 mousemove：先收起來，等下一次移動
+        scroll.addEventListener('scroll', () => { setHover(null, null); tip.style.display = 'none'; });
+        scroll.addEventListener('click', ev => {
+            const h = hit(ev);
+            if (!h) return;
+            // 點一下釘住這一欄，再點同一欄取消
+            view.pinnedCol = view.pinnedCol === h.ci ? null : h.ci;
+            state.pinnedMs = view.pinnedCol == null ? null : view.departures[h.ci].getTime();
+            updateShownColumn();
         });
     }
 
@@ -3294,26 +3402,6 @@ ${field('API 授權碼',
                 ensureButton();
                 if (!state.active) return;
 
-                // 「選項」按鈕在整個文件裡都找不到了，代表 Google 原生路線面板
-                // 已經整個被關掉（例如使用者按了 Google 自己最上面的 X，而不是
-                // 我們的關閉按鈕）——不是「面板重繪出新元素」，是路線面板真的不在了。
-                // 這種情況下絕對不能把孤兒表格重新掛回任何看起來像面板的容器：
-                // findPanel() 只用 class／高度判斷，之後使用者點了別的地點跳出
-                // 「地點詳情」面板時，也會被誤判成同一種面板，孤兒表格就會被
-                // 錯誤地裝到不相關的面板裡冒出來。偵測到就直接視同按了關閉。
-                if (!findOptionsButton()) {
-                    log('偵測到「選項」按鈕消失，判定路線面板已被關閉，自動收起表格');
-                    deactivate();
-                    return;
-                }
-
-                const panel = findPanel();
-                if (!panel) return;
-                // 重繪會產生新的區塊，要重新隱藏；我們的內容若被移除也要放回去
-                if (state.container && state.container.parentElement !== panel) {
-                    panel.appendChild(state.container);
-                }
-                applyHiding(panel);
                 scheduleRerunIfRouteChanged();
             });
         };
@@ -3321,13 +3409,9 @@ ${field('API 授權碼',
         window.addEventListener('resize', schedule);
         window.addEventListener('scroll', schedule, true);
 
-        // 視窗尺寸變動時，重新量測可用高度並鎖回去——跟上面的 schedule 分開，
-        // 因為 schedule 也會被表格自己內部的捲動觸發（scroll 監聽用了 capture），
-        // 若把量測邏輯放進 schedule，使用者在表格裡捲動時每一影格都會多做一次
-        // getBoundingClientRect／reflow，沒有必要。resize 頻率低得多，獨立處理即可。
-        window.addEventListener('resize', () => {
-            if (state.active && state.container) lockPanelScroll(findPanel(), state.container);
-        });
+        // 視窗尺寸變動時重排面板——跟上面的 schedule 分開，因為 schedule 也會被
+        // 面板自己內部的捲動觸發（scroll 監聽用了 capture），不需要每次都重排。
+        window.addEventListener('resize', () => { if (state.active) layoutPanel(); });
 
         // Google Maps 是 SPA，換路線只改網址不重新載入頁面。
         // MutationObserver 多半也會被觸發，但直接監看網址變化比較直接可靠：

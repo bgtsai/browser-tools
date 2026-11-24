@@ -5,7 +5,8 @@
 ## route-rain（RouteRain・旅途中的雨）— 進行中：介面重構 v1.0.0，設計與 mockup 已定案，下一步直接寫程式
 
 ### 目前狀態（2026-11-24）
-- 程式仍是 v0.77.0（4fe73f7），使用者實測 OK。
+- 第 1 批（底部面板＋格線，取代左側表格；收左側面板）已推送為 v1.0.0，無頭瀏覽器測試 `route-rain/tests/test_panel.py` 通過；真實頁面待驗。舊版 v0.77.0（4fe73f7）使用者實測 OK。
+- 第 1 批留下的死碼：`onNodeClick`／`revealOnMap`／`hoverOnMap`／`focusMapOn`（點格子改成釘住欄，不再移動地圖）——第 2 批決定哪些給色帶與「移進可見區」重用，其餘刪掉。
 - 介面重構的設計、配色、mockup 全部定案；**使用者已授權「直接改出一個版本」**（2026-11-24 22:51），新對話串讀完交接就開工，不用再問一次。改完照 01 第⑤條六項檢查、推送、回報（Tampermonkey 格式），版本跳 v1.0.0（整個介面運作方式改了）。
 - 舊對話串交接時的用量 C：61.2 萬。
 - mockup（v3，8 區，1512×888 1:1，含配色 I）：https://claude.ai/artifact/JoMeuCUehc4aovDUuLy6FH ——要尺寸、顏色、版面就用 read_artifact 讀它的 HTML（CSS 常數都在裡面）。色票頁：https://claude.ai/artifact/LdrzKKkzJ42TvhVwZkDiQ7
