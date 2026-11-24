@@ -22,7 +22,7 @@ Google Maps Tampermonkey 使用者腳本，疊加中央氣象署降雨預報在�
 | `cwa_cache.json` | 全台 22 縣市 368 個鄉鎮的降雨預報快取，由下方的 GitHub Actions 自動維護，每小時整點 30 分更新 |
 | `route_rain_status.xml` | 上述快取更新流程的執行狀態 RSS，供監控用（見下方訂閱網址） |
 | `tw_town_boundaries_moi1140318.json` | 台灣鄉鎮界線資料，供腳本判斷路線經過哪個鄉鎮用，跟氣象快取是各自獨立的資料 |
-| `tests/` | 介面的無頭瀏覽器測試：`python3 tests/test_panel.py RouteRain.user.js`（Chromium＋Firefox，假資料畫出底部面板後逐項斷言） |
+| `tests/` | 介面的無頭瀏覽器測試：`python3 tests/test_panel.py RouteRain.user.js`（底部面板）、`python3 tests/test_ribbon.py RouteRain.user.js`（地圖色帶、移進可見區；`harness.html` 內建一個只從網址讀視野的假地圖）。Chromium＋Firefox |
 | `scripts/fetch_cwa.sh` | 產生 `cwa_cache.json` 與 `route_rain_status.xml` 的抓取腳本，由 GitHub Actions 排程執行 |
 
 ## 氣象快取怎麼運作
@@ -76,7 +76,8 @@ https://raw.githubusercontent.com/bgtsai/browser-tools/main/route-rain/route_rai
 - 按路線面板「選項」旁的「旅途中的雨」打開：Google 左側面板自動收起，地圖底部出現時間軸面板，關閉時展開回去。
 - 橫軸是出發時間（每 15 分一欄、96 欄），縱軸是路線上的取樣點（起點在上）；最上面一條「沿路最濕」是那個出發時間沿路最濕的一格。
 - 配色四級：0～20% 白、30～40% 淺青、50～60% 桃紅、70% 以上紫；有雷陣雨、大雨、豪雨時提高一級。
-- 滑鼠指到一欄＝看那個出發時間；點一下釘住、再點一下取消。頂邊的把手拖拉調整高度，〔收合〕只留標題列，ⓘ 是圖例與資料來源。
+- 地圖上的路線依「目前那一欄的出發時間」騎到各點時的雨勢上色；拖動、縮放地圖時先淡出，地圖停下後重畫。打開時會把整條路線移到面板上方。
+- 滑鼠指到一欄＝看那個出發時間，指到某格時地圖上標出那個點；點一下釘住、再點一下取消。頂邊的把手拖拉調整高度，〔收合〕只留標題列，ⓘ 是圖例與資料來源。
 
 ## 目前狀態
 

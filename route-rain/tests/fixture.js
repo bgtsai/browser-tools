@@ -21,5 +21,9 @@ window.__fixture = function (rr) {
   const meta = {matchNote:'測試', timeBasis:'依路況', routeDistanceMeters:5300, capturedAt:Date.now(),
     mode:{mode:'TWO_WHEELER', via:'測試'}, selected:{distanceMeters:5300, durationSec:840, distanceText:'5.3 公里', durationText:'14 分'},
     callCount:0, failures:[], fetchedAt:Date.now(), fromCache:true, source:'github', altCount:1};
-  return { nodes, departures, forecast, totalSec:14*60, meta };
+  // 路線上的點：每兩個取樣點之間插 8 點，時間線性內插
+  const timeline = [];
+  nodes.forEach((n, i) => { const m = nodes[i + 1]; if (!m) { timeline.push({ sec: n.sec, lat: n.lat, lon: n.lon }); return; }
+    for (let k = 0; k < 8; k++) { const f = k / 8; timeline.push({ sec: n.sec + (m.sec - n.sec) * f, lat: n.lat + (m.lat - n.lat) * f, lon: n.lon + (m.lon - n.lon) * f }); } });
+  return { nodes, departures, forecast, totalSec:14*60, timeline, meta };
 };

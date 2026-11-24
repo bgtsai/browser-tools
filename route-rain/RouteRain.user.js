@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.0.0
+// @version      1.1.0
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -73,10 +73,21 @@
     const HEAD_H_PX = 52;                      // 標頭總高（sticky）
     const GRID_BOTTOM_PAD_PX = 8;              // 最後一列下方的留白
     const COLBOX_PAD_PX = 2;                   // 欄框比色塊每邊多出的寬度
-    const HOVER_SETTLE_MS = 160;               // 送出移動事件後，等命中判定跑完再點擊
-    // 與 Google 自己一致：實測點路線節點時，它一律縮放到整數 17.00
-    //（18.03→17.00、16.17→17.00，一個往下一個往上都精準落在 17）
-    const MAP_FOCUS_ZOOM = 17;                 // 點擊節點時要拉近到的縮放層級
+
+    // 地圖上的路線色帶：先畫 Google 路線藍的外框，再疊色帶，白色那級才看得出是路線
+    const RIBBON_W_PX = 6;                     // 色帶寬
+    const RIBBON_FRAME_W_PX = 10;              // 外框寬（每邊露出 2px）
+    const RIBBON_FRAME_COLOR = '#1967d2';      // Google 路線外緣的深藍
+    const RIBBON_MIN_STEP_PX = 2;              // 投影後離上一點不到這麼遠就略過，點數少一個量級
+    const RIBBON_FADE_MS = 150;                // 地圖一被操作就淡出
+    // 拖動中網址的 @ 不更新，放開約 0.5 秒才更新（12 第④節實測）：
+    // 最後一次操作後至少等這麼久，而且連續兩次輪詢網址都沒變，才重畫
+    const RIBBON_IDLE_MS = 700;
+    const RIBBON_POLL_MS = 200;
+    const MARK_R_PX = 9;                       // 指到某格時，地圖上標出那個點的圈
+    // 開啟時把整條路線移進面板上方的可見區
+    const FIT_MARGIN_PX = 48;                  // 路線離可見區四邊至少留這麼多
+    const FIT_MAX_ZOOM = 17;                   // 很短的路線也不拉得比這更近（跟 Google 點節點的層級一致）
     // 離 Google 節點多近就吸附過去。
     //
     // 原本的做法是「避開」，現在反過來：Google 的節點是轉彎、匯流這類
@@ -95,8 +106,6 @@
     //   ③ 等速移動            → 加上 easeInOutCubic 緩動，起停自然
     //   ④ 縮放一級一級跳      → 改用滾輪（實測是連續的，會出現 17.6z 這種非整數）
     const PAN_MIN_MS = 350;                    // 平移最短時長
-    const PAN_MS_PER_SCREEN = 300;             // 每多移動一個畫面寬就多這麼久
-    const PAN_MAX_MS = 900;                    // 平移最長時長
     // 滾輪縮放的實測結果（間隔 vs 每事件縮放量）：
     //   16ms → 0.000 級（完全無效，那正是 requestAnimationFrame 的間隔）
     //   30ms → 0.256 級（打折）
@@ -104,29 +113,18 @@
     // 因此縮放不能用 rAF 逐影格送，必須用固定間隔串接。
     const WHEEL_INTERVAL_MS = 50;              // 滾輪事件間隔，低於 30ms 會被整批忽略
     const WHEEL_ZOOM_PER_EVENT = 0.32;         // 每個事件的縮放量（50ms 間隔下實測）
-    // 拖曳時游標不能離開畫布，單次手勢最多只能移動約 0.4 個畫面。
-    // 因此「要不要先拉遠」與「拉遠幾級」都由同一個條件決定：
-    // 拉遠到剛好塞得進一次手勢即可，不多拉——多拉一級就多一次圖磚重載。
+    // 拖曳時游標不能離開畫布，單次手勢最多只能移動約 0.4 個畫面；超過就分幾次拖。
     const DRAG_MAX_SCREENS = 0.6;              // 單次拖曳的位移上限（畫面數）；
                                                // 方向感知的按下點讓行程從 0.4 提高到 0.6
     const SAFE_PRESS_MIN_PX = 60;              // 按下點至少要離路線這麼遠，否則會被判定為拖曳路線
     const PRESS_EDGE_MARGIN_PX = 40;           // 按下點與拖曳終點都要離畫布邊緣這麼遠
-    const ARC_MAX_ZOOM_OUT = 10;               // 拉遠的級數上限（台北→高雄這種極遠距離需要 9 級）
-    // ── 收斂與死區 ──
-    // 死區不是「距離小於某個值就放棄」，而是「已經沒有縮放、而且再修也修不動」的狀態。
-    // 先前把門檻設在 80px（zoom 16 約 173 公尺），等於還沒修完就放棄。
-    // 正確的判準是：一直修到改善停滯為止，只有停滯時剩下的誤差才算死區。
-    const PAN_TOLERANCE_PX = 15;               // 到這個程度就算已經到位（zoom 16 約 32 公尺）
-    const DEAD_ZONE_PX = 50;                   // 停滯時若剩下的誤差在此範圍內，視為抖動、接受它
-                                               // 也用於「再點同一個節點」時判斷不必動作
-    const CONVERGE_MIN_EFFECT = 0.5;           // 一次修正的實際改善量，至少要有該次拖曳量的一半；
-                                               // 不能用固定比例判斷——拖曳有 0.6 畫面的上限，
-                                               // 誤差比上限大時本來就只能一次減少一個上限的量
+    // ── 收斂 ──
+    const PAN_TOLERANCE_PX = 15;               // 路線中心離可見區中心這麼近就算到位
     const SETTLE_POLL_MS = 250;                // 輪詢間隔；連續兩次相同即視為停止
     const SETTLE_TIMEOUT_MS = 3000;            // 等待上限，逾時就用當下的值繼續
     const PAN_MAX_ITERATIONS = 5;              // 修正的次數上限
     const ZOOM_TOLERANCE = 0.3;                // 縮放層級與目標差距在此範圍內即可
-    const MIN_WORK_ZOOM = 5;                   // 拉遠的下限
+    const MIN_WORK_ZOOM = 5;                   // 把路線移進可見區時，拉遠的下限
     const ROUTE_CHANGE_DEBOUNCE_MS = 600;      // 路線改變後等它安定再重算（ms）
     const DEPART_STEP_MIN = 15;                // 出發時間欄距（分鐘）
     const DEPART_COLUMNS_MAX = 96;             // 欄數上限（96 欄 × 15 分 = 24 小時）
@@ -202,7 +200,9 @@
         view: null,                 // 目前畫出來的資料與互動狀態，見 render()
         collapsed: false,           // 使用者按了〔收合〕
         pinnedMs: null,             // 已釘住那一欄的出發時刻；重算後用它找回同一欄
-        sidebarCollapsedByUs: false,// Google 左側面板是我們收起來的（關閉時才展開回去）
+        sidebarCollapsedByUs: false,
+        needFit: false,             // 這次打開還沒把路線移進可見區
+        ribbon: null,               // 地圖色帶的狀態，見 ensureRibbon()// Google 左側面板是我們收起來的（關閉時才展開回去）
         lastSelected: null,         // { key, selected, names }：左側面板收著時讀不到，沿用上次的
         lastRouteKey: '',
         capturedDirections: null,   // 攔截到的 /maps/preview/directions 回應
@@ -1664,7 +1664,7 @@ ${field('API 授權碼',
         const lines = logText.trim().split('\n').filter(Boolean);
         const text = lines.length
             ? '=== route-rain 定位診斷 ===\n' + lines.join('\n')
-            : '（還沒有診斷資料，請先點一次表格中的格子）';
+            : '（還沒有診斷資料，請先打開一次「旅途中的雨」）';
         try {
             GM_setClipboard(text);
             log('診斷已複製到剪貼簿，共', lines.length, '筆');
@@ -2186,6 +2186,7 @@ ${field('API 授權碼',
         state.body = null;
         state.view = null;
         hideTip();
+        removeRibbon();
         restoreGoogleSidebar();
         state.active = false;
         ensureButton();
@@ -2204,6 +2205,7 @@ ${field('API 授權碼',
         state.body = panel.querySelector('.' + PREFIX + '-body');
         state.view = null;
         state.active = true;
+        state.needFit = true;
         layoutPanel();
         const btn = document.querySelector('[data-' + PREFIX + '-btn]');
         if (btn) btn.setAttribute('data-' + PREFIX + '-on', '1');
@@ -2380,7 +2382,7 @@ ${field('API 授權碼',
             '／總列數', nodes.length);
         clearBody(wrap);
         render(wrap, {
-            nodes, departures, forecast, totalSec,
+            nodes, departures, forecast, totalSec, timeline,
             meta: {
                 matchNote: picked.matchNote,
                 timeBasis: alt.timeBasis,
@@ -2400,6 +2402,11 @@ ${field('API 授權碼',
         // 讓使用者盯著「處理中」等那麼久沒有必要。名稱寫進節點物件，
         // 每補一批就重寫地點欄的文字（只動文字，不重畫格子）。
         const view = state.view;
+        // 每次打開只移一次：之後換路線重算時，使用者多半正在看地圖的某一處
+        if (state.needFit) {
+            state.needFit = false;
+            fitRouteIntoView().catch(err => warn('移動地圖失敗：', err.message));
+        }
         const prog = wrap.querySelector('.' + PREFIX + '-prog');
         if (prog) prog.textContent = `地名 0／${nodes.length}`;
         fillPlaceNames(nodes, (done, total) => {
@@ -2472,7 +2479,7 @@ ${field('API 授權碼',
 
     function render(wrap, data) {
         const P = PREFIX;
-        const { nodes, departures, forecast, totalSec, meta } = data;
+        const { nodes, departures, forecast, totalSec, timeline, meta } = data;
         const cols = departures.length;
         const colX = ci => LABEL_W_PX + ci * COL_PITCH_PX;       // 第 ci 欄色塊的左緣
 
@@ -2532,7 +2539,8 @@ ${field('API 授權碼',
 
         const scroll = wrap.querySelector('.' + P + '-scroll');
         const view = {
-            nodes, departures, forecast, totalSec, meta, cells, wettest,
+            nodes, departures, forecast, totalSec, timeline, meta, cells, wettest,
+            pointNode: assignPointsToNodes(timeline || [], nodes),
             scroll,
             rowEls: [...wrap.querySelectorAll('.' + P + '-row')],
             hoverCol: null, hoverRow: null,
@@ -2592,7 +2600,7 @@ ${field('API 授權碼',
             pin.style.display = 'block';
             pin.style.left = (LABEL_W_PX + view.pinnedCol * COL_PITCH_PX) + 'px';
         }
-        // 第 2 批：地圖上的路線色帶跟著這一欄重畫
+        drawRibbon();
     }
 
     /** ⓘ 的內容：圖例、資料來源、警告（有警告時 ⓘ 變紅） */
@@ -2691,6 +2699,7 @@ ${field('API 授權碼',
                 if (view.hoverRow != null) view.rowEls[view.hoverRow].firstElementChild.classList.remove(P + '-hl');
                 if (ri != null) view.rowEls[ri].firstElementChild.classList.add(P + '-hl');
                 view.hoverRow = ri;
+                if (view.hoverCol === ci) drawRibbon();   // 只換列：標記點要跟著移
             }
             if (view.hoverCol !== ci) { view.hoverCol = ci; updateShownColumn(); }
         };
@@ -2752,6 +2761,248 @@ ${field('API 授權碼',
     // 也找不到可呼叫的地圖物件（window 上沒有任何具備 panTo/setCenter 的東西，
     // google.maps 也不存在）。可行的是對畫布送出滑鼠事件模擬拖曳，實測有效。
 
+    // ════════════════════════════════════════════════════════════════
+    // 地圖上的路線色帶
+    // ════════════════════════════════════════════════════════════════
+
+    /**
+     * 路線上每一點歸給時間最近的那一列（取樣點），色帶就用那一列在這一欄的顏色。
+     * 分界取相鄰兩列時間的中點，跟格線「一列代表一段路」的意思一致。
+     */
+    function assignPointsToNodes(timeline, nodes) {
+        const out = new Int32Array(timeline.length);
+        let k = 0;
+        for (let i = 0; i < timeline.length; i++) {
+            while (k < nodes.length - 1 && timeline[i].sec > (nodes[k].sec + nodes[k + 1].sec) / 2) k++;
+            out[i] = k;
+        }
+        return out;
+    }
+
+    /** 目前視野下「經緯度 → 視窗座標」。地圖畫布一直是整個視窗，左側面板開關都不影響 */
+    function screenProjector() {
+        const canvas = findMapCanvas();
+        const vp = readViewport();
+        if (!canvas || !vp) return null;
+        const r = canvas.getBoundingClientRect();
+        const c = projectToPixel(vp.lat, vp.lon, vp.zoom);
+        const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+        return (lat, lon) => {
+            const p = projectToPixel(lat, lon, vp.zoom);
+            return { x: cx + p.x - c.x, y: cy + p.y - c.y };
+        };
+    }
+
+    /**
+     * 色帶插在地圖畫布的正後面，當它的兄弟節點（只新增、不搬動 Google 的節點，01 第⑤條）。
+     * 2026-11-24 真實頁面實測：畫布所在的容器是 z-index:0 的堆疊脈絡，後面還有地名那層畫布、
+     * 路線時間小卡等 DOM——插在畫布後面，地名、側邊面板、縮放鈕、圖層縮圖自然都疊在色帶上面。
+     * 掛在 body 用 fixed 的話，色帶會蓋過 Google 的側邊面板與所有控制項。拖動地圖後節點仍在。
+     */
+    function ensureRibbon() {
+        const canvas = findMapCanvas();
+        const rb = state.ribbon;
+        if (rb && rb.el.isConnected && (!canvas || rb.el.parentElement === canvas.parentElement)) return rb;
+        const el = rb ? rb.el : document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        el.id = PREFIX + '-ribbon';
+        el.setAttribute('aria-hidden', 'true');
+        el.style.cssText = 'left:0;top:0;pointer-events:none;overflow:visible;' +
+            `transition:opacity ${RIBBON_FADE_MS}ms ease;opacity:${rb && rb.faded ? 0 : 1};` +
+            (canvas ? 'position:absolute' : 'position:fixed;z-index:1');
+        if (canvas) canvas.after(el); else document.body.appendChild(el);
+        if (rb) { rb.cache = null; return rb; }
+        state.ribbon = { el, drawnKey: null, cache: null, faded: false, pressed: false, lastActivity: 0,
+            pollKey: null, pollTimer: null };
+        return state.ribbon;
+    }
+
+    function removeRibbon() {
+        if (!state.ribbon) return;
+        clearTimeout(state.ribbon.pollTimer);
+        state.ribbon.el.remove();
+        state.ribbon = null;
+    }
+
+    /** 路線投影到螢幕的點，依「這一段屬於哪一列」切成幾條；同一個視野只算一次 */
+    function projectedRuns(view, rb) {
+        const key = viewportKey() + '|' + innerWidth + 'x' + innerHeight;
+        if (rb.cache && rb.cache.key === key && rb.cache.view === view) return rb.cache.runs;
+        const proj = screenProjector();
+        if (!proj) return null;
+        const tl = view.timeline;
+        const runs = [];
+        let cur = null, last = null;
+        for (let i = 0; i < tl.length; i++) {
+            const node = view.pointNode[i];
+            const p = proj(tl[i].lat, tl[i].lon);
+            if (!cur || cur.node !== node) {
+                // 新的一段從上一段的最後一點接起，兩段之間才不會斷開
+                cur = { node, pts: last ? [last] : [] };
+                runs.push(cur);
+            } else if (i < tl.length - 1 && last &&
+                Math.abs(p.x - last.x) < RIBBON_MIN_STEP_PX && Math.abs(p.y - last.y) < RIBBON_MIN_STEP_PX) {
+                continue;
+            }
+            cur.pts.push(p);
+            last = p;
+        }
+        rb.cache = { key, view, runs };
+        return runs;
+    }
+
+    const svgPath = pts => pts.map((p, i) => (i ? 'L' : 'M') + p.x.toFixed(1) + ' ' + p.y.toFixed(1)).join('');
+
+    /** 照目前顯示的那一欄重畫色帶；指到某格時另外標出那個點 */
+    function drawRibbon() {
+        const view = state.view;
+        if (!state.active || !view || !view.timeline || !view.timeline.length) {
+            if (state.ribbon) state.ribbon.el.innerHTML = '';
+            return;
+        }
+        const rb = ensureRibbon();
+        if (rb.faded) return;                      // 地圖操作中，等穩定後由 settleRibbon 重畫
+        const runs = projectedRuns(view, rb);
+        if (!runs) { rb.el.innerHTML = ''; return; }
+        // 投影出來的是視窗座標；色帶在畫布的容器裡，要扣掉容器的位置（實測是 0,0，但不寫死）
+        const host = rb.el.parentElement.getBoundingClientRect();
+        const ox = rb.el.style.position === 'fixed' ? 0 : host.left;
+        const oy = rb.el.style.position === 'fixed' ? 0 : host.top;
+        rb.el.setAttribute('width', Math.round(rb.el.style.position === 'fixed' ? innerWidth : host.width));
+        rb.el.setAttribute('height', Math.round(rb.el.style.position === 'fixed' ? innerHeight : host.height));
+        rb.el.setAttribute('viewBox', `${ox} ${oy} ${rb.el.getAttribute('width')} ${rb.el.getAttribute('height')}`);
+        const ci = shownColumn(view);
+        const cap = 'fill="none" stroke-linecap="round" stroke-linejoin="round"';
+        const all = svgPath([].concat(...runs.map(r => r.pts)));
+        const parts = [`<path d="${all}" stroke="${RIBBON_FRAME_COLOR}" stroke-width="${RIBBON_FRAME_W_PX}" ${cap}/>`];
+        // 同色的段合併成一條 path，接縫處才不會有圓頭疊出來的深淺
+        const byColor = new Map();
+        for (const r of runs) {
+            if (r.pts.length < 2) continue;
+            const c = view.cells[r.node][ci];
+            const color = c ? c.color : RAIN_NA_COLOR;
+            if (!byColor.has(color)) byColor.set(color, []);
+            byColor.get(color).push(svgPath(r.pts));
+        }
+        for (const [color, ds] of byColor) {
+            parts.push(`<path d="${ds.join('')}" stroke="${color}" stroke-width="${RIBBON_W_PX}" ${cap}/>`);
+        }
+        if (view.hoverRow != null && view.hoverCol != null) {
+            const n = view.nodes[view.hoverRow];
+            const proj = screenProjector();
+            if (proj) {
+                const p = proj(n.lat, n.lon);
+                parts.push(`<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${MARK_R_PX}" fill="#fff" ` +
+                    `fill-opacity=".85" stroke="#202124" stroke-width="3"/>` +
+                    `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="4" fill="#202124"/>`);
+            }
+        }
+        rb.el.innerHTML = parts.join('');
+        rb.drawnKey = viewportKey();
+    }
+
+    /**
+     * 地圖被操作了：先淡出，等網址穩定再重畫。
+     * 網址是唯一讀得到的視野來源，拖動中它不會變——拿舊網址畫只會跟地圖錯開。
+     * @param pressed 是按下（拖動可能還在進行，放開前都不重畫）
+     */
+    function noteMapActivity(pressed) {
+        const rb = state.ribbon;
+        if (!rb) return;
+        if (pressed) rb.pressed = true;
+        rb.lastActivity = Date.now();
+        if (!rb.faded) { rb.faded = true; rb.el.style.opacity = '0'; }
+        if (!rb.pollTimer) rb.pollTimer = setTimeout(settleRibbon, RIBBON_POLL_MS);
+    }
+
+    function settleRibbon() {
+        const rb = state.ribbon;
+        if (!rb) return;
+        rb.pollTimer = null;
+        const key = viewportKey();
+        const quiet = !rb.pressed && Date.now() - rb.lastActivity >= RIBBON_IDLE_MS;
+        if (!quiet || key !== rb.pollKey) {
+            rb.pollKey = key;
+            rb.pollTimer = setTimeout(settleRibbon, RIBBON_POLL_MS);
+            return;
+        }
+        rb.faded = false;
+        drawRibbon();
+        rb.el.style.opacity = '1';
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // 開啟時把整條路線移進面板上方的可見區
+    // ════════════════════════════════════════════════════════════════
+
+    /** 可見區：面板上緣以上、右側讓給 Google 控制項的那塊 */
+    function visibleMapArea() {
+        const top = FIT_MARGIN_PX;
+        const panelTop = state.panel ? state.panel.getBoundingClientRect().top : innerHeight;
+        return {
+            left: FIT_MARGIN_PX, top,
+            right: innerWidth - PANEL_RIGHT_GAP_PX - FIT_MARGIN_PX,
+            bottom: Math.max(top + 100, panelTop - FIT_MARGIN_PX),
+        };
+    }
+
+    /** 路線外框在目前視野下的螢幕範圍 */
+    function routeScreenBox(timeline) {
+        const proj = screenProjector();
+        if (!proj) return null;
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const t of timeline) {
+            const p = proj(t.lat, t.lon);
+            if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+            if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+        }
+        return { minX, minY, maxX, maxY, cx: (minX + maxX) / 2, cy: (minY + maxY) / 2 };
+    }
+
+    /** 把路線中心拖到可見區中心；拖曳一次有行程上限，所以讀實際視野重複幾次 */
+    async function panRouteToArea(canvas, timeline) {
+        for (let i = 0; i < PAN_MAX_ITERATIONS; i++) {
+            const box = routeScreenBox(timeline);
+            if (!box) return;
+            const a = visibleMapArea();
+            const dx0 = (a.left + a.right) / 2 - box.cx;
+            const dy0 = (a.top + a.bottom) / 2 - box.cy;
+            if (Math.hypot(dx0, dy0) <= PAN_TOLERANCE_PX) return;
+            const r = canvas.getBoundingClientRect();
+            const dx = Math.max(-r.width * DRAG_MAX_SCREENS, Math.min(r.width * DRAG_MAX_SCREENS, dx0));
+            const dy = Math.max(-r.height * DRAG_MAX_SCREENS, Math.min(r.height * DRAG_MAX_SCREENS, dy0));
+            await smoothPan(canvas, dx, dy, PAN_MIN_MS, findPressPoint(canvas, dx, dy));
+            if (!lastSettled) return;              // 網址沒反映，再拖只會越拖越偏
+        }
+    }
+
+    async function fitRouteIntoView() {
+        const view = state.view;
+        const canvas = findMapCanvas();
+        const vp = readViewport();
+        if (!view || !canvas || !vp || !view.timeline || view.timeline.length < 2) return;
+        const tl = view.timeline;
+        document.documentElement.removeAttribute('data-' + PREFIX + '-log');   // 每次打開重新記錄
+        const box = routeScreenBox(tl);
+        const a = visibleMapArea();
+        const w = Math.max(1, box.maxX - box.minX), h = Math.max(1, box.maxY - box.minY);
+        const fit = vp.zoom + Math.log2(Math.min((a.right - a.left) / w, (a.bottom - a.top) / h));
+        const target = Math.max(MIN_WORK_ZOOM, Math.min(FIT_MAX_ZOOM, fit));
+        const inside = box.minX >= a.left && box.maxX <= a.right && box.minY >= a.top && box.maxY <= a.bottom;
+        const routeKey = routeSignature(location.href);
+        writeDiag({ step: 'fit-plan', zoom: vp.zoom, target: +target.toFixed(2), inside,
+            box: [box.minX, box.minY, box.maxX, box.maxY].map(Math.round), area: [a.left, a.top, a.right, a.bottom] });
+        // 已經整條在可見區、而且不會小到看不清楚（再拉近不到一級）就不動
+        if (inside && target - vp.zoom < 1) return;
+        // 拉近前先平移：拉近以畫布中心為錨點，先把路線帶到中間，拉近後才不會跑出畫面
+        if (target > vp.zoom) await panRouteToArea(canvas, tl);
+        if (Math.abs(target - vp.zoom) > ZOOM_TOLERANCE) await smoothZoom(canvas, target - vp.zoom);
+        await panRouteToArea(canvas, tl);
+        if (routeSignature(location.href) !== routeKey) warn('移動地圖時路線被改動了（拖到路線？）');
+        const end = readViewport();
+        writeDiag({ step: 'fit-done', zoom: end ? end.zoom : null, box: (() => {
+            const b = routeScreenBox(tl); return b ? [b.minX, b.minY, b.maxX, b.maxY].map(Math.round) : null; })() });
+    }
+
     /** 回傳最大的那張地圖畫布「元素」——呼叫端會直接對它取尺寸與派送事件 */
     function findMapCanvas() {
         const best = [...document.querySelectorAll('canvas')]
@@ -2775,45 +3026,6 @@ ${field('API 授權碼',
         const s = Math.sin(lat * Math.PI / 180);
         const y = (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * world;
         return { x, y };
-    }
-
-    /** Web Mercator 反投影：世界像素座標 → 經緯度。維護自有視野模型時需要 */
-    function unprojectFromPixel(x, y, zoom) {
-        const world = 256 * Math.pow(2, zoom);
-        const lon = x / world * 360 - 180;
-        const n = Math.PI - 2 * Math.PI * y / world;
-        const lat = 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
-        return { lat, lon };
-    }
-
-    /**
-     * 自有的視野模型。
-     *
-     * 為什麼不每一步都讀網址：網址更新是非同步的，每次都要輪詢等它反映，
-     * 實測那些等待佔掉整段動畫 31% 的時間，而且畫面在等待期間完全靜止——
-     * 那正是「一段一段、不連續」的來源。
-     *
-     * 我們自己知道送了幾個滾輪事件、拖了幾像素，可以直接推算新的視野，
-     * 讓各階段無縫接續。累積的誤差在最後統一校正一次即可。
-     */
-    function makeViewModel(vp) {
-        return {
-            lat: vp.lat, lon: vp.lon, zoom: vp.zoom,
-            /** 縮放以畫面中心為錨點，中心座標不變 */
-            applyZoom(delta) { this.zoom += delta; },
-            /** 拖曳 (dx, dy) 像素：地圖跟著游標走，等於中心往反方向移動 */
-            applyPan(dx, dy) {
-                const p = projectToPixel(this.lat, this.lon, this.zoom);
-                const n = unprojectFromPixel(p.x - dx, p.y - dy, this.zoom);
-                this.lat = n.lat; this.lon = n.lon;
-            },
-            /** 目標相對於畫面中心的像素位移 */
-            offsetTo(lat, lon) {
-                const c = projectToPixel(this.lat, this.lon, this.zoom);
-                const t = projectToPixel(lat, lon, this.zoom);
-                return { dx: c.x - t.x, dy: c.y - t.y };
-            },
-        };
     }
 
     function dispatchPointer(target, type, x, y, buttons) {
@@ -3006,218 +3218,6 @@ ${field('API 授權碼',
         return false;
     }
 
-    /** 目前視野下，目標相對於畫面中心的像素位移 */
-    function offsetToTarget(lat, lon) {
-        const vp = readViewport();
-        if (!vp) return null;
-        const c = projectToPixel(vp.lat, vp.lon, vp.zoom);
-        const t = projectToPixel(lat, lon, vp.zoom);
-        return { dx: c.x - t.x, dy: c.y - t.y, zoom: vp.zoom };
-    }
-
-    /** 整段動畫結束後才校正，而且只在誤差夠大時才動——這是流暢度的關鍵取捨 */
-    /**
-     * 最後校正：等視野真的停穩，量實際誤差，超過門檻就修，修完再量。
-     * 迴圈直到到位或次數用盡——這是「結果一定要對」的保證。
-     */
-    /**
-     * 最後校正：等視野確實反映出動作結果，量實際誤差，超過門檻才修，修完再量。
-     *
-     */
-    /**
-     * 最後校正：確保結果一定是對的。
-     *
-     * 關鍵前提是**先讓縮放到位再量位置**。像素距離會隨縮放層級改變，
-     * 在還沒縮放完的狀態下量到的數字，跟縮放完之後的數字不能相比——
-     * 實測踩過：同一個誤差在 zoom 11.04 量到 727px、在 15.83 量到 20109px，
-     * 收斂保護就誤判成「越修越糟」而停手，其實誤差根本沒變。
-     *
-     */
-    async function correctIfNeeded(canvas, lat, lon) {
-        // ── 第一步：確認縮放到位，不到就補 ──
-        // 動作本身已經等過視野反映，這裡直接讀值即可
-        let settled = lastSettled;
-        for (let z = 0; z < 3; z++) {
-            const vp = readViewport();
-            if (!vp) break;
-            const diff = MAP_FOCUS_ZOOM - vp.zoom;
-            if (Math.abs(diff) <= ZOOM_TOLERANCE) break;
-            writeDiag({ step: 'zoom-fix', round: z, realZoom: vp.zoom, need: +diff.toFixed(2) });
-            await smoothZoom(canvas, diff);
-            settled = lastSettled;
-        }
-
-        // ── 第二步：縮放已固定，此時的像素距離才可以互相比較 ──
-        let dist = null;
-        let lastDist = Infinity;
-        let lastApplied = Infinity;
-        for (let i = 0; i < PAN_MAX_ITERATIONS; i++) {
-            const off = offsetToTarget(lat, lon);
-            if (!off) return dist;
-            dist = Math.hypot(off.dx, off.dy);
-            writeDiag({ step: 'correct', round: i, settled,
-                zoom: off.zoom, distPx: Math.round(dist) });
-            if (dist <= PAN_TOLERANCE_PX) return dist;      // 已經到位
-
-            if (i > 0) {
-                // 這次拖曳「能夠」貢獻的量：要嘛是整段誤差，要嘛被單次上限夾住
-                const couldFix = Math.min(lastApplied, lastDist);
-                const improved = lastDist - dist;
-                if (improved < couldFix * CONVERGE_MIN_EFFECT) {
-                    // 改善停滯。此時才判斷是「小到修不動的抖動」還是「真的有問題」
-                    writeDiag({ step: 'correct-stall', round: i,
-                        distPx: Math.round(dist), improvedPx: Math.round(improved),
-                        couldFixPx: Math.round(couldFix),
-                        verdict: dist <= DEAD_ZONE_PX ? '抖動，接受' : '無法收斂' });
-                    return dist;
-                }
-            }
-            lastDist = dist;
-
-            const r = canvas.getBoundingClientRect();
-            const dx = Math.max(-r.width * DRAG_MAX_SCREENS,
-                Math.min(r.width * DRAG_MAX_SCREENS, off.dx));
-            const dy = Math.max(-r.height * DRAG_MAX_SCREENS,
-                Math.min(r.height * DRAG_MAX_SCREENS, off.dy));
-            lastApplied = Math.hypot(dx, dy);
-            await smoothPan(canvas, dx, dy, PAN_MIN_MS, findPressPoint(canvas, dx, dy));
-            settled = lastSettled;
-        }
-        const off = offsetToTarget(lat, lon);
-        return off ? Math.hypot(off.dx, off.dy) : dist;
-    }
-
-    /**
-     * 已經夠接近就什麼都不做。
-     *
-     * 沒有這道判斷的話，反覆點同一個節點會在兩個位置之間來回橫跳：
-     * 每次都為了幾十像素的誤差再拖一次，而那次拖曳自己又留下差不多的誤差。
-     * 對使用者來說那就是「程式有問題」，而不是「更精確」。
-     */
-    function withinDeadZone(lat, lon) {
-        const vp = readViewport();
-        if (!vp) return false;
-        if (Math.abs(vp.zoom - MAP_FOCUS_ZOOM) > 0.3) return false;   // 縮放層級還不對
-        const off = offsetToTarget(lat, lon);
-        return off ? Math.hypot(off.dx, off.dy) <= DEAD_ZONE_PX : false;
-    }
-
-    async function focusMapOn(lat, lon) {
-        if (withinDeadZone(lat, lon)) {
-            writeDiag({ step: 'skip', reason: '已在死區內，不動作' });
-            log('已經夠接近目標，不動作');
-            return;
-        }
-        const canvas = findMapCanvas();
-        const vp0 = readViewport();
-        if (!canvas || !vp0) {
-            writeDiag({ step: 'abort', reason: !canvas ? '找不到畫布' : '讀不到視野' });
-            return;
-        }
-        const r = canvas.getBoundingClientRect();
-        const limX = r.width * DRAG_MAX_SCREENS;
-        const limY = r.height * DRAG_MAX_SCREENS;
-
-        // 全程以自有模型推算，不在階段之間讀網址——那些等待會讓畫面靜止，
-        // 是「一段一段」感受的主因。誤差留到最後統一校正。
-        const model = makeViewModel(vp0);
-        const off0 = model.offsetTo(lat, lon);
-        const screens = Math.max(Math.abs(off0.dx) / r.width, Math.abs(off0.dy) / r.height);
-        const panMs = Math.min(PAN_MAX_MS, PAN_MIN_MS + screens * PAN_MS_PER_SCREEN);
-
-        // ① 太遠先拉遠，拉到剛好塞得進一次手勢即可——多拉一級就多一次圖磚重載
-        const arcOut = screens > DRAG_MAX_SCREENS
-            ? Math.min(ARC_MAX_ZOOM_OUT,
-                Math.ceil(Math.log2(screens / DRAG_MAX_SCREENS)),
-                Math.max(0, Math.floor(vp0.zoom - MIN_WORK_ZOOM)))
-            : 0;
-        writeDiag({ step: 'plan', from: [vp0.lat, vp0.lon, vp0.zoom],
-            target: [+lat.toFixed(5), +lon.toFixed(5)],
-            screens: +screens.toFixed(2), arcOut, panMs: Math.round(panMs) });
-
-        if (arcOut > 0) {
-            const applied = await smoothZoom(canvas, -arcOut);
-            model.applyZoom(applied);
-            // smoothZoom 內部已等到視野反映，這裡的讀值可以安全採用
-            const vpAfterZoom = readViewport();
-            if (lastSettled && vpAfterZoom) {
-                // 此時的讀值已確認反映了動作，可以安全地校準模型
-                model.lat = vpAfterZoom.lat;
-                model.lon = vpAfterZoom.lon;
-                model.zoom = vpAfterZoom.zoom;
-            }
-            writeDiag({ step: 'after-arc-out', settled: lastSettled,
-                modelZoom: +model.zoom.toFixed(2),
-                realZoom: vpAfterZoom ? vpAfterZoom.zoom : null });
-        }
-
-        // ② 平移。位移在「拉遠後的層級」重新算——用舊層級會差十幾倍。
-        //
-        //    最後一輪之後一定要驗證實際位置：**殘留誤差會被接下來的拉近放大 2^N 倍**
-        //    （拉近 5 級＝32 倍）。在低縮放層級修，同樣的角度誤差只對應少少的像素，
-        //    一次就修得完；等到拉近後才發現，就得拖好幾次而且每次上限只有 0.6 個畫面。
-        let pans = 0;
-        let lastDist = Infinity;
-        let lastApplied = Infinity;
-        for (let i = 0; i < PAN_MAX_ITERATIONS; i++) {
-            const off = model.offsetTo(lat, lon);
-            const dist = Math.hypot(off.dx, off.dy);
-            if (dist <= PAN_TOLERANCE_PX) break;
-            if (i > 0) {
-                // 停滯判斷同樣看「改善量 vs 該次拖曳量」，不用固定比例——
-                // 拖曳有上限，誤差比上限大時本來就只能一次減少一個上限的量
-                const couldFix = Math.min(lastApplied, lastDist);
-                const improved = lastDist - dist;
-                if (improved < couldFix * CONVERGE_MIN_EFFECT) {
-                    writeDiag({ step: 'pan-stall', round: i,
-                        distPx: Math.round(dist), improvedPx: Math.round(improved),
-                        couldFixPx: Math.round(couldFix) });
-                    break;
-                }
-            }
-            lastDist = dist;
-            const dx = Math.max(-limX, Math.min(limX, off.dx));
-            const dy = Math.max(-limY, Math.min(limY, off.dy));
-            lastApplied = Math.hypot(dx, dy);
-            pans++;
-            await smoothPan(canvas, dx, dy, i === 0 ? panMs : PAN_MIN_MS,
-                findPressPoint(canvas, dx, dy));
-            model.applyPan(dx, dy);
-            // 平移後的殘留會被接下來的拉近放大 2^N 倍，所以要確認實際位置
-            const vpAfterPan = readViewport();
-            if (lastSettled && vpAfterPan) {
-                model.lat = vpAfterPan.lat;
-                model.lon = vpAfterPan.lon;
-                model.zoom = vpAfterPan.zoom;
-            }
-            writeDiag({ step: 'after-pan', round: i, settled: lastSettled,
-                remainPx: Math.round(Math.hypot(
-                    model.offsetTo(lat, lon).dx, model.offsetTo(lat, lon).dy)) });
-        }
-
-        // ③ 拉近到目標層級（滾輪錨定畫面中心，目標會留在原地）。
-        //    這裡一定要就地等它跑完：縮放動畫進行中網址不會更新，
-        //    若留到後面才用「整段開始前」的舊 key 去等，第一段比對會立刻通過，
-        //    退化成「連續兩次讀到相同」而誤判停穩——實測因此重複拉近、衝到 18.82 級。
-        const applied = await smoothZoom(canvas, MAP_FOCUS_ZOOM - model.zoom);
-        model.applyZoom(applied);
-        writeDiag({ step: 'after-zoom-in', settled: lastSettled,
-            modelZoom: +model.zoom.toFixed(2),
-            realZoom: (readViewport() || {}).zoom });
-
-        // ④ 動畫全部結束後才讀真實視野、校正累積誤差。
-        //    只在這裡等一次，而不是每個階段都等。
-        const finalDist = await correctIfNeeded(canvas, lat, lon);
-        const vpEnd = readViewport();
-        writeDiag({
-            step: 'done', target: [+lat.toFixed(5), +lon.toFixed(5)],
-            screens: +screens.toFixed(2), arcZoomOut: arcOut, pans,
-            modelZoom: +model.zoom.toFixed(2), realZoom: vpEnd ? vpEnd.zoom : null,
-            finalDistPx: finalDist === null ? null : Math.round(finalDist),
-            errorKm: vpEnd ? +(haversine(vpEnd.lat, vpEnd.lon, lat, lon) / 1000).toFixed(3) : null,
-        });
-    }
-
     /**
      * 把診斷寫進 DOM 屬性。
      * 沙箱腳本的 console 輸出在網頁主控台看不到（實測完全沒有任何一行），
@@ -3232,154 +3232,6 @@ ${field('API 授權碼',
             document.documentElement.setAttribute('data-' + PREFIX + '-diag',
                 JSON.stringify({ t: new Date().toLocaleTimeString(), ...obj }));
         } catch (err) { /* 診斷失敗不影響功能 */ }
-    }
-
-    function routeCtrlCount() {
-        return ((location.href.match(/\/data=([^?]+)/) || [''])[1].match(/3m4/g) || []).length;
-    }
-
-    /**
-     * 在畫面中心按一下，讓 Google 顯示它自己的地點資訊卡。
-     *
-     * 定位結束後目標就在畫面正中央，而節點本來就落在路線上，
-     * 所以中心點必定命中路線。單擊是「顯示這個點的資訊」，
-     * 與拖曳（會新增途經點）是不同的操作，不會改動路線。
-     */
-    /**
-     * 算出節點實際落在螢幕上的哪一點。
-     *
-     * 不用畫面中心：地圖偏 15px，那一點就離節點 15px，在 zoom 17 約 16 公尺——
-     * 沿路走這段距離可能已經過了路口、換了門牌；節點若在轉彎處，
-     * 甚至會落到轉彎後的另一段路上。節點的螢幕位置是算得出來的
-     * （最終視野＋節點座標），精度是次像素等級。
-     */
-    function nodeScreenPoint(canvas, lat, lon) {
-        const r = canvas.getBoundingClientRect();
-        const off = offsetToTarget(lat, lon);
-        let x = r.left + r.width / 2;
-        let y = r.top + r.height / 2;
-        if (off) { x -= off.dx; y -= off.dy; }
-        const M = 4;                                    // 夾在畫布內，避免定位嚴重失敗時落到畫布外
-        return {
-            x: Math.max(r.left + M, Math.min(r.right - M, x)),
-            y: Math.max(r.top + M, Math.min(r.bottom - M, y)),
-        };
-    }
-
-    /**
-     * 只把游標移到節點位置，不點擊——用於使用者自己指定的位置。
-     *
-     * 那些點在地圖上有 Google 自己的標記，正確的互動方式是「懸停」：
-     * 移過去它就會自己冒出資訊卡。點下去反而會觸發它自己的行為
-     * （縮放到 17、顯示轉彎卡，或導覽到該地點頁面）。
-     *
-     * 注意：合成事件不會移動實體游標，只是把事件交給網頁，
-     * 所以表格的 tooltip 不會因此關閉——那是預期行為，不是失敗。
-     */
-    async function hoverOnMap(canvas, lat, lon) {
-        const { x, y } = nodeScreenPoint(canvas, lat, lon);
-        dispatchPointer(canvas, 'pointermove', x, y, 0);
-        await wait(HOVER_SETTLE_MS);
-        dispatchPointer(canvas, 'pointermove', x, y, 0);   // 再送一次，確保判定跑完
-        writeDiag({ step: 'hover', at: [Math.round(x), Math.round(y)] });
-    }
-
-    async function revealOnMap(canvas, lat, lon) {
-        const r = canvas.getBoundingClientRect();
-        //
-        // 點中心等於要求定位必須完美：地圖偏 15px，那一點就離節點 15px，
-        // 在 zoom 16 約 32 公尺——沿路走 32 公尺可能已經過了路口、換了門牌，
-        // 若節點正好在轉彎處，甚至會落到轉彎後的另一段路上。
-        // 而節點的螢幕位置是算得出來的（最終視野＋節點座標），精度是次像素等級，
-        // 這樣就把「定位精度」與「點擊精度」解耦，定位的容差也不必為此收緊。
-        const { x, y } = nodeScreenPoint(canvas, lat, lon);
-        const off = offsetToTarget(lat, lon);
-        const before = routeCtrlCount();
-
-        // 點擊之前一定要先「把游標移過去」。
-        //
-        // Google 的命中判定是在滑鼠移動時做的，結果記在內部狀態裡，
-        // 後續的點擊是拿那個狀態決定「點到了什麼」。
-        // 我們的流程是「拖曳（一連串 move）→ 縮放（沒有 move）→ 直接按下」，
-        // 所以它記著的還是拖曳結束時那個位置的判定結果，
-        // 而地圖在那之後又縮放了好幾級，該螢幕位置早已不對應路線——
-        // 於是點擊有送出、卻什麼都沒選到。
-        //
-        // 症狀上看得見：路線上那個「懸停指示點」停在舊位置不動，
-        // 縮放後就跑到道路外面去了。
-        dispatchPointer(canvas, 'pointermove', x, y, 0);
-        await wait(HOVER_SETTLE_MS);
-        dispatchPointer(canvas, 'pointermove', x, y, 0);   // 再送一次，確保判定跑完
-        await wait(HOVER_SETTLE_MS);
-
-        dispatchPointer(canvas, 'pointerdown', x, y, 1);
-        await wait(60);                     // 停頓一下，避免被當成拖曳的起手
-        dispatchPointer(canvas, 'pointerup', x, y, 0);
-        const w = pageWindow();
-        const ME = w.MouseEvent || MouseEvent;
-        canvas.dispatchEvent(new ME('click', {
-            bubbles: true, cancelable: true, composed: true, view: w,
-            clientX: x, clientY: y, button: 0, buttons: 0, detail: 1,
-        }));
-        await wait(500);
-        const after = routeCtrlCount();
-        writeDiag({ step: 'reveal-click',
-            at: [Math.round(x), Math.round(y)],
-            offsetFromCentre: off ? [Math.round(-off.dx), Math.round(-off.dy)] : null,
-            ctrlBefore: before, ctrlAfter: after });
-        if (after !== before) warn('點擊地圖後途經點數改變了', before, '→', after);
-    }
-
-    function onNodeClick(node) {
-        document.documentElement.removeAttribute('data-' + PREFIX + '-log');   // 每次點擊重新記錄
-        const ctrlBefore = routeCtrlCount();
-        const w = pageWindow();
-        const canvas = findMapCanvas();
-        const vp = readViewport();
-        writeDiag({
-            step: 'click',
-            node: node.county + node.town,
-            lat: +node.lat.toFixed(5), lon: +node.lon.toFixed(5),
-            env: w === window ? 'sandbox' : 'unsafeWindow',
-            hasUnsafeWindow: typeof unsafeWindow !== 'undefined',
-            viewport: vp,
-            canvas: canvas
-                ? Math.round(canvas.getBoundingClientRect().width) + 'x' +
-                  Math.round(canvas.getBoundingClientRect().height)
-                : null,
-            hasPointerEvent: !!(w && w.PointerEvent),
-        });
-        log('點擊節點', node.county + node.town);
-        focusMapOn(node.lat, node.lon).then(async () => {
-            const canvas = findMapCanvas();
-            // 讓 Google 秀出該點的資訊卡；點在節點的實際螢幕位置，不是畫面中心。
-            //
-            // 起點／停靠／目的地不點：那是使用者指定的位置，在地圖上多半有
-            // Google 自己的標記（甚至本身就是景點），點下去會觸發它自己的行為——
-            // 導覽到該地點頁面，把路線檢視換掉。而且那三類的名稱使用者本來就設定了，
-            // 我們已經顯示在 tooltip 上，不需要再查。
-            if (!canvas) {
-                // 沒有畫布就什麼都不做
-            } else if (node.kind || node.isGoogleNode) {
-                // 這兩類都是 Google 自己的節點（使用者指定的位置、或吸附過去的行車動作點），
-                // 正確的互動是懸停——移過去它就會冒出自己的資訊卡；
-                // 點下去反而會觸發它自己的行為（縮放、轉彎卡、或導覽到該地點頁面）
-                await hoverOnMap(canvas, node.lat, node.lon);
-                log('Google 節點，只做懸停不點擊：',
-                    node.kind ? KIND_LABEL[node.kind] : '行車動作點');
-            } else {
-                await revealOnMap(canvas, node.lat, node.lon);
-            }
-            const after = routeCtrlCount();
-            if (after !== ctrlBefore) {
-                // 破壞性副作用：模擬拖曳被判定成「拖曳路線新增途經點」
-                writeDiag({ step: 'route-modified', before: ctrlBefore, after });
-                warn('警告：定位過程改動了路線的途經點', ctrlBefore, '→', after);
-            }
-        }).catch(err => {
-            writeDiag({ step: 'error', message: err.message });
-            warn('定位失敗：', err.message);
-        });
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -3401,7 +3253,8 @@ ${field('API 授權碼',
                 pending = false;
                 ensureButton();
                 if (!state.active) return;
-
+                // Google 自己移動地圖（點地點、按縮放鈕、鍵盤）時網址的 @ 會變，色帶要跟著重畫
+                if (state.ribbon && viewportKey() !== state.ribbon.drawnKey) noteMapActivity(false);
                 scheduleRerunIfRouteChanged();
             });
         };
@@ -3411,7 +3264,20 @@ ${field('API 授權碼',
 
         // 視窗尺寸變動時重排面板——跟上面的 schedule 分開，因為 schedule 也會被
         // 面板自己內部的捲動觸發（scroll 監聽用了 capture），不需要每次都重排。
-        window.addEventListener('resize', () => { if (state.active) layoutPanel(); });
+        window.addEventListener('resize', () => { if (state.active) { layoutPanel(); drawRibbon(); } });
+        // 地圖一被操作就淡出色帶：按下（拖動）、滾輪、方向鍵與 +／−。
+        // 自己面板裡的操作不算；按住期間不重畫，放開後才開始等網址穩定。
+        const onActivity = ev => {
+            if (!state.active || !state.ribbon) return;
+            if (state.panel && state.panel.contains(ev.target)) return;
+            if (ev.type === 'keydown' && !/^(Arrow|\+|-|=|PageUp|PageDown)/.test(ev.key)) return;
+            noteMapActivity(ev.type === 'pointerdown' || ev.type === 'mousedown');
+        };
+        ['pointerdown', 'mousedown', 'wheel', 'keydown'].forEach(t =>
+            window.addEventListener(t, onActivity, { capture: true, passive: true }));
+        ['pointerup', 'mouseup', 'pointercancel'].forEach(t => window.addEventListener(t, () => {
+            if (state.ribbon && state.ribbon.pressed) { state.ribbon.pressed = false; noteMapActivity(false); }
+        }, { capture: true, passive: true }));
 
         // Google Maps 是 SPA，換路線只改網址不重新載入頁面。
         // MutationObserver 多半也會被觸發，但直接監看網址變化比較直接可靠：

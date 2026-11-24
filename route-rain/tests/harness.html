@@ -27,6 +27,23 @@
    b.setAttribute('aria-label', collapse?'展開側邊面板':'收合側邊面板');
    b.style.left = collapse? '0px':'408px';
  });
+ // 假地圖：跟 Google 一樣，視野只從網址讀得到（這裡放在 #/@lat,lon,zoomz），
+ // 而且拖動中不更新、放開後延遲才寫回（Google 實測約 0.5 秒）
+ window.__map = { lat: 25.055, lon: 121.53, zoom: 15, delayMs: 300, drags: 0, wheels: 0 };
+ const P = (lat, lon, z) => { const w = 256 * 2 ** z, s = Math.sin(lat * Math.PI / 180);
+   return { x: (lon + 180) / 360 * w, y: (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * w }; };
+ const U = (x, y, z) => { const w = 256 * 2 ** z, n = Math.PI - 2 * Math.PI * y / w;
+   return { lat: 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n))), lon: x / w * 360 - 180 }; };
+ const writeUrl = () => { const m = __map; location.hash = `/@${m.lat.toFixed(7)},${m.lon.toFixed(7)},${m.zoom.toFixed(2)}z`; };
+ let urlTimer = null; const later = () => { clearTimeout(urlTimer); urlTimer = setTimeout(writeUrl, __map.delayMs); };
+ window.__fakeMapOn = () => { writeUrl();
+   let down = null;
+   cv.addEventListener('pointerdown', e => { down = { x: e.clientX, y: e.clientY, c: P(__map.lat, __map.lon, __map.zoom) }; __map.drags++; });
+   cv.addEventListener('pointermove', e => { if (!down || !e.buttons) return;
+     const n = U(down.c.x - (e.clientX - down.x), down.c.y - (e.clientY - down.y), __map.zoom); __map.lat = n.lat; __map.lon = n.lon; });
+   cv.addEventListener('pointerup', () => { down = null; later(); });
+   cv.addEventListener('wheel', e => { __map.wheels++; __map.zoom += e.deltaY < 0 ? 0.32 : -0.32; later(); });
+ };
  // GM 替身
  window.__gm={};
  window.GM_getValue=(k,d)=> k in __gm ? __gm[k] : d;
