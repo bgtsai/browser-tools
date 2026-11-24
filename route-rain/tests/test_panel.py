@@ -11,7 +11,10 @@ a = ap.parse_args()
 HERE = pathlib.Path(__file__).parent
 src = pathlib.Path(a.script).read_text(encoding='utf-8')
 HOOK = "    if (document.readyState === 'loading') {"
-assert src.count(HOOK) == 1, '找不到啟動段'
+assert src.count(HOOK) == 1
+TAIL = "    if (document.readyState === 'loading') {\n        document.addEventListener('DOMContentLoaded', boot);\n    } else {\n        boot();\n    }"
+assert src.count(TAIL) == 1, '啟動段的寫法變了，測試要跟著改'
+src = src.replace(TAIL, HOOK + "\n    }")
 EXPOSE = ("    window.__rr = { state, injectStyle, buildPanel, render, layoutPanel, setCollapsed, rainOf,"
           " collapseGoogleSidebar, restoreGoogleSidebar, deactivate, RAIN_LEVELS };\n")
 src = src.replace(HOOK, EXPOSE + "    if (false) {")
@@ -32,6 +35,7 @@ def run(engine, pw):
     errs = []
     pg.on('pageerror', lambda e: errs.append(str(e)))
     pg.goto((HERE / 'harness.html').as_uri())
+    pg.click('#toggle')                       # 打開時腳本會先收起 Google 左側面板；開著的話面板會讓位（test_modes 測）
     pg.add_script_tag(content=fixture)
     pg.add_script_tag(content=src)
     pg.evaluate(OPEN)
@@ -150,6 +154,7 @@ def run(engine, pw):
 
     # 視窗變窄：橫向捲動，捲軸不蓋到最後一列
     pg.set_viewport_size({'width': 1000, 'height': 888})
+    pg.evaluate("window.__rr.layoutPanel()")  # 這支測試不跑 boot()，視窗 resize 的監聽在 test_modes 測
     pg.wait_for_timeout(100)
     pr3 = R('#rr-panel'); sc = pg.evaluate("(() => { const s = document.querySelector('.rr-scroll'); return [s.scrollWidth, s.clientWidth, s.scrollHeight, s.clientHeight]; })()")
     check('視窗 1000：面板寬 936、可以橫捲', pr3[2] == 936 and sc[0] > sc[1], (pr3, sc))
@@ -159,8 +164,10 @@ def run(engine, pw):
     check('橫捲時地點欄留在左邊', abs(lab[0] - sb[0]) < 0.5, (lab, sb))
     shot('7_narrow_scrolled')
     pg.set_viewport_size({'width': 1512, 'height': 888})
+    pg.evaluate("window.__rr.layoutPanel()")
 
     # Google 左側面板：收起、只展開自己收起來的
+    pg.click('#toggle')                       # 先打開，模擬按「旅途中的雨」之前的狀態
     pg.evaluate("window.__rr.collapseGoogleSidebar()")
     check('收起 Google 左側面板', pg.evaluate("document.getElementById('side').classList.contains('off')") and pg.evaluate("window.__rr.state.sidebarCollapsedByUs"))
     pg.evaluate("window.__rr.deactivate()")

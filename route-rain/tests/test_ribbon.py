@@ -12,6 +12,9 @@ HERE = pathlib.Path(__file__).parent
 src = pathlib.Path(a.script).read_text(encoding='utf-8')
 HOOK = "    if (document.readyState === 'loading') {"
 assert src.count(HOOK) == 1
+TAIL = "    if (document.readyState === 'loading') {\n        document.addEventListener('DOMContentLoaded', boot);\n    } else {\n        boot();\n    }"
+assert src.count(TAIL) == 1, '啟動段的寫法變了，測試要跟著改'
+src = src.replace(TAIL, HOOK + "\n    }")
 src = src.replace(HOOK, "    window.__rr = { state, injectStyle, buildPanel, render, deactivate, fitRouteIntoView, readViewport };\n    if (false) {")
 # boot() 才會掛「地圖被操作就淡出」的監聽：測試要它，但不要它注入按鈕
 src = src.replace("    window.__rr = {", "    window.__rrBoot = boot;\n    window.__rr = {", 1)
@@ -93,6 +96,17 @@ def run(engine, pw):
     after = pg.evaluate("(() => { const d = document.querySelector('#rr-ribbon path').getAttribute('d'); const m = d.match(/^M([-\\d.]+) ([-\\d.]+)/); return [+m[1], +m[2]]; })()")
     exp = pg.evaluate(f"({PROJ})(25.05, 121.51)")
     check('網址穩定後淡入、畫在新位置', pg.evaluate("document.getElementById('rr-ribbon').style.opacity") == '1' and abs(after[0] - exp[0]) < 0.2 and abs(after[0] - before[0] - (-100)) < 1, (before, after, exp))
+    # 閒著的時候不能有自己觸發自己的變動（例如每輪重寫 aria-label → boot 的觀察者 → 再重寫）
+    n0 = pg.evaluate("(() => { window.__mut = 0; new MutationObserver(ms => { window.__mut += ms.length; }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-label'] }); return 0; })()")
+    pg.wait_for_timeout(1000)
+    m = pg.evaluate("window.__mut")
+    check('閒著 1 秒：沒有自己觸發的 DOM 變動', m == 0, m)
+    # Google 的 DOM 一直在變：拖完之後頁面持續有變動，色帶照樣要在網址穩定後回來
+    pg.evaluate("window.__churn = setInterval(() => { const i = document.createElement('i'); document.body.appendChild(i); setTimeout(() => i.remove(), 50); }, 100)")
+    pg.mouse.move(900, 250); pg.mouse.down(); pg.mouse.move(850, 250, steps=3); pg.mouse.up()
+    pg.wait_for_timeout(2000)
+    check('頁面一直有 DOM 變動：色帶仍在網址穩定後淡入', pg.evaluate("document.getElementById('rr-ribbon').style.opacity") == '1')
+    pg.evaluate("clearInterval(window.__churn)")
     # 滾輪也算
     pg.mouse.move(900, 300); pg.mouse.wheel(0, -120)
     check('滾輪：色帶淡出', pg.evaluate("document.getElementById('rr-ribbon').style.opacity") == '0')
@@ -108,7 +122,7 @@ def run(engine, pw):
     pg.click('[data-rr-act="collapse"]')
 
     # 移進可見區：先把地圖移到很遠、拉很近，路線完全在畫面外
-    pg.evaluate("(() => { Object.assign(__map, { lat: 25.10, lon: 121.62, zoom: 17 }); location.hash = `/@25.1000000,121.6200000,17.00z`; })()")
+    pg.evaluate("(() => { Object.assign(__map, { lat: 25.10, lon: 121.62, zoom: 17 }); location.hash = `/maps/dir/a/b/@25.1000000,121.6200000,17.00z`; })()")
     pg.wait_for_timeout(1500)
     pg.evaluate("window.__rr.fitRouteIntoView()")
     pg.wait_for_function("window.__rr.state && window.__map.drags > 0", timeout=10000)

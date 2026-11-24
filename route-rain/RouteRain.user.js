@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.1.0
+// @version      1.2.0
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -88,6 +88,11 @@
     // 開啟時把整條路線移進面板上方的可見區
     const FIT_MARGIN_PX = 48;                  // 路線離可見區四邊至少留這麼多
     const FIT_MAX_ZOOM = 17;                   // 很短的路線也不拉得比這更近（跟 Google 點節點的層級一致）
+    // 自動隱藏與讓位（mockup 第 5～7 區）
+    const SIDEBAR_GAP_PX = 9;                  // 左側面板被打開時，底部面板左緣離展開鈕右緣（mockup：519→528）
+    const CAPSULE_BOTTOM_PX = 24;              // 暫停膠囊離下緣
+    const CAPSULE_LEFT_PX = 24;                // 街景畫面左下沒有「圖層」縮圖，貼左下
+    const CAPSULE_LEFT_LAYERS_PX = 110;        // 地圖畫面左下有「圖層」縮圖（72＋左 24＋間距），要讓開
     // 離 Google 節點多近就吸附過去。
     //
     // 原本的做法是「避開」，現在反過來：Google 的節點是轉彎、匯流這類
@@ -202,6 +207,12 @@
         pinnedMs: null,             // 已釘住那一欄的出發時刻；重算後用它找回同一欄
         sidebarCollapsedByUs: false,
         needFit: false,             // 這次打開還沒把路線移進可見區
+        pageMode: 'route',          // 'route'｜'place'｜'street'｜'other'，見 detectPageMode()
+        autoCollapsed: false,       // 點了地圖上的地點，自動收合成標題列（不是使用者按的）
+        forceShown: false,          // 自動隱藏期間按了暫停膠囊，硬叫回來
+        sawSidebarToggle: false,    // 這次打開後看過 Google 左側面板的開關鈕（拿來當地標）
+        capsule: null,              // 暫停膠囊
+        layoutKey: '',              // 上次排面板時的「左側面板右緣｜視窗寬」
         ribbon: null,               // 地圖色帶的狀態，見 ensureRibbon()// Google 左側面板是我們收起來的（關閉時才展開回去）
         lastSelected: null,         // { key, selected, names }：左側面板收著時讀不到，沿用上次的
         lastRouteKey: '',
@@ -1767,6 +1778,20 @@ ${field('API 授權碼',
 .${P}-ib[aria-expanded="true"]{background:#e8f0fe}
 .${P}-body{flex:1;min-height:0;position:relative}
 .${P}-panel.${P}-collapsed .${P}-body{display:none}
+.${P}-panel.${P}-nomax .${P}-max{display:none}
+.${P}-panel.${P}-tight .${P}-title{gap:8px}
+.${P}-panel.${P}-nosel .${P}-sel{display:none}
+.${P}-panel.${P}-autohide{display:none}
+/* 暫停膠囊：自動隱藏期間浮在地圖左下角，點它叫回面板 */
+.${P}-cap{position:fixed;bottom:${CAPSULE_BOTTOM_PX}px;z-index:2147482000;height:36px;padding:0 16px 0 12px;
+  border-radius:18px;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.3);display:none;align-items:center;gap:8px;
+  font-size:14px;color:#202124;white-space:nowrap;border:0;cursor:pointer;
+  font-family:"Google Sans Text",Roboto,"Noto Sans TC",Arial,sans-serif}
+.${P}-cap.${P}-on{display:inline-flex}
+.${P}-cap:hover{background:#f1f3f4}
+.${P}-cap .${P}-pz{width:18px;height:18px;border-radius:50%;background:#e8f0fe;display:inline-flex;
+  align-items:center;justify-content:center}
+.${P}-cap .${P}-s{color:#5f6368}
 /* overflow-anchor:none：內容一變動瀏覽器就會自己調捲動位置，地名陸續補上時會亂跳 */
 .${P}-scroll{position:absolute;inset:0;overflow:auto;overscroll-behavior:contain;overflow-anchor:none}
 .${P}-inner{position:relative}
@@ -1979,9 +2004,13 @@ ${field('API 授權碼',
         while (walker.nextNode()) {
             if (!first) first = walker.currentNode; else rest.push(walker.currentNode);
         }
-        if (first) { first.textContent = label; rest.forEach(n => { n.textContent = ''; }); }
-        else btn.appendChild(document.createTextNode(label));
-        btn.setAttribute('aria-label', label);
+        if (first) {
+            if (first.textContent !== label) first.textContent = label;
+            rest.forEach(n => { if (n.textContent) n.textContent = ''; });
+        } else btn.appendChild(document.createTextNode(label));
+        // 一樣也不要重寫：寫入同樣的值仍會產生一筆變動紀錄，而 boot() 有看 aria-label——
+        // 每一輪都寫就變成「寫→變動→重排→寫」的無限迴圈（v1.2.0 開發時踩到）
+        if (btn.getAttribute('aria-label') !== label) btn.setAttribute('aria-label', label);
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -2004,6 +2033,80 @@ ${field('API 授權碼',
         state.sidebarCollapsedByUs = false;
         const btn = document.querySelector(SITE_SELECTORS.sidebarExpand);
         if (isShown(btn)) { btn.click(); log('已展開 Google 左側面板'); }
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // 自動隱藏、暫停膠囊、點地點自動收合
+    // ════════════════════════════════════════════════════════════════
+
+    /**
+     * 目前是哪一種畫面。判斷用網址＋地標元素兩者（12 第⑤節）：只看網址會把「同一個情境裡
+     * 網址暫時換格式」誤判成離開；只看元素又分不出地點卡是「路線旁並排的」還是「另外搜尋的」。
+     *   route ：路線地圖（/maps/dir/，不是街景）
+     *   place ：點了地圖上的地點——Google 把「路線」和「地點卡」並排打開，路線還在地圖上
+     *           （/maps/place/ 而且路線面板的「選項」還在）
+     *   street：街景（網址的 @ 那段有 ,3a,）
+     *   other ：其他（另外搜尋了地點、首頁…），路線不在地圖上
+     */
+    function detectPageMode() {
+        const href = location.href;
+        if (/\/@[^/]*,3a,/.test(href)) return 'street';
+        const toggleBtn = document.querySelector(SITE_SELECTORS.sidebarCollapse) ||
+            document.querySelector(SITE_SELECTORS.sidebarExpand);
+        if (toggleBtn) state.sawSidebarToggle = true;
+        // 地標：左側面板的開關鈕。只在這次打開後看過它時才要求——
+        // Google 改了 aria-label 的話，寧可只靠網址，也不要整個面板永遠被藏起來
+        const landmark = !state.sawSidebarToggle || !!toggleBtn;
+        if (href.includes('/maps/dir/') && landmark) return 'route';
+        if (href.includes('/maps/place/') && landmark && findOptionsButton()) return 'place';
+        return 'other';
+    }
+
+    /** 路線還畫在地圖上（色帶才有意義） */
+    const mapShowsRoute = () => state.pageMode === 'route' || state.pageMode === 'place';
+
+    function applyPageMode(mode) {
+        if (mode === state.pageMode) return;
+        const prev = state.pageMode;
+        state.pageMode = mode;
+        state.forceShown = false;
+        // 點地點自動收合；回到路線自動展開（使用者自己按〔收合〕的 state.collapsed 不動）
+        state.autoCollapsed = mode === 'place';
+        log('畫面切換', prev, '→', mode);
+        applyCollapsed();
+        applyVisibility();
+        drawRibbon();
+    }
+
+    function applyVisibility() {
+        if (!state.panel) return;
+        const hidden = !mapShowsRoute() && !state.forceShown;
+        state.panel.classList.toggle(PREFIX + '-autohide', hidden);
+        if (hidden) { hideTip(); toggleInfo(false); }
+        const cap = ensureCapsule();
+        cap.classList.toggle(PREFIX + '-on', hidden);
+        // 街景左下沒有「圖層」縮圖；其他畫面有，要讓開
+        cap.style.left = (state.pageMode === 'street' ? CAPSULE_LEFT_PX : CAPSULE_LEFT_LAYERS_PX) + 'px';
+    }
+
+    function ensureCapsule() {
+        if (state.capsule && state.capsule.isConnected) return state.capsule;
+        const P = PREFIX;
+        const cap = document.createElement('button');
+        cap.type = 'button';
+        cap.className = P + '-cap';
+        cap.title = '叫回「旅途中的雨」面板';
+        cap.innerHTML = `<span class="${P}-pz"><svg width="8" height="8" viewBox="0 0 8 8" aria-hidden="true">` +
+            '<rect x="1" y="0" width="2" height="8" fill="#1a73e8"/><rect x="5" y="0" width="2" height="8" fill="#1a73e8"/>' +
+            `</svg></span>${BUTTON_LABEL}<span class="${P}-s">・暫停</span>`;
+        cap.addEventListener('click', () => {
+            state.forceShown = true;
+            applyVisibility();
+            layoutPanel();
+        });
+        document.body.appendChild(cap);
+        state.capsule = cap;
+        return cap;
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -2091,7 +2194,7 @@ ${field('API 授權碼',
             if (!b) return;
             const act = b.getAttribute('data-' + P + '-act');
             if (act === 'close') deactivate();
-            else if (act === 'collapse') setCollapsed(!state.collapsed);
+            else if (act === 'collapse') setCollapsed(!isCollapsed());
             else if (act === 'settings') openSettings();
             else if (act === 'info') toggleInfo();
         });
@@ -2108,9 +2211,21 @@ ${field('API 授權碼',
         ib.setAttribute('aria-expanded', String(open));
     }
 
+    /**
+     * 〔收合〕〔展開〕。看起來收著（不管是使用者收的、還是點地點自動收的）時按下去就是展開，
+     * 自動收合也一併取消——使用者明確要看，就不要在他看的時候又收回去。
+     */
     function setCollapsed(on) {
         state.collapsed = on;
+        if (!on) state.autoCollapsed = false;
+        applyCollapsed();
+    }
+
+    const isCollapsed = () => state.collapsed || state.autoCollapsed;
+
+    function applyCollapsed() {
         if (!state.panel) return;
+        const on = isCollapsed();
         state.panel.classList.toggle(PREFIX + '-collapsed', on);
         const b = state.panel.querySelector('[data-' + PREFIX + '-act="collapse"]');
         if (b) b.textContent = on ? '展開' : '收合';
@@ -2139,13 +2254,44 @@ ${field('API 授權碼',
     function layoutPanel() {
         const panel = state.panel;
         if (!panel) return;
-        panel.style.width = Math.max(0, innerWidth - PANEL_RIGHT_GAP_PX) + 'px';
-        if (state.collapsed) { panel.style.height = PANEL_TITLE_H_PX + 'px'; return; }
+        // Google 左側面板開著（使用者自己按展開、或點了地點）：左緣讓到它的開關鈕右邊
+        const left = sidebarRightEdge();
+        panel.style.left = left + 'px';
+        panel.style.width = Math.max(0, innerWidth - PANEL_RIGHT_GAP_PX - left) + 'px';
+        fitTitle();
+        if (panel.classList.contains(PREFIX + '-dragging')) return;   // 拖拉中由 bindGrip 自己設高度
+        if (isCollapsed()) { panel.style.height = PANEL_TITLE_H_PX + 'px'; return; }
         // 還在顯示訊息（處理中、錯誤）時不撐高，只要訊息放得下
         if (!state.view) { panel.style.height = 'auto'; return; }
         const { min, max } = heightBounds();
         const want = GM_getValue(KEY_PANEL_HEIGHT, PANEL_DEFAULT_H_PX);
         panel.style.height = Math.round(Math.max(min, Math.min(max, want))) + 'px';
+    }
+
+    /** Google 左側面板開著時它的右緣（開關鈕右邊再空一點）；收著時回 0 */
+    function sidebarRightEdge() {
+        const btn = document.querySelector(SITE_SELECTORS.sidebarCollapse);
+        if (!isShown(btn)) return 0;
+        const r = btn.getBoundingClientRect();
+        // 開關鈕在面板右緣外側。量到離譜的位置（地圖剩不到 200px）多半是量錯，不讓
+        return r.right > 0 && r.right < innerWidth - PANEL_RIGHT_GAP_PX - 200 ? Math.round(r.right) + SIDEBAR_GAP_PX : 0;
+    }
+
+    /**
+     * 標題列放不下時依序退讓：先藏「沿路最高」（mockup 第 7 區），再把間距從 14 縮成 8，
+     * 最後才藏「出發→抵達」。名稱與按鈕一定留著——按鈕被擠出去就關不掉了。
+     * （mockup 第 7 區的 496px 實際放不下「名稱＋出發→抵達＋四顆按鈕」，要縮到第三步）
+     */
+    function fitTitle() {
+        const panel = state.panel;
+        const title = panel && panel.querySelector('.' + PREFIX + '-title');
+        if (!title) return;
+        const steps = [PREFIX + '-nomax', PREFIX + '-tight', PREFIX + '-nosel'];
+        panel.classList.remove(...steps);
+        for (const cls of steps) {
+            if (title.scrollWidth <= title.clientWidth) break;
+            panel.classList.add(cls);
+        }
     }
 
     function bindGrip(panel) {
@@ -2187,6 +2333,7 @@ ${field('API 授權碼',
         state.view = null;
         hideTip();
         removeRibbon();
+        if (state.capsule) { state.capsule.remove(); state.capsule = null; }
         restoreGoogleSidebar();
         state.active = false;
         ensureButton();
@@ -2199,6 +2346,10 @@ ${field('API 授權碼',
 
         state.lastRouteKey = routeSignature(location.href);
         state.collapsed = false;
+        state.autoCollapsed = false;
+        state.forceShown = false;
+        state.sawSidebarToggle = false;
+        state.pageMode = 'route';
         const panel = buildPanel();
         document.body.appendChild(panel);
         state.panel = panel;
@@ -2585,6 +2736,7 @@ ${field('API 授權碼',
         state.panel.querySelector('.' + P + '-max').innerHTML = w
             ? `<i style="background:${w.color}"></i>沿路最高 ${w.pop}%${w.reason ? '・' + w.reason : ''}`
             : '';
+        fitTitle();
         const place = (sel, col) => {
             view.scroll.querySelectorAll(sel).forEach(el => {
                 if (col == null) { el.style.display = 'none'; return; }
@@ -2811,7 +2963,7 @@ ${field('API 授權碼',
             (canvas ? 'position:absolute' : 'position:fixed;z-index:1');
         if (canvas) canvas.after(el); else document.body.appendChild(el);
         if (rb) { rb.cache = null; return rb; }
-        state.ribbon = { el, drawnKey: null, cache: null, faded: false, pressed: false, lastActivity: 0,
+        state.ribbon = { el, drawnKey: null, seenKey: null, cache: null, faded: false, pressed: false, lastActivity: 0,
             pollKey: null, pollTimer: null };
         return state.ribbon;
     }
@@ -2860,6 +3012,8 @@ ${field('API 授權碼',
             return;
         }
         const rb = ensureRibbon();
+        // 進了街景之類路線地圖不在的畫面：色帶收起來，資料留著
+        rb.el.style.display = mapShowsRoute() ? '' : 'none';
         if (rb.faded) return;                      // 地圖操作中，等穩定後由 settleRibbon 重畫
         const runs = projectedRuns(view, rb);
         if (!runs) { rb.el.innerHTML = ''; return; }
@@ -3253,12 +3407,26 @@ ${field('API 授權碼',
                 pending = false;
                 ensureButton();
                 if (!state.active) return;
-                // Google 自己移動地圖（點地點、按縮放鈕、鍵盤）時網址的 @ 會變，色帶要跟著重畫
-                if (state.ribbon && viewportKey() !== state.ribbon.drawnKey) noteMapActivity(false);
+                applyPageMode(detectPageMode());
+                // 左側面板開關、視窗大小變了才重排：這裡每次 DOM 變動都會跑，重排會強制版面計算
+                const lk = sidebarRightEdge() + '|' + innerWidth;
+                if (lk !== state.layoutKey) { state.layoutKey = lk; layoutPanel(); }
+                // Google 自己移動地圖（點地點、按縮放鈕、鍵盤）時網址的 @ 會變，色帶要跟著重畫。
+                // 只在網址「這次跟上次看到的不同」時才算一次操作：Google 的 DOM 一直在變，
+                // 拿「跟畫的時候不同」判斷的話，每次變動都會把等待重新計時，色帶永遠回不來
+                const rb = state.ribbon;
+                const vk = viewportKey();
+                if (rb && vk !== rb.seenKey) {
+                    rb.seenKey = vk;
+                    if (vk !== rb.drawnKey) noteMapActivity(false);
+                }
                 scheduleRerunIfRouteChanged();
             });
         };
-        new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
+        // 也看 aria-label：Google 左側面板開關時，開關鈕只換 aria-label（收合↔展開），
+        // 不一定有節點增減——不看的話底部面板不會讓位
+        new MutationObserver(schedule).observe(document.body,
+            { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-label'] });
         window.addEventListener('resize', schedule);
         window.addEventListener('scroll', schedule, true);
 
