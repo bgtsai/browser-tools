@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.2.0
+// @version      1.3.0
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -214,8 +214,13 @@
         capsule: null,              // 暫停膠囊
         layoutKey: '',              // 上次排面板時的「左側面板右緣｜視窗寬」
         ribbon: null,               // 地圖色帶的狀態，見 ensureRibbon()// Google 左側面板是我們收起來的（關閉時才展開回去）
-        lastSelected: null,         // { key, selected, names }：左側面板收著時讀不到，沿用上次的
+        lastSelected: null,         // { key, names }：左側面板收著時讀不到地點名稱，同一條路線沿用上次的
+        initialDataKey: '',         // 頁面載入當下的路線（停靠點＋交通方式）；只有它能用 preload 補抓
+        usedCaptureAt: 0,           // 這次畫面用的是哪一份路線資料（capturedDirections.at）
+        routeMismatch: '',          // 選出來的路線跟 Google 清單上選中那列對不上：不畫色帶，ⓘ 變紅
         lastRouteKey: '',
+        lastRouteKeyHref: '',
+        sawIntercept: false,        // 頁面載入後攔到過 Google 自己的路線請求（之後畫面用的就不是 preload 那份）
         capturedDirections: null,   // 攔截到的 /maps/preview/directions 回應
         gToken: '',                 // Google 內部端點的 session 權杖
         routePoints: null,          // 目前顯示路線的座標，用來算出離路線夠遠的按下點
@@ -381,32 +386,56 @@
     }
 
     /**
-     * 哪一條路線被選中：該列裡多出「詳細資料／預覽」兩顆按鈕。
-     * 不用 class 判斷，因為那個修飾 class（vKKO3d）是混淆名稱、會隨版本變。
+     * Google 畫面上選的是第幾條：寫在網址 data= 段的 !5i{n}，沒有就是第 0 條。
+     * 實測（2026-11-25）：點清單第 2 條，網址多出 !5i1，Google 不重新請求、用手上那份換一條畫；
+     * 回應裡 alternatives 的順序＝清單順序。所以用這個編號直接取資料，不再用距離去猜——
+     * 「最佳路線」頁籤會混合交通方式，機車 5319 m 跟大眾運輸 5316 m 用距離分不出來。
      */
-    function readSelectedRoute(panel) {
-        const listBlock = [...(panel ? panel.children : [])].find(c => {
-            const cn = String(c.className || '');
-            return cn.includes('m6QErb') && cn.includes('XiKgde');
-        });
-        if (!listBlock) return null;
-        const rows = [...listBlock.children].filter(c =>
-            String(c.className || '').includes(SITE_SELECTORS.routeRowClassHint));
-        if (!rows.length) return null;
+    function selectedIndexFromUrl(href) {
+        const data = String(href).split('/data=')[1] || '';
+        const m = data.split('?')[0].match(/!5i(\d+)/);
+        return m ? +m[1] : 0;
+    }
 
-        let chosen = rows.find(row => row.querySelectorAll('button').length >= 2) || rows[0];
-        const pick = (row, hint) => {
+    /**
+     * 清單上選中那一列的文字（拿來核對，不拿來挑路線）。
+     * 左側面板收起後清單列仍在 DOM 裡、只是尺寸 0，文字照樣讀得到（2026-11-25 實測），
+     * 所以這裡不用 findPanel()（它要求高度 > 400）。
+     */
+    function readSelectedRowText() {
+        const rows = [...document.querySelectorAll('div[class*="' + SITE_SELECTORS.routeRowClassHint + '"]')];
+        const row = rows.find(r => r.querySelectorAll('button').length >= 2);
+        if (!row) return null;
+        const pick = hint => {
             const el = row.querySelector('[class*="' + hint + '"]');
             return el ? el.textContent.trim() : '';
         };
+        const durationText = pick(SITE_SELECTORS.durationClassHint);
+        const distanceText = pick(SITE_SELECTORS.distanceClassHint);
+        if (!durationText && !distanceText) return null;
         return {
-            index: rows.indexOf(chosen),
-            total: rows.length,
-            durationText: pick(chosen, SITE_SELECTORS.durationClassHint),
-            distanceText: pick(chosen, SITE_SELECTORS.distanceClassHint),
-            durationSec: parseDurationText(pick(chosen, SITE_SELECTORS.durationClassHint)),
-            distanceMeters: parseDistanceText(pick(chosen, SITE_SELECTORS.distanceClassHint)),
+            durationText, distanceText,
+            durationSec: parseDurationText(durationText),
+            distanceMeters: parseDistanceText(distanceText),
         };
+    }
+
+    /**
+     * 選出來的路線跟清單上選中那列是不是同一條：距離字串要一樣，
+     * 時間字串要等於「依路況」或「不含路況」其中一個（面板可能顯示任一種）。
+     * 回傳空字串＝一致；讀不到清單列時回傳 null（無法核對）。
+     */
+    function routeMismatchReason(alt, row) {
+        if (!row) return null;
+        const reasons = [];
+        if (row.distanceText && alt.distanceText && row.distanceText !== alt.distanceText) {
+            reasons.push(`距離 ${alt.distanceText}／清單 ${row.distanceText}`);
+        }
+        const times = [alt.trafficText, alt.durationText].filter(Boolean);
+        if (row.durationText && times.length && !times.includes(row.durationText)) {
+            reasons.push(`時間 ${times.join(' 或 ')}／清單 ${row.durationText}`);
+        }
+        return reasons.join('，');
     }
 
     function parseDurationText(text) {
@@ -551,7 +580,7 @@
         }
     }
 
-    function keepIfDirections(url, text) {
+    function keepIfDirections(url, text, source) {
         keepToken(url);
         if (!url || !DIRECTIONS_URL_RE.test(String(url))) return;
         if (!text || text.length < 1000) return;
@@ -569,8 +598,26 @@
                 (text.length / 1024).toFixed(1) + 'KB');
             return;
         }
-        state.capturedDirections = { text, at: Date.now(), url: String(url), altCount: usable.length };
-        log('已收下路線資料', (text.length / 1024).toFixed(1) + 'KB｜可用路線', usable.length, '條');
+        // 記下這份資料屬於哪一條路線（停靠點＋交通方式）。實測 Google 先改網址、再發請求，
+        // 回應到的時候網址已經是新路線了，所以用回應當下的網址。
+        const dataKey = routeDataKey(location.href);
+        const prev = state.capturedDirections;
+        state.capturedDirections = {
+            text, at: Date.now(), url: String(url), altCount: usable.length, dataKey,
+            source: source || 'intercept',
+        };
+        if (source !== 'refetch') state.sawIntercept = true;
+        log('已收下路線資料', (text.length / 1024).toFixed(1) + 'KB｜可用路線', usable.length, '條｜來源',
+            source || '攔截');
+        // Google 自己重新規劃（依路況更新、改了路線）時，畫面上的清單會換掉，
+        // 網址卻可能完全沒變——以前只看網址，色帶就一直停在舊路線（2026-11-25 實測）。
+        // 攔到同一條路線的新資料、內容又不一樣，就重算。自己補抓的不觸發，免得繞圈。
+        if (source !== 'refetch' && state.active && state.body &&
+            (!prev || prev.text !== text) && dataKey === routeDataKey(state.lastRouteKeyHref || '')) {
+            log('攔到這條路線的新資料，重新計算');
+            clearTimeout(state.rerunTimer);
+            state.rerunTimer = setTimeout(rerun, ROUTE_CHANGE_DEBOUNCE_MS);
+        }
     }
 
     /**
@@ -582,6 +629,44 @@
      * 發的 XHR 完全一致（距離、時間、座標數都相同）。
      * 所以攔截器沒收到東西時，改從頁面找出那個 preload 網址、拿掉 sig 自己請求一次。
      */
+    const DIRECTIONS_WAIT_MS = 3000;          // 路線改了之後等 Google 自己那份資料回來的上限（ms）
+    const DIRECTIONS_POLL_MS = 200;
+
+    /**
+     * 拿「這條路線」（停靠點＋交通方式）的資料，而且是 Google 自己收到的那份。
+     * 網址先變、Google 的請求後到（實測差約 1 秒），所以先等一下；
+     * 只有 Google 從頁面載入後都沒再請求過（畫面用的還是 preload 那份）才自己補抓。
+     */
+    async function directionsFor(dataKey) {
+        const match = () => {
+            const c = state.capturedDirections;
+            return c && c.dataKey === dataKey ? c : null;
+        };
+        const until = Date.now() + DIRECTIONS_WAIT_MS;
+        while (!match() && state.sawIntercept && Date.now() < until) {
+            await new Promise(r => setTimeout(r, DIRECTIONS_POLL_MS));
+        }
+        if (!match() && !state.sawIntercept) await refetchPreloadedDirections();
+        return match();
+    }
+
+    /** 拿掉 sig 重送同一個路線網址，回傳 { text, at, url, source:'refetch' }；失敗回 null */
+    async function refetchDirections(url) {
+        if (!url) return null;
+        try {
+            const u = new URL(url, location.href);
+            u.searchParams.delete('sig');
+            const res = await pageWindow().fetch(u.href, { credentials: 'include' });
+            const text = await res.text();
+            keepIfDirections(u.href, text, 'refetch');
+            const c = state.capturedDirections;
+            return c && c.text === text ? c : null;
+        } catch (err) {
+            log('重抓路線資料失敗｜', err.message);
+            return null;
+        }
+    }
+
     async function refetchPreloadedDirections() {
         const isDir = u => DIRECTIONS_URL_RE.test(String(u || ''));
         const urls = [...document.querySelectorAll('link[href]')].map(l => l.href).filter(isDir);
@@ -597,7 +682,7 @@
                 u.searchParams.delete('sig');
                 const res = await pageWindow().fetch(u.href, { credentials: 'include' });
                 const text = await res.text();
-                keepIfDirections(u.href, text);   // 內部會驗證能解析才收下
+                keepIfDirections(u.href, text, 'refetch');   // 內部會驗證能解析才收下
                 if (state.capturedDirections) {
                     log('攔截器沒收到，改用頁面 preload 網址（去掉 sig）重新取得路線資料');
                     return;
@@ -781,24 +866,6 @@
             totalSec: alt.trafficSec,
             durationText: alt.trafficText || alt.durationText,
             timeBasis: '依路況',
-        };
-    }
-
-    /** 從替代路線中挑出面板上選中的那一條：用面板顯示的距離與時間比對 */
-    function pickAlternative(alts, selected) {
-        if (alts.length === 1) return { alt: alts[0], matchNote: '只有一條' };
-        if (!selected || selected.distanceMeters == null) {
-            return { alt: alts[0], matchNote: '面板讀不到數值，取第一條' };
-        }
-        let best = null;
-        for (const a of alts) {
-            const score = Math.abs(a.totalMeters - selected.distanceMeters) /
-                Math.max(selected.distanceMeters, 1);
-            if (!best || score < best.score) best = { alt: a, score };
-        }
-        return {
-            alt: best.alt,
-            matchNote: `比對面板值（${selected.distanceText}）誤差 ${(best.score * 100).toFixed(1)}%`,
         };
     }
 
@@ -2131,12 +2198,19 @@ ${field('API 授權碼',
      * 改看路線本身之後，視野位移、網址尾巴多出參數、切換到地點檢視，
      * 全都不會誤觸重算——只有真的改了起訖、停靠站、拖曳路徑或交通方式才會。
      */
-    function routeSignature(href) {
+    /** 路線資料的身分：停靠點＋交通方式。換這兩個 Google 會重新請求資料 */
+    function routeDataKey(href) {
         const parsed = parseRouteFromUrl(href);
         if (!parsed || !parsed.points.length) return '';
         return parsed.points
             .map(p => `${p.kind}:${p.lat.toFixed(6)},${p.lon.toFixed(6)}`)
             .join('|') + '|3e' + (parsed.urlTravelCode || '');
+    }
+
+    /** 畫面上的路線：資料身分＋選第幾條（!5i）。點清單別條只改 !5i、不重新請求，也要重算 */
+    function routeSignature(href) {
+        const key = routeDataKey(href);
+        return key ? key + '|5i' + selectedIndexFromUrl(href) : '';
     }
 
     /** 開著面板時偵測到路線改變（例如切換交通方式）就重跑一次 */
@@ -2146,6 +2220,7 @@ ${field('API 授權碼',
         if (!key || key === state.lastRouteKey) return;
         log('偵測到路線改變，重新計算');
         state.lastRouteKey = key;
+        state.lastRouteKeyHref = location.href;
         clearTimeout(state.rerunTimer);
         // 切換交通方式時網址可能連續變動幾次，等安定下來再跑，避免重複請求
         state.rerunTimer = setTimeout(rerun, ROUTE_CHANGE_DEBOUNCE_MS);
@@ -2345,6 +2420,7 @@ ${field('API 授權碼',
         if (!findPanel()) { alert('找不到路線面板，請先在 Google Maps 規劃好路線。'); return; }
 
         state.lastRouteKey = routeSignature(location.href);
+        state.lastRouteKeyHref = location.href;
         state.collapsed = false;
         state.autoCollapsed = false;
         state.forceShown = false;
@@ -2410,11 +2486,12 @@ ${field('API 授權碼',
             showMessage(wrap, '從網址讀不到路線。請確認已經規劃好路線（網址裡要有 <code>/data=</code> 那一段）。');
             return;
         }
-        // 左側面板收著時讀不到選中的路線與地點名稱（尺寸是 0），同一條路線就沿用上次讀到的
-        const cachedSel = state.lastSelected && state.lastSelected.key === routeKey ? state.lastSelected : null;
-        const selected = readSelectedRoute(findPanel()) || (cachedSel && cachedSel.selected) || null;
+        // 左側面板收著時讀不到地點名稱（尺寸是 0），同一條路線（停靠點＋交通方式）沿用上次讀到的
+        const dataKey = routeDataKey(location.href);
+        const cachedSel = state.lastSelected && state.lastSelected.key === dataKey ? state.lastSelected : null;
+        const index = selectedIndexFromUrl(location.href);
         const modeInfo = detectTravelMode(parsed.urlTravelCode);
-        log('網址解析：停靠站/控制點共', parsed.points.length, '個；選中路線', selected);
+        log('網址解析：停靠站/控制點共', parsed.points.length, '個；網址選中第', index, '條（!5i）');
         if (modeInfo.mode === null) {
             clearBody(wrap);
             showMessage(wrap, `目前選的交通方式（<b>${modeInfo.label || '未知'}</b>）` +
@@ -2425,27 +2502,48 @@ ${field('API 授權碼',
 
         clearBody(wrap);
         showMessage(wrap, '處理中…');
-        if (!state.capturedDirections) await refetchPreloadedDirections();
-        if (!state.capturedDirections) {
+        let data = await directionsFor(dataKey);
+        if (!data) {
             clearBody(wrap);
             showMessage(wrap,
-                '還沒攔截到這個頁面的路線資料。\n\n' +
+                '還沒拿到這條路線的資料。\n\n' +
                 '本工具直接讀取 Google Maps 自己算好的路線，不另外呼叫 API，' +
-                '因此必須在頁面載入時就在場。\n\n' +
+                '因此必須在 Google 取得路線時就在場。\n\n' +
                 '請重新整理頁面後再按一次；若剛安裝或更新腳本，也需要重新整理。');
             return;
         }
-        const alts = parseDirections(state.capturedDirections.text)
-            .filter(a => a.points.length > 1 && a.steps.length > 0);
-        if (!alts.length) {
+        // 不能先濾掉不可用的再取編號：編號對的是 Google 清單的順序
+        let all = parseDirections(data.text);
+        let chosen = all[index];
+        if (!chosen || chosen.points.length < 2 || !chosen.steps.length) {
             clearBody(wrap);
-            showMessage(wrap, '攔截到的路線資料裡沒有可用的路線，請重新整理頁面後再試。');
+            showMessage(wrap, chosen
+                ? `Google 選中的這條（第 ${index + 1} 條）沒有沿途路段資料，例如大眾運輸，算不出沿途的雨。`
+                : `Google 選中第 ${index + 1} 條，但路線資料裡只有 ${all.length} 條，請重新整理頁面後再試。`);
             return;
         }
-        const picked = pickAlternative(alts, selected);
-        const alt = applyPanelTiming(picked.alt, selected);
+        // 核對：Google 清單上選中那列的距離與時間要跟這條一樣；對不上就不畫色帶（寧可不畫，也不畫錯的）
+        const row = readSelectedRowText();
+        let mismatch = routeMismatchReason(chosen, row);
+        if (mismatch) {
+            // 手上的資料可能比 Google 畫面舊（它換清單時不一定經過我們看得到的請求）：
+            // 用同一個網址重抓一次「現在」的規劃，再核對一次
+            log('選中的路線跟清單對不上（', mismatch, '），重抓一次再核對');
+            const fresh = await refetchDirections(data.url);
+            const again = fresh && parseDirections(fresh.text)[index];
+            if (again && again.points.length > 1 && again.steps.length &&
+                routeMismatchReason(again, row) === '') {
+                data = fresh; all = parseDirections(fresh.text); chosen = again; mismatch = '';
+            }
+        }
+        state.routeMismatch = mismatch || '';
+        state.usedCaptureAt = data.at;
+        if (mismatch) log('選中的路線跟清單對不上：', mismatch);
+        const matchNote = `網址選中第 ${index + 1} 條（共 ${all.length} 條）` +
+            (mismatch === null ? '，清單讀不到、未核對' : mismatch ? `，跟清單對不上（${mismatch}）` : '，跟清單一致');
+        const alt = applyPanelTiming(chosen, row);
         log('時間依據：', alt.timeBasis, '｜總時程', Math.round(alt.totalSec / 60), '分',
-            selected && selected.durationText ? `｜面板 ${selected.durationText}` : '');
+            row && row.durationText ? `｜清單 ${row.durationText}` : '');
 
         state.routePoints = alt.points;   // 供計算安全按下點
         const { timeline, steps, totalSec } = buildTimeline(alt);
@@ -2454,7 +2552,7 @@ ${field('API 授權碼',
         // 一定要出現在表格裡，不能因為「取中點」而被略過
         let names = readEndpointNames();
         if (!names.length && cachedSel) names = cachedSel.names;
-        state.lastSelected = { key: routeKey, selected, names };
+        state.lastSelected = { key: dataKey, names };
         // 資料都讀完了才收 Google 的左側面板：收起後路線面板尺寸變 0，選中的路線、
         // 起訖名稱都讀不到（2026-11-24 實測）
         collapseGoogleSidebar();
@@ -2535,12 +2633,12 @@ ${field('API 授權碼',
         render(wrap, {
             nodes, departures, forecast, totalSec, timeline,
             meta: {
-                matchNote: picked.matchNote,
+                matchNote,
                 timeBasis: alt.timeBasis,
                 routeDistanceMeters: alt.totalMeters,
                 capturedAt: state.capturedDirections.at,
                 mode: modeInfo,
-                selected,
+                selected: row,
                 callCount,
                 failures,
                 fetchedAt,
@@ -2581,8 +2679,6 @@ ${field('API 授權碼',
     // 我們沒有指定 routingPreference，拿到的是不含即時路況的時間；
     // 面板顯示的則是含路況的時間，開車在尖峰時段差 25% 以上很正常，那不是錯誤。
     // 距離不受路況影響，交通方式若判斷錯（例如把步行算成開車）距離一定也會差很多。
-    const DISTANCE_MISMATCH_RATIO = 0.25;      // 距離相對誤差超過此值 → 判定交通方式可能錯誤
-    const DURATION_MISMATCH_RATIO = 0.25;      // 距離吻合但時間差超過此值 → 提示路況差異，不是錯誤
 
     const pad2 = n => String(n).padStart(2, '0');
     const clockOf = d => pad2(d.getHours()) + ':' + pad2(d.getMinutes());
@@ -2778,26 +2874,10 @@ ${field('API 授權碼',
             `時間依據：${meta.timeBasis || '不含路況'}`,
         ];
         const warnings = [];
-        // 安全網：先用距離判斷交通方式有沒有搞錯（距離不受路況影響），
-        // 距離吻合才進一步看時間差，而時間差多半只是「含不含即時路況」的差異。
-        const shownDist = meta.selected && meta.selected.distanceMeters;
-        const shownDur = meta.selected && meta.selected.durationSec;
-        let distMismatch = false;
-        if (shownDist && meta.routeDistanceMeters) {
-            const diff = Math.abs(meta.routeDistanceMeters - shownDist) / shownDist;
-            if (diff > DISTANCE_MISMATCH_RATIO) {
-                distMismatch = true;
-                warnings.push(`⚠ 面板顯示 ${meta.selected.distanceText}，` +
-                    `但算出來是 ${(meta.routeDistanceMeters / 1000).toFixed(1)} 公里` +
-                    `（差 ${Math.round(diff * 100)}%）——交通方式或路線可能判斷錯誤，抵達時刻不可信。`);
-            }
-        }
-        if (!distMismatch && shownDur) {
-            const diff = Math.abs(totalSec - shownDur) / shownDur;
-            if (diff > DURATION_MISMATCH_RATIO) {
-                lines.push(`面板時間「${meta.selected.durationText}」與這裡算的` +
-                    `${Math.round(totalSec / 60)} 分差距較大，抵達時刻可能有偏差。`);
-            }
+        // 選出來的路線跟 Google 清單上選中那列對不上：色帶不畫（drawRibbon 看 state.routeMismatch）
+        if (state.routeMismatch) {
+            warnings.push(`⚠ 這條路線跟 Google 清單上選中的那條對不上（${state.routeMismatch}），` +
+                '地圖色帶先不畫，表格的時間也可能不對。');
         }
         if (meta.failures && meta.failures.length) warnings.push(`取得失敗：${meta.failures.join('、')}`);
         pop.innerHTML =
@@ -3012,6 +3092,8 @@ ${field('API 授權碼',
             return;
         }
         const rb = ensureRibbon();
+        // 對不上 Google 畫面上那條時寧可不畫，也不畫錯的
+        if (state.routeMismatch) { rb.el.innerHTML = ''; return; }
         // 進了街景之類路線地圖不在的畫面：色帶收起來，資料留著
         rb.el.style.display = mapShowsRoute() ? '' : 'none';
         if (rb.faded) return;                      // 地圖操作中，等穩定後由 settleRibbon 重畫
