@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.9.0
+// @version      1.9.1
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -3250,7 +3250,11 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
                     if (glr.newFrame) { glr.newFrame = false; injected = false; rt.newFrame(); }
                     if (GL_SIG_OVERLAYS.has(s) && !injected) {
                         injected = true;
-                        try { glInject(this, rt.overlayMode()); } catch (err) { glBreak('注入：' + err.message); }
+                        try {
+                            let m = rt.overlayMode();
+                            if (m === 'redraw') { let ok = false; try { ok = routeRedraw(this); } catch (e2) { rt.env = null; warn('重畫路線：' + e2.message); } m = ok ? 'marker' : 'all'; }
+                            glInject(this, m);
+                        } catch (err) { glBreak('注入：' + err.message); }
                     }
                 } catch (err) { glBreak('useProgram：' + err.message); }
             }
@@ -3356,7 +3360,8 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             // 靜止幀（只貼快取底圖）：快取裡的路線已經是這份色帶的顏色 → 只畫標記點；
             // 色帶換了（例如指到別欄）但 Google 還沒重畫 → 整條蓋上去頂著
             if (this.routeDraws === 0 && this.cacheScene && this.cacheScene === glr.scene) return 'marker';
-            return 'all';
+            // 色帶換了但 Google 沒重畫（靜止）：用 Google 的路線程式自己重畫，形狀粗細跟 Google 一樣
+            return this.routeDraws === 0 && this.env ? 'redraw' : 'all';
         },
         count(w) { this.why[w] = (this.why[w] || 0) + 1; },
     };
@@ -3488,8 +3493,9 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         routeUniforms(gl, L, sc.pal);
         if (!rt.glowDone) {
             rt.glowDone = true;
+            try { captureRouteEnv(gl, ext, draw, prog, L, mode, count); } catch (err) { rt.env = null; }
             if (!rt.glowBroken) {
-                try { routeGlow(gl, ext, draw, prog, L, mode, count, off); }
+                try { routeGlow(gl, ext, draw, prog, L, mode, count); }
                 catch (err) { rt.glowBroken = err.message; warn('光暈停用：' + err.message); }
             }
         }
@@ -3537,14 +3543,14 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
     }
 
     /**
-     * 光暈：把最近看到的每一批導航路線線段（含這一批）用 rrOn＝2 再畫一次。
+     * 用 Google 的路線程式，把最近看到的每一批導航路線線段（含這一批）再畫一次。
+     * pass＝2：光暈（模板位元讓每像素只畫一次，接頭重疊不會變深，畫完清掉這個位元）；pass＝1：本體換色。
      * 每批的線段資料在同一個緩衝裡、只差 offset：暫時把 v／w／x 三個屬性指到那一批、k 換成那一批的，畫完還原。
-     * 模板緩衝借一個位元：第一次畫到的像素設起來，之後同一像素不再畫（接頭重疊不會變深），畫完把這個位元清掉。
      */
-    function routeGlow(gl, ext, draw, prog, L, mode, count, curOff) {
-        for (const [off, b] of rt.batches) if (rt.frameNo - b.frame > 2) rt.batches.delete(off);
+    function drawRouteBatches(gl, ext, draw, prog, L, mode, count, pass) {
+        for (const [off, b] of rt.batches) if (rt.frameNo - b.frame > 2 && pass === 2 && !rt.inRedraw) rt.batches.delete(off);
         const list = [...rt.batches.entries()];
-        if (!list.length) return;
+        if (!list.length) return 0;
         const savedIdx = rt.lastIdx;
         const sc = glr.scene, geo = routeGeo(sc);
         const ptr = l => ({ b: gl.getVertexAttrib(l, gl.VERTEX_ATTRIB_ARRAY_BUFFER_BINDING),
@@ -3557,21 +3563,24 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         const savedAB = gl.getParameter(gl.ARRAY_BUFFER_BINDING);
         const S = rt.stencil, sOn = gl.isEnabled(gl.STENCIL_TEST), bOn = gl.isEnabled(gl.BLEND);
         const bs = glr.bs || [gl.ONE, gl.ZERO, gl.ONE, gl.ZERO], be = glr.be || [gl.FUNC_ADD, gl.FUNC_ADD];
+        let drawn = 0;
         try {
-            gl.enable(gl.STENCIL_TEST);
-            gl.stencilMask(RT_STENCIL_BIT);
-            gl.stencilFunc(gl.NOTEQUAL, RT_STENCIL_BIT, RT_STENCIL_BIT);
-            gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
-            gl.enable(gl.BLEND);
-            gl.blendEquation(gl.FUNC_ADD);
-            gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-            glr.orig.uniform1f.call(gl, L.on, 2);
+            if (pass === 2) {
+                gl.enable(gl.STENCIL_TEST);
+                gl.stencilMask(RT_STENCIL_BIT);
+                gl.stencilFunc(gl.NOTEQUAL, RT_STENCIL_BIT, RT_STENCIL_BIT);
+                gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
+                gl.enable(gl.BLEND);
+                gl.blendEquation(gl.FUNC_ADD);
+                gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+            }
+            glr.orig.uniform1f.call(gl, L.on, pass);
             rt.lastIdx = 0;
             for (const [off, b] of list) {
                 const sub = rt.subs.get(off);
                 if (!sub || sub.bytes.length < b.n * 20) continue;
                 const e = routeLevelBuf(gl, off, sub, b.n, b.k, sc, geo);
-                P.forEach((p, i) => {
+                P.forEach(p => {
                     if (!p) return;
                     gl.bindBuffer(gl.ARRAY_BUFFER, p.b);
                     gl.vertexAttribPointer(p.l, p.s, p.t, p.n, p.st, off + (p.o - P[0].o));
@@ -3581,9 +3590,9 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
                 draw.call(ext, mode, 0, count, b.n);
                 ext.vertexAttribDivisorANGLE(L.l, 0);
                 gl.disableVertexAttribArray(L.l);
+                drawn++;
             }
-            // 清掉借用的模板位元
-            gl.clear(gl.STENCIL_BUFFER_BIT);
+            if (pass === 2) gl.clear(gl.STENCIL_BUFFER_BIT);       // stencilMask 只開這個位元，只清它
         } finally {
             glr.orig.uniform1f.call(gl, L.on, 0);
             P.forEach(p => {
@@ -3593,14 +3602,81 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             });
             gl.bindBuffer(gl.ARRAY_BUFFER, savedAB);
             gl.uniform4fv(L.k, kNow);
-            gl.stencilMask(S.mask);
-            gl.stencilFunc(S.func[0], S.func[1], S.func[2]);
-            gl.stencilOp(S.op[0], S.op[1], S.op[2]);
-            (sOn ? gl.enable : gl.disable).call(gl, gl.STENCIL_TEST);
-            (bOn ? gl.enable : gl.disable).call(gl, gl.BLEND);
+            if (pass === 2) {
+                gl.stencilMask(S.mask);
+                gl.stencilFunc(S.func[0], S.func[1], S.func[2]);
+                gl.stencilOp(S.op[0], S.op[1], S.op[2]);
+                (sOn ? gl.enable : gl.disable).call(gl, gl.STENCIL_TEST);
+                (bOn ? gl.enable : gl.disable).call(gl, gl.BLEND);
+                gl.blendFuncSeparate(bs[0], bs[1], bs[2], bs[3]);
+                gl.blendEquationSeparate(be[0], be[1]);
+            }
+            rt.lastIdx = savedIdx;
+        }
+        return drawn;
+    }
+
+    function routeGlow(gl, ext, draw, prog, L, mode, count) {
+        return drawRouteBatches(gl, ext, draw, prog, L, mode, count, 2);
+    }
+
+    /** 記下 Google 畫導航路線時的環境（程式、VAO、貼圖），靜止幀要自己用它重畫 */
+    function captureRouteEnv(gl, ext, draw, prog, L, mode, count) {
+        const vx = glr.vaoExt;
+        if (!vx) return;
+        if (!L.units) {
+            const u = n => { const l = gl.getUniformLocation(prog, n); return l ? gl.getUniform(prog, l) : null; };
+            L.units = [u('e'), u('g')].filter(x => typeof x === 'number');
+        }
+        const act = gl.getParameter(gl.ACTIVE_TEXTURE);
+        const tex = L.units.map(un => { gl.activeTexture(gl.TEXTURE0 + un); return [un, gl.getParameter(gl.TEXTURE_BINDING_2D)]; });
+        gl.activeTexture(act);
+        rt.env = { gl, ext, draw, prog, L, mode, count, vao: gl.getParameter(vx.VERTEX_ARRAY_BINDING_OES), tex };
+    }
+
+    /**
+     * 靜止幀（Google 只貼快取底圖、沒重畫路線）而色帶換了（例如指到別欄）：
+     * 用 Google 的路線程式和形狀，自己在貼上的底圖上重畫一次光暈＋本體。相機沒動，程式裡的相機 uniform 還是對的。
+     * 成功回 true；畫不了（還沒記到環境）回 false，改用自己的色帶頂著。
+     */
+    function routeRedraw(gl) {
+        const E = rt.env;
+        if (!E || E.gl !== gl || !rt.batches.size || rt.broken) return false;
+        const vx = glr.vaoExt;
+        const sv = { prog: gl.getParameter(gl.CURRENT_PROGRAM), vao: gl.getParameter(vx.VERTEX_ARRAY_BINDING_OES),
+            act: gl.getParameter(gl.ACTIVE_TEXTURE), depth: gl.isEnabled(gl.DEPTH_TEST), blend: gl.isEnabled(gl.BLEND),
+            cull: gl.isEnabled(gl.CULL_FACE), scissor: gl.isEnabled(gl.SCISSOR_TEST) };
+        const bs = glr.bs || [gl.ONE, gl.ZERO, gl.ONE, gl.ZERO], be = glr.be || [gl.FUNC_ADD, gl.FUNC_ADD];
+        const texSaved = E.tex.map(([un]) => { gl.activeTexture(gl.TEXTURE0 + un); return [un, gl.getParameter(gl.TEXTURE_BINDING_2D)]; });
+        rt.inRedraw = true;
+        try {
+            glr.orig.useProgram.call(gl, E.prog);
+            vx.bindVertexArrayOES(E.vao);
+            E.tex.forEach(([un, t]) => { gl.activeTexture(gl.TEXTURE0 + un); gl.bindTexture(gl.TEXTURE_2D, t); });
+            gl.disable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE); gl.disable(gl.SCISSOR_TEST);
+            routeUniforms(gl, E.L, glr.scene.pal);
+            if (!rt.glowBroken) {
+                try { drawRouteBatches(gl, E.ext, E.draw, E.prog, E.L, E.mode, E.count, 2); }
+                catch (err) { rt.glowBroken = err.message; }
+            }
+            gl.enable(gl.BLEND);
+            gl.blendEquation(gl.FUNC_ADD);
+            gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+            drawRouteBatches(gl, E.ext, E.draw, E.prog, E.L, E.mode, E.count, 1);
+            rt.count('redraw');
+            return true;
+        } finally {
+            rt.inRedraw = false;
+            texSaved.forEach(([un, t]) => { gl.activeTexture(gl.TEXTURE0 + un); gl.bindTexture(gl.TEXTURE_2D, t); });
+            gl.activeTexture(sv.act);
+            vx.bindVertexArrayOES(sv.vao);
+            glr.orig.useProgram.call(gl, sv.prog);
+            (sv.depth ? gl.enable : gl.disable).call(gl, gl.DEPTH_TEST);
+            (sv.cull ? gl.enable : gl.disable).call(gl, gl.CULL_FACE);
+            (sv.scissor ? gl.enable : gl.disable).call(gl, gl.SCISSOR_TEST);
+            (sv.blend ? gl.enable : gl.disable).call(gl, gl.BLEND);
             gl.blendFuncSeparate(bs[0], bs[1], bs[2], bs[3]);
             gl.blendEquationSeparate(be[0], be[1]);
-            rt.lastIdx = savedIdx;      // 光暈逐批對點推進過 lastIdx；還原成本體這一批之後的位置
         }
     }
 
