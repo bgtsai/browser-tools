@@ -142,14 +142,14 @@ def run(engine, pw):
       window.frame(); const m1 = rr.glr.built.verts; C.cy += 10 / C.S; window.frame(); const r = { up: window.px.up, same: rr.glr.built.verts === m1 }; C.cy -= 10 / C.S; return r; }""")
     check('平移只改 uniform：路線跟著移動且沒重建網格', (near(mv['up'], f0) or near(mv['up'], [round(v * 0.72) for v in f0], 8)) and mv['same'], mv)
     # 長路線縮小看：幾千個點擠在幾百 px 裡，注入要快（v1.6.2 實機一幀 400 ms）且不能每幀重算
-    perf = pg.evaluate("""() => { const rr = window.__rr, C = window.CAM, w = px => C.cx + px / C.S; const pts = [];
+    perf = pg.evaluate("""async () => { const rr = window.__rr, C = window.CAM, w = px => C.cx + px / C.S; const pts = [];
       for (let i = 0; i < 6000; i++) pts.push([w(-150 + i * 0.05), C.cy + Math.sin(i / 7) * 2 / C.S]);
       rr.glr.scene = { runs: [{ level: 1, pts: pts.slice(0, 3001) }, { level: 3, pts: pts.slice(3000) }], pal: rr.PALETTES.k2, marker: null };
       const t0 = performance.now(); window.frame(); const t1 = performance.now(); const m1 = rr.glr.built.verts;
-      C.cx += 20 / C.S; C.S *= 1.2; window.frame(); const same = rr.glr.built.verts === m1; C.S *= 1.8; window.frame(); const rebuilt = rr.glr.built.verts !== m1; C.S /= 2.16; C.cx -= 20 / C.S;
-      return { first: t1 - t0, same, rebuilt, verts: m1.length / 14 }; }""")
+      C.cx += 20 / C.S; C.S *= 1.2; window.frame(); const same = rr.glr.built.verts === m1; C.S *= 1.8; window.frame(); const deferred = rr.glr.built.verts === m1; await new Promise(r => setTimeout(r, 300)); window.frame(); const rebuilt = rr.glr.built.verts !== m1; C.S /= 2.16; C.cx -= 20 / C.S;
+      return { first: t1 - t0, same, deferred, rebuilt, verts: m1.length / 14 }; }""")
     check('長路線（6000 點）注入一幀 < 30 ms、點數有略過', perf['first'] < 30 and perf['verts'] < 6000, perf)
-    check('平移＋縮放不到半級沿用網格、超過半級才重建', perf['same'] and perf['rebuilt'], perf)
+    check('平移＋縮放不到半級沿用網格；超過半級時連續縮放中先沿用、停下才重建', perf['same'] and perf['deferred'] and perf['rebuilt'], perf)
     # 色帶網格（純函式）
     m = pg.evaluate("""() => { const rr = window.__rr; const v = rr.buildRibbonMesh([{ level: 0, pts: [{x:0,y:0},{x:100,y:0}] }, { level: 2, pts: [{x:100,y:0},{x:200,y:0}] }], rr.PALETTES.k2, {x: 50, y: 0});
       const n = v.length / 14, kinds = {}; let gmin = 9, gmax = 0;

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.6.3
+// @version      1.6.4
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -3345,7 +3345,11 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         const z = Math.log2(cam.S);
         const bm = glr.built;
         let verts;
-        if (bm && bm.sc === sc && bm.pal === sc.pal && bm.marker === sc.marker && bm.k === k && Math.abs(z - bm.z) <= 0.5) {
+        const same = bm && bm.sc === sc && bm.pal === sc.pal && bm.marker === sc.marker && bm.k === k;
+        // 連續縮放中跨過半級：250 ms 內重建過就先沿用（放大縮小只是線段間距跟著變，看不出來），停下來再重建，
+        // 免得縮放途中卡一下（長路線重建一次可達上百 ms）
+        if (same && (Math.abs(z - bm.z) <= 0.5 || performance.now() - bm.at < 250)) {
+            if (Math.abs(z - bm.z) > 0.5) glRequestRedraw();
             verts = bm.verts;
         } else {
             const o = sc.runs[0].pts[0];
@@ -3362,10 +3366,10 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
                         Math.abs(p.y - last.y) < RIBBON_MIN_STEP_PX) return;
                     pts.push(p);
                 });
-                return { level: r.level, pts };
+                return { level: r.level, pts: simplifyPx(pts, GL_SIMPLIFY_PX) };
             });
             verts = buildRibbonMesh(runs, sc.pal, sc.marker && toPx(sc.marker));
-            glr.built = { sc, pal: sc.pal, marker: sc.marker, k, z, S: cam.S, o, verts, uploaded: false };
+            glr.built = { sc, pal: sc.pal, marker: sc.marker, k, z, S: cam.S, o, verts, uploaded: false, at: performance.now() };
         }
         if (!verts.length) return;
         const { prog, buf, vao, vaoExt, loc } = glr;
@@ -3436,6 +3440,27 @@ void main(){
  if(r<=4.0)c=vec4(0.125,0.129,0.141,1.0);else if(r<=${(MARK_R_PX - 1.5).toFixed(1)})c=vec4(0.85,0.85,0.85,0.85);
  else if(r<=${(MARK_R_PX + 1.5).toFixed(1)})c=vec4(0.125,0.129,0.141,1.0);else discard;
  gl_FragColor=c;}`;
+
+    const GL_SIMPLIFY_PX = 0.75;       // 折線簡化容許誤差（px）：再細看不出差別，點數卻差好幾倍
+
+    /** Douglas–Peucker 折線簡化（頭尾保留），非遞迴版 */
+    function simplifyPx(pts, eps) {
+        if (pts.length < 3) return pts;
+        const keep = new Uint8Array(pts.length);
+        keep[0] = keep[pts.length - 1] = 1;
+        const stack = [[0, pts.length - 1]];
+        while (stack.length) {
+            const [a, b] = stack.pop();
+            const A = pts[a], B = pts[b], dx = B.x - A.x, dy = B.y - A.y, L = Math.hypot(dx, dy) || 1e-9;
+            let worst = -1, wi = -1;
+            for (let i = a + 1; i < b; i++) {
+                const d = Math.abs((pts[i].x - A.x) * dy - (pts[i].y - A.y) * dx) / L;
+                if (d > worst) { worst = d; wi = i; }
+            }
+            if (worst > eps) { keep[wi] = 1; stack.push([a, wi], [wi, b]); }
+        }
+        return pts.filter((p, i) => keep[i]);
+    }
 
     const rgbCache = new Map();
     const rgb01 = h => { let v = rgbCache.get(h); if (!v) { v = hexRgb(h).map(x => x / 255); rgbCache.set(h, v); } return v; };
