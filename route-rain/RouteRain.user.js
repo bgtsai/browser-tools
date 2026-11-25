@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.3.0
+// @version      1.3.1
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -220,6 +220,7 @@
         routeMismatch: '',          // 選出來的路線跟 Google 清單上選中那列對不上：不畫色帶，ⓘ 變紅
         lastRouteKey: '',
         lastRouteKeyHref: '',
+        ownFetches: new Set(),      // 自己補抓的網址：它也會經過攔截器，要跳過，不然會被當成 Google 的請求
         sawIntercept: false,        // 頁面載入後攔到過 Google 自己的路線請求（之後畫面用的就不是 preload 那份）
         capturedDirections: null,   // 攔截到的 /maps/preview/directions 回應
         gToken: '',                 // Google 內部端點的 session 權杖
@@ -656,14 +657,27 @@
         try {
             const u = new URL(url, location.href);
             u.searchParams.delete('sig');
-            const res = await pageWindow().fetch(u.href, { credentials: 'include' });
-            const text = await res.text();
+            const text = await ownFetchText(u.href);
             keepIfDirections(u.href, text, 'refetch');
             const c = state.capturedDirections;
             return c && c.text === text ? c : null;
         } catch (err) {
             log('重抓路線資料失敗｜', err.message);
             return null;
+        }
+    }
+
+    /**
+     * 自己補抓路線資料。用網頁的 fetch（要帶 Google 的 cookie），但它已經被我們攔截了——
+     * 不跳過的話，同一份會再以「攔截」收一次，被當成 Google 自己的請求（2026-11-25 實機看到）。
+     */
+    async function ownFetchText(href) {
+        state.ownFetches.add(href);
+        try {
+            const res = await pageWindow().fetch(href, { credentials: 'include' });
+            return await res.text();
+        } finally {
+            state.ownFetches.delete(href);
         }
     }
 
@@ -680,8 +694,7 @@
             try {
                 const u = new URL(raw, location.href);
                 u.searchParams.delete('sig');
-                const res = await pageWindow().fetch(u.href, { credentials: 'include' });
-                const text = await res.text();
+                const text = await ownFetchText(u.href);
                 keepIfDirections(u.href, text, 'refetch');   // 內部會驗證能解析才收下
                 if (state.capturedDirections) {
                     log('攔截器沒收到，改用頁面 preload 網址（去掉 sig）重新取得路線資料');
@@ -729,6 +742,8 @@
         const origFetch = w.fetch;
         if (typeof origFetch === 'function') {
             w.fetch = function (...args) {
+                const reqUrl = String((args[0] && args[0].url) || args[0]);
+                if (state.ownFetches.has(reqUrl)) return origFetch.apply(this, args);
                 return origFetch.apply(this, args).then(res => {
                     // 一定要 clone：把 body 讀掉會讓網站自己拿不到資料
                     res.clone().text()
@@ -2644,7 +2659,7 @@ ${field('API 授權碼',
                 fetchedAt,
                 fromCache,
                 source,
-                altCount: alts.length,
+                altCount: all.length,
             },
         });
         // 格線先出現，地點名稱在背景陸續補上——36 個節點要十幾秒，

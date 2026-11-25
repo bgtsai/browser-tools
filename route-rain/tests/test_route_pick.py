@@ -15,7 +15,7 @@ TAIL = "    if (document.readyState === 'loading') {\n        document.addEventL
 assert src.count(TAIL) == 1, '啟動段的寫法變了，測試要跟著改'
 src = src.replace(TAIL, "    window.__rr = { state, selectedIndexFromUrl, routeDataKey, routeSignature, readSelectedRowText,\n"
                         "      routeMismatchReason, keepIfDirections, directionsFor, parseDirections, drawRibbon,\n"
-                        "      injectStyle, buildPanel, render };\n    window.__rrBoot = boot;")
+                        "      injectStyle, buildPanel, render, ownFetchText };\n    window.__rrBoot = boot;")
 fixture = (HERE / 'fixture.js').read_text(encoding='utf-8')
 
 STOPS = ('!4m13!4m12!1m5!1m1!1s0x3442a96af5585867:0x5204e48e7582d80f!2m2!1d121.5170088!2d25.0573522'
@@ -132,7 +132,22 @@ def run(engine, pw):
     check('Google 更新了內容：重算', res[2], res)
     check('自己補抓的：不重算（不繞圈）', res[3] is False, res)
 
-    # ⑥ 對不上就不畫色帶
+    # ⑥ 自己補抓的請求也會經過攔截器：要跳過，不能被當成 Google 的請求
+    pg.route('https://www.google.com/maps/preview/directions*', lambda route: route.fulfill(
+        status=200, body=D1, headers={'Access-Control-Allow-Origin': 'null', 'Access-Control-Allow-Credentials': 'true',
+                                      'Content-Type': 'application/json'}))
+    res = ev("""(async () => { const s = __rr.state; s.capturedDirections = null; s.sawIntercept = false; s.active = false;
+      const u = 'https://www.google.com/maps/preview/directions?own=1';
+      const t = await __rr.ownFetchText(u);
+      await new Promise(r => setTimeout(r, 300));   // 攔截器是讀 clone 之後才收，要等它
+      const own = [t.length > 1000, s.capturedDirections === null, s.sawIntercept, s.ownFetches.size];
+      await (await fetch('https://www.google.com/maps/preview/directions?google=1', { credentials: 'include' })).text();
+      await new Promise(r => setTimeout(r, 200));
+      return own.concat([s.capturedDirections && s.capturedDirections.source, s.sawIntercept]); })()""")
+    check('自己補抓：拿得到內容、攔截器不收、不算 Google 請求過', res[:4] == [True, True, False, 0], res)
+    check('Google 自己的請求：照樣攔到', res[4:] == ['intercept', True], res)
+
+    # ⑦ 對不上就不畫色帶
     res = ev("""(() => { const rr = window.__rr; window.__fakeMapOn(); window.__rrBoot(); rr.injectStyle();
       const p = rr.buildPanel(); document.body.appendChild(p);
       rr.state.panel = p; rr.state.body = p.querySelector('.rr-body'); rr.state.active = true;
