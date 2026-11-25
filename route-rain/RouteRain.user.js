@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.11.2
+// @version      1.11.3
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -470,8 +470,9 @@
     }
 
     /**
-     * 選出來的路線跟清單上選中那列是不是同一條：距離字串要一樣，
-     * 時間字串要等於「依路況」或「不含路況」其中一個（面板可能顯示任一種）。
+     * 選出來的路線跟清單上選中那列是不是同一條：只比距離字串。
+     * 不比時間：清單的時間是 Google 另外更新的即時預估，跟路線資料常差一兩分鐘（v1.11.2 實機：資料 23／25 分、清單 22 分，
+     * 重抓也一樣），比時間會讓色帶整條不畫。時程本來就照清單顯示的時間排（applyPanelTiming）——以使用者看到的為準。
      * 回傳空字串＝一致；讀不到清單列時回傳 null（無法核對）。
      */
     function routeMismatchReason(alt, row) {
@@ -479,10 +480,6 @@
         const reasons = [];
         if (row.distanceText && alt.distanceText && row.distanceText !== alt.distanceText) {
             reasons.push(`距離 ${alt.distanceText}／清單 ${row.distanceText}`);
-        }
-        const times = [alt.trafficText, alt.durationText].filter(Boolean);
-        if (row.durationText && times.length && !times.includes(row.durationText)) {
-            reasons.push(`時間 ${times.join(' 或 ')}／清單 ${row.durationText}`);
         }
         return reasons.join('，');
     }

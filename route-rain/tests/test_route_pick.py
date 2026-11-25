@@ -90,12 +90,12 @@ def run(engine, pw):
     # ③ 核對：一致＝''、對不上寫原因、讀不到清單＝null（無法核對）
     r = ev(f"""(() => {{ const all = __rr.parseDirections({json.dumps(D1)});
       return [__rr.routeMismatchReason(all[1], {{distanceText:'5.2 公里', durationText:'19 分'}}),
-              __rr.routeMismatchReason(all[1], {{distanceText:'5.2 公里', durationText:'17 分'}}),
+              __rr.routeMismatchReason(all[1], {{distanceText:'5.2 公里', durationText:'30 分'}}),
               __rr.routeMismatchReason(all[0], {{distanceText:'5.2 公里', durationText:'19 分'}}),
               __rr.routeMismatchReason(all[1], null)]; }})()""")
     check('時間等於依路況：一致', r[0] == '', r)
-    check('時間等於不含路況：也算一致', r[1] == '', r)
-    check('距離、時間都不同：寫出原因', bool(r[2]) and '距離' in r[2] and '時間' in r[2], r)
+    check('時間跟清單不同、距離相同：仍算一致（不比時間）', r[1] == '', r)
+    check('距離不同：寫出原因（只寫距離）', bool(r[2]) and '距離' in r[2] and '時間' not in r[2], r)
     check('讀不到清單：null', r[3] is None, r)
 
     # ④ 資料要屬於這條路線；等 Google 的回應（先改網址、回應後到）
