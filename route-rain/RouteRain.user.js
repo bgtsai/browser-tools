@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.9.2
+// @version      1.9.3
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -3266,7 +3266,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         P.uniform3fv = function (loc, v) {
             const p = glr.pend;
             if (p && cur && glr.sig.get(cur) === GL_SIG_CAM && !p.M && visible(this)) {
-                if (!p.c) p.c = [v[0], v[1]]; else if (!p.v) p.v = [v[0], v[1]];
+                if (!p.c) p.c = [v[0], v[1], v[2]]; else if (!p.v) p.v = [v[0], v[1], v[2]];
             }
             return orig.uniform3fv.apply(this, arguments);
         };
@@ -3279,7 +3279,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             const p = glr.pend;
             if (p && cur && glr.sig.get(cur) === GL_SIG_CAM && p.M && p.S === undefined && visible(this)) {
                 p.S = x;
-                glr.cam = { cx: p.c[0] + p.v[0], cy: p.c[1] + p.v[1], M: p.M, S: x };
+                glr.cam = { cx: p.c[0] + p.v[0], cy: p.c[1] + p.v[1], M: p.M, S: x, hi: p.c, lo: p.v };
             }
             return orig.uniform1f.apply(this, arguments);
         };
@@ -3668,12 +3668,21 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         const bs = glr.bs || [gl.ONE, gl.ZERO, gl.ONE, gl.ZERO], be = glr.be || [gl.FUNC_ADD, gl.FUNC_ADD];
         const texSaved = E.tex.map(([un]) => { gl.activeTexture(gl.TEXTURE0 + un); return [un, gl.getParameter(gl.TEXTURE_BINDING_2D)]; });
         rt.inRedraw = true;
+        let camSaved = null;
         try {
             glr.orig.useProgram.call(gl, E.prog);
             vx.bindVertexArrayOES(E.vao);
             E.tex.forEach(([un, t]) => { gl.activeTexture(gl.TEXTURE0 + un); gl.bindTexture(gl.TEXTURE_2D, t); });
             gl.disable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE); gl.disable(gl.SCISSOR_TEST);
             routeUniforms(gl, E.L, glr.scene.pal);
+            // 路線程式裡的相機是 Google 上次畫「快取底圖」時的（離屏、範圍不同），直接用會畫到看不見的地方
+            // （v1.9.1 實機：靜止時換欄路線不換色）→ 換成畫面這一幀的相機（跟我們自己注入色帶用的同一組），畫完還原
+            const cam = glr.cam, U = E.L.cam || (E.L.cam = { l: gl.getUniformLocation(E.prog, 'l'),
+                m: gl.getUniformLocation(E.prog, 'm'), n: gl.getUniformLocation(E.prog, 'n'), p: gl.getUniformLocation(E.prog, 'p') });
+            if (!cam || !cam.hi || !U.l || !U.m || !U.n || !U.p) return false;
+            camSaved = { l: gl.getUniform(E.prog, U.l), m: gl.getUniform(E.prog, U.m), n: gl.getUniform(E.prog, U.n), p: gl.getUniform(E.prog, U.p) };
+            gl.uniform3fv(U.l, cam.hi); gl.uniform3fv(U.m, cam.lo);
+            glr.orig.uniformMatrix4fv.call(gl, U.n, false, cam.M); glr.orig.uniform1f.call(gl, U.p, cam.S);
             if (!rt.glowBroken) {
                 try { drawRouteBatches(gl, E.ext, E.draw, E.prog, E.L, E.mode, E.count, 2); }
                 catch (err) { rt.glowBroken = err.message; }
@@ -3686,6 +3695,11 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             return true;
         } finally {
             rt.inRedraw = false;
+            if (camSaved) {
+                const U = E.L.cam;
+                gl.uniform3fv(U.l, camSaved.l); gl.uniform3fv(U.m, camSaved.m);
+                glr.orig.uniformMatrix4fv.call(gl, U.n, false, camSaved.n); glr.orig.uniform1f.call(gl, U.p, camSaved.p);
+            }
             texSaved.forEach(([un, t]) => { gl.activeTexture(gl.TEXTURE0 + un); gl.bindTexture(gl.TEXTURE_2D, t); });
             gl.activeTexture(sv.act);
             vx.bindVertexArrayOES(sv.vao);
