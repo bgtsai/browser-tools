@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.7.0
+// @version      1.7.1
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -3292,6 +3292,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         track('colorMask', (r, g, b, a) => { glr.cm = [r, g, b, a]; });
         track('depthMask', m => { glr.dm = m; });
         armRouteHook(P, visible);
+        try { w.__rrRoute = { get state() { return { patched: !!rt.patched, broken: rt.broken, subs: rt.subs.size, why: rt.why }; } }; } catch (e) { /* 只是診斷 */ }
         // 要求重畫：記下「執行時有畫地圖」的那個 rAF 回呼，之後再排一次。
         // 腳本是 document-start，Google 拿到的就是包過的這個 rAF。
         const raf = w.requestAnimationFrame;
@@ -3325,6 +3326,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         curSig: '', cams: 0, glowDone: false, colorOk: true, routeDraws: 0, broken: '',
         subs: new Map(),                // offset → { bytes, ver }
         ver: 0, bufs: new Map(), locs: new WeakMap(), ext: null, lastIdx: 0,
+        why: {},                        // 診斷：沒換到色的原因次數（頁面上 window.__rrRoute 讀得到）
         newFrame() { this.cams = 0; this.glowDone = false; this.colorOk = true; this.routeDraws = 0; this.lastIdx = 0; },
         /** 這一幀可以走取代模式嗎（shader 改寫成功、有色帶要畫、拿得到相機） */
         ready(gl) {
@@ -3394,6 +3396,9 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
                         catch (err) { rt.broken = '路線換色：' + err.message; warn(rt.broken); }
                         if (done) return undefined;
                         rt.colorOk = false;
+                    } else if (rt.curSig === GL_SIG_ROUTE && rt.cams >= 2 && visible(gl)) {
+                        const w = rt.broken ? 'broken' : !rt.patched ? 'notPatched' : !glr.scene ? 'noScene' : !glr.cam ? 'noCam' : 'notReady';
+                        rt.why[w] = (rt.why[w] || 0) + 1;
                     }
                     return draw.call(this, mode, first, count, n);
                 };
@@ -3411,10 +3416,10 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
                 F: gl.getUniformLocation(prog, 'rrF'), O: gl.getUniformLocation(prog, 'rrO'), k: gl.getUniformLocation(prog, 'k') };
             rt.locs.set(prog, L);
         }
-        if (L.v < 0 || L.l < 0 || !L.on) return false;
+        if (L.v < 0 || L.l < 0 || !L.on) { rt.why['noLoc'] = (rt.why['noLoc'] || 0) + 1; return false; }
         const off = gl.getVertexAttribOffset(L.v, gl.VERTEX_ATTRIB_ARRAY_POINTER);
         const sub = rt.subs.get(off);
-        if (!sub || sub.bytes.length < n * 20) return false;
+        if (!sub || sub.bytes.length < n * 20) { rt.why['noData'] = (rt.why['noData'] || 0) + 1; return false; }
         const k = gl.getUniform(prog, L.k);
         const sc = glr.scene, pal = sc.pal;
         let e = rt.bufs.get(off);
@@ -3446,6 +3451,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             glr.orig.uniform1f.call(gl, L.on, 0);
         }
         rt.routeDraws++;
+        rt.why.ok = (rt.why.ok || 0) + 1;
         return true;
     }
 
