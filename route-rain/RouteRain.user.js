@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.10.3
+// @version      1.11.0
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -3293,7 +3293,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         track('colorMask', (r, g, b, a) => { glr.cm = [r, g, b, a]; });
         track('depthMask', m => { glr.dm = m; });
         armRouteHook(P, visible);
-        try { w.__rrRoute = { get state() { return { ver: typeof GM_info !== "undefined" ? GM_info.script.version : "", patched: !!rt.patched, broken: rt.broken, glow: rt.glowBroken, subs: rt.subs.size, why: rt.why, diag: rt.diag }; } }; } catch (e) { /* 只是診斷 */ }
+        try { w.__rrRoute = { get state() { return { ver: typeof GM_info !== "undefined" ? GM_info.script.version : "", patched: !!rt.patched, broken: rt.broken, glow: rt.glowBroken, subs: rt.subs.size, why: rt.why, diag: rt.diag, votes: [...rt.votes].map(([p, v]) => p + ' ' + v.pass + '/' + v.fail) }; } }; } catch (e) { /* 只是診斷 */ }
         // 要求重畫：記下「執行時有畫地圖」的那個 rAF 回呼，之後再排一次。
         // 腳本是 document-start，Google 拿到的就是包過的這個 rAF。
         const raf = w.requestAnimationFrame;
@@ -3347,6 +3347,10 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         batches: new Map(),             // 最近看到的導航路線批次 offset → { n, k, frame }（下一幀先畫它們的光暈）
         frameNo: 0,
         why: {},                        // 診斷：次數（頁面上 window.__rrRoute 讀得到）
+        style: null,                    // Google 的兩張樣式貼圖（讀出來的像素，見 routeStyle）
+        pairs: new Map(),               // 樣式代號（貼圖、w.xy）→ 「本體色/外框色」
+        votes: new Map(),               // 「本體色/外框色」→ { pass, fail }：沿著我們路線的次數，用來學選中路線（含路況色）的顏色
+        styleVer: 0,                    // 學到的顏色有變 → 每批重判
         diag: [],                       // 診斷：最近 RT_DIAG_MAX 次「判斷一批是不是路線」的細節（每組段數、斷點、沿著幾段）
         cacheScene: null,               // 最近一次路線全部換色成功時的色帶內容（靜止時 Google 貼的就是那張）
         stencil: { func: [0x0207, 0, 0xff], op: [0x1E00, 0x1E00, 0x1E00], mask: 0xff },   // 追蹤 Google 的模板狀態（預設值）
@@ -3373,7 +3377,19 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
 
     function armRouteHook(P, visible) {
         const o = { shaderSource: P.shaderSource, compileShader: P.compileShader, bindBuffer: P.bindBuffer,
-            bufferSubData: P.bufferSubData, getExtension: P.getExtension };
+            bufferSubData: P.bufferSubData, getExtension: P.getExtension, texImage2D: P.texImage2D, texSubImage2D: P.texSubImage2D };
+        // 樣式貼圖被 Google 改寫 → 下次判斷時重讀（只看目前綁的是不是我們讀過的那兩張）
+        const texTouched = function () {
+            try {
+                const st = rt.style;
+                if (st && visible(this)) {
+                    const t = this.getParameter(this.TEXTURE_BINDING_2D);
+                    if (t === st.tg || t === st.te) st.dirty = true;
+                }
+            } catch (e) { /* 只是記錄 */ }
+        };
+        P.texImage2D = function () { texTouched.call(this); return o.texImage2D.apply(this, arguments); };
+        P.texSubImage2D = function () { texTouched.call(this); return o.texSubImage2D.apply(this, arguments); };
         const orig = new WeakMap();      // shader → 原始碼（改寫失敗時改回）
         let ab = null;
         P.shaderSource = function (sh, src) {
@@ -3507,10 +3523,11 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         const sc = glr.scene, geo = routeGeo(sc);
         // 這批是不是我們的路線：只看形狀（同一條路線換欄不用重判）；每批資料（offset＋版本）只判一次
         let c = rt.cls.get(off);
-        if (!c || c.ver !== sub.ver || c.geo !== geo) {
+        if (!c || c.ver !== sub.ver || c.geo !== geo || c.sv !== rt.styleVer) {
             const k = (c && c.ver === sub.ver) ? c.k : Array.from(gl.getUniform(prog, L.k));
             const info = {};
-            c = { ver: sub.ver, geo, k, mask: routeMask(sub.bytes, n, k, geo, info) };
+            const style = routeStyle(gl, prog, L);
+            c = { ver: sub.ver, geo, k, mask: routeMask(sub.bytes, n, k, geo, info, style), sv: rt.styleVer };
             rtDiag({ off, n, route: !!c.mask, ...info });
             rt.cls.set(off, c);
         }
@@ -3764,6 +3781,79 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             k[1] + (dv.getInt16(b + 2, true) + dv.getInt16(b + 6, true)) / 2 * f];
     };
 
+    const RT_VOTE_MIN = 2;            // 一種顏色至少這麼多批「沿著我們路線」才當成選中路線的顏色
+    const RT_VOTE_RATIO = 3;          // 而且沿著的次數 ≥ 不沿著的 3 倍（替代路線只有共用的那幾段會沿著，岔開後都不沿著）
+
+    /**
+     * 讀 Google 的線條樣式：每段線段的 w.xy 查貼圖 g 得到樣式位置 P（Ba：g＋b·256、a），
+     * 再查貼圖 e 的第 18·P.y＋7 列（本體色，shader 的 _k）、＋10 列（外框色，_j）。跟頂點 shader 的 Ca／Aa 一樣。
+     * 選中路線（2026-11-25 實測，自行車與汽車相同）本體 #23038e、外框 #450efb；替代路線 #3331f3／#b8c9fd；街道灰色系。
+     * 路況色沒量到（晚上沒塞車），所以不寫死：用「沿著我們路線」投票學（vote），學到的顏色之後不看形狀就算路線。
+     * 讀一次兩張貼圖約 9 ms（1024×64＋16384×18），只在第一次或 Google 改了貼圖（texSubImage2D／texImage2D）時重讀。
+     */
+    function routeStyle(gl, prog, L) {
+        try {
+            if (!L.su) {
+                const u = x => { const l = gl.getUniformLocation(prog, x); return l ? gl.getUniform(prog, l) : null; };
+                L.su = { e: u('e'), g: u('g'), f: Array.from(u('f') || []), d: Array.from(u('d') || []) };
+            }
+            const S = L.su;
+            if (typeof S.e !== 'number' || typeof S.g !== 'number' || S.f.length < 2 || S.d.length < 2) return null;
+            const act = gl.getParameter(gl.ACTIVE_TEXTURE);
+            gl.activeTexture(gl.TEXTURE0 + S.e); const te = gl.getParameter(gl.TEXTURE_BINDING_2D);
+            gl.activeTexture(gl.TEXTURE0 + S.g); const tg = gl.getParameter(gl.TEXTURE_BINDING_2D);
+            gl.activeTexture(act);
+            let st = rt.style;
+            if (!st || st.tg !== tg || st.te !== te || st.dirty) {
+                const gw = S.f[0], gh = S.f[1], ew = S.d[0], eh = S.d[1];
+                const G = readTex(gl, tg, gw, gh), E = readTex(gl, te, ew, eh);
+                if (!G || !E) return null;
+                st = rt.style = { tg, te, G, E, gw, gh, ew, eh, dirty: false };
+                rt.pairs.clear();
+            }
+            return {
+                pairOf(x, y) {
+                    const key = x * 65536 + y;
+                    let p = rt.pairs.get(key);
+                    if (p !== undefined) return p;
+                    p = null;
+                    if (x < st.gw && y < st.gh) {
+                        const i = (y * st.gw + x) * 4, px = st.G[i + 1] + st.G[i + 2] * 256, py = st.G[i + 3];
+                        const row = r => { const j = ((18 * py + r) * st.ew + px) * 4; return st.E.slice(j, j + 4).join('.'); };
+                        if (px < st.ew && 18 * py + 10 < st.eh) p = row(7) + '/' + row(10);
+                    }
+                    rt.pairs.set(key, p);
+                    return p;
+                },
+                isRoute(pair) { const v = rt.votes.get(pair); return !!v && v.pass >= RT_VOTE_MIN && v.pass >= RT_VOTE_RATIO * v.fail; },
+                vote(pair, pass) {
+                    let v = rt.votes.get(pair);
+                    if (!v) rt.votes.set(pair, v = { pass: 0, fail: 0 });
+                    const before = this.isRoute(pair);
+                    if (pass) v.pass++; else v.fail++;
+                    if (this.isRoute(pair) !== before) rt.styleVer++;
+                },
+            };
+        } catch (e) { rt.count('styleErr'); return null; }
+    }
+
+    /** 把一張貼圖整張讀出來（掛到暫時的 framebuffer 上 readPixels；畫面的 framebuffer 綁定會還原） */
+    function readTex(gl, tex, w, h) {
+        if (!tex || !(w > 0) || !(h > 0)) return null;
+        const prev = gl.getParameter(gl.FRAMEBUFFER_BINDING), fb = gl.createFramebuffer();
+        try {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+            if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) return null;
+            const px = new Uint8Array(w * h * 4);
+            gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+            return px;
+        } finally {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, prev);
+            gl.deleteFramebuffer(fb);
+        }
+    }
+
     const RT_DIAG_MAX = 200;
     /** 記一筆判斷細節（只給 window.__rrRoute.state.diag 看；時間是頁面載入後的毫秒） */
     function rtDiag(d) {
@@ -3806,7 +3896,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
      *    17 級時路線旁的短街、建築輪廓、路線底下那條路本身（各自斷點少）還是被塗色（實機量：圖磚批 35 批全部有 >3 斷點的組，路線批全部 ≤1）。
      *  - 再每組判斷：均勻抽 RT_SAMPLES 段，「沿著」路線（nearRoute：夠近且方向相近）的比例 ≥ RT_NEAR_SHARE 才是選中路線。
      */
-    function routeMask(bytes, n, k, geo, info) {
+    function routeMask(bytes, n, k, geo, info, style) {
         if (geo.pts.length < 2 || n < 1) return null;
         const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
         const groups = new Map();
@@ -3819,10 +3909,16 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             g.ex = dv.getInt16(b + 4, true); g.ey = dv.getInt16(b + 6, true);
             g.segs.push(i);
         }
-        if (info) info.groups = [...groups.entries()].map(([key, g]) => [(key >>> 16) + ',' + (key & 65535), g.segs.length, g.breaks]);
-        for (const g of groups.values()) if (g.breaks > RT_MAX_BREAKS) return null;
+        const pairOf = key => (style ? style.pairOf(key >>> 16, key & 65535) : null);
+        if (info) info.groups = [...groups.entries()].map(([key, g]) => [(key >>> 16) + ',' + (key & 65535), g.segs.length, g.breaks, pairOf(key)]);
+        const tile = [...groups.values()].some(g => g.breaks > RT_MAX_BREAKS);
         let mask = null;
-        for (const g of groups.values()) {
+        const take = g => { if (!mask) mask = new Uint8Array(n); for (const i of g.segs) mask[i] = 1; };
+        for (const [key, g] of groups) {
+            // 已經學到的選中路線顏色（含路況色）：不管在哪一批、形狀怎樣都算——跟使用者看的是同一個東西
+            const pair = pairOf(key);
+            if (pair && style.isRoute(pair)) { take(g); continue; }
+            if (tile) continue;
             const m = Math.min(g.segs.length, RT_SAMPLES);
             let hit = 0;
             for (let s = 0; s < m; s++) {
@@ -3831,9 +3927,9 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
                 if (nearRoute(geo, x, y, dv.getInt16(b + 4, true) - dv.getInt16(b, true), dv.getInt16(b + 6, true) - dv.getInt16(b + 2, true))) hit++;
             }
             if (info) (info.hits || (info.hits = [])).push(hit + '/' + m);
-            if (hit < m * RT_NEAR_SHARE) continue;
-            if (!mask) mask = new Uint8Array(n);
-            for (const i of g.segs) mask[i] = 1;
+            const pass = hit >= m * RT_NEAR_SHARE;
+            if (pair) style.vote(pair, pass);
+            if (pass) take(g);
         }
         return mask;
     }

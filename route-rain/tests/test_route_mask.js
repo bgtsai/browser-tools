@@ -57,6 +57,23 @@ function run(src) {
         ['圖磚批（有斷點很多的街道組）整批不算，連路線底下那條路也不算', mB === null],
         ['沒有線段回 null', routeMask(new Uint8Array(0), 0, k, geo) === null],
     ];
+    // 顏色（v1.11.0）：假的樣式表——代號 → 顏色；投票規則同腳本（≥2 次、沿著 ≥ 不沿著×3）
+    const mkStyle = colors => { const votes = new Map(); return {
+        votes,
+        pairOf: (x, y) => colors[x + ',' + y] || null,
+        isRoute(p) { const v = votes.get(p); return !!v && v.pass >= 2 && v.pass >= 3 * v.fail; },
+        vote(p, pass) { let v = votes.get(p); if (!v) votes.set(p, v = { pass: 0, fail: 0 }); if (pass) v.pass++; else v.fail++; },
+    }; };
+    const SEL = 'sel', ALT = 'alt', ST = 'street';
+    const st1 = mkStyle({ '90,2': SEL, '90,0': ALT, '90,1': ALT, '172,0': ST, '173,0': ST, '500,0': SEL });
+    routeMask(pack(A), A.length, k, geo, null, st1); routeMask(pack(A), A.length, k, geo, null, st1);
+    // 圖磚批裡混了一段選中路線（樣式代號不同、顏色相同）：學到顏色後要認得
+    const B2 = B.slice(); chain(B2, [500, 0], [[1200, 0], [1300, 0], [1400, 0]]);
+    const mB2 = routeMask(pack(B2), B2.length, k, geo, null, st1);
+    checks.push(['兩批之後學到選中路線的顏色', st1.isRoute(SEL)]);
+    checks.push(['替代路線的顏色沒學進去', !st1.isRoute(ALT)]);
+    checks.push(['圖磚批裡有選中路線顏色的那組照樣換色（國道那種）', !!mB2 && all(of(B2, mB2, [500, 0]), 1)]);
+    checks.push(['同一批圖磚的街道還是不換色', !!mB2 && all(of(B2, mB2, [172, 0]), 0) && all(of(B2, mB2, [173, 0]), 0)]);
     return checks;
 }
 
@@ -72,9 +89,12 @@ if (process.argv.includes('--mutants')) {
     const mutants = [
         ['斷點不設上限', s => s.replace('const RT_MAX_BREAKS = 3;', 'const RT_MAX_BREAKS = 1e9;')],
         ['不分組（整批一起判斷）', s => s.replace('const b = i * 20, key = dv.getUint16(b + 8, true) * 65536 + dv.getUint16(b + 10, true);', 'const b = i * 20, key = 0;')],
-        ['只看單組斷點（v1.10.0）', s => s.replace('for (const g of groups.values()) if (g.breaks > RT_MAX_BREAKS) return null;', '').replace('        for (const g of groups.values()) {\n            const m = Math.min', '        for (const g of groups.values()) {\n            if (g.breaks > RT_MAX_BREAKS) continue;\n            const m = Math.min')],
+        ['只看單組斷點（v1.10.0）', s => s.replace('            if (tile) continue;\n', '            if (g.breaks > RT_MAX_BREAKS) continue;\n')],
         ['不看方向', s => s.replace('if (!U2 || !L2 || dot * dot >= RT_PARALLEL * RT_PARALLEL * U2 * L2) return true;', 'return true;')],
-        ['不看貼不貼著', s => s.replace('if (hit < m * RT_NEAR_SHARE) continue;', '')],
+        ['不靠學到的顏色（v1.10.x）', s => s.replace('if (pair && style.isRoute(pair)) { take(g); continue; }', '')],
+        ['學到的顏色只在路線批用', s => s.replace('if (pair && style.isRoute(pair)) { take(g); continue; }\n            if (tile) continue;', 'if (tile) continue;\n            if (pair && style.isRoute(pair)) { take(g); continue; }')],
+        ['不投票', s => s.replace('if (pair) style.vote(pair, pass);', '')],
+        ['不看貼不貼著', s => s.replace('const pass = hit >= m * RT_NEAR_SHARE;', 'const pass = true;')],
     ];
     let miss = 0;
     for (const [name, f] of mutants) {
