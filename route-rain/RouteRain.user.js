@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.9.3
+// @version      1.9.4
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -3293,7 +3293,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         track('colorMask', (r, g, b, a) => { glr.cm = [r, g, b, a]; });
         track('depthMask', m => { glr.dm = m; });
         armRouteHook(P, visible);
-        try { w.__rrRoute = { get state() { return { patched: !!rt.patched, broken: rt.broken, subs: rt.subs.size, why: rt.why }; } }; } catch (e) { /* 只是診斷 */ }
+        try { w.__rrRoute = { get state() { return { ver: typeof GM_info !== "undefined" ? GM_info.script.version : "", patched: !!rt.patched, broken: rt.broken, glow: rt.glowBroken, subs: rt.subs.size, why: rt.why }; } }; } catch (e) { /* 只是診斷 */ }
         // 要求重畫：記下「執行時有畫地圖」的那個 rAF 回呼，之後再排一次。
         // 腳本是 document-start，Google 拿到的就是包過的這個 rAF。
         const raf = w.requestAnimationFrame;
@@ -3409,9 +3409,11 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             try {
                 if (!rt.broken && t === this.ARRAY_BUFFER && data && data.byteLength && data.byteLength % 20 === 0 &&
                     data.byteLength <= RT_MAX_COPY && visible(this)) {
-                    rt.subs.set(off, { buf: ab, ver: ++rt.ver,
-                        bytes: new Uint8Array(data.buffer, data.byteOffset, data.byteLength).slice() });
-                    if (rt.subs.size > 4000) rt.subs.delete(rt.subs.keys().next().value);
+                    // 依緩衝分開記：Google 有好幾個緩衝，offset 會重複（v1.9.2 實機：拿到別的緩衝的資料、認不出路線）
+                    let m = rt.subs.get(ab);
+                    if (!m) { m = new Map(); rt.subs.set(ab, m); }
+                    m.set(off, { ver: ++rt.ver, bytes: new Uint8Array(data.buffer, data.byteOffset, data.byteLength).slice() });
+                    if (m.size > 2000) m.delete(m.keys().next().value);
                 }
             } catch (e) { /* 只是記錄 */ }
             return o.bufferSubData.apply(this, arguments);
@@ -3450,16 +3452,16 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
      * 繪製時的 offset 落在某次上傳的中間（v1.9.0 實機：短路線西段整批「沒有資料」、留著 Google 藍色）。
      * 有好幾次上傳蓋到同一段時用最新的。結果依 offset 快取，上傳有變（版本號增加）才重找。
      */
-    function findSub(off, len) {
+    function findSub(buf, off, len) {
         const c = rt.slices.get(off);
-        if (c && c.at === rt.ver && c.len === len) return c.sub;
+        if (c && c.at === rt.ver && c.len === len && c.buf === buf) return c.sub;
         let best = null, bestOff = 0;
-        for (const [o, e] of rt.subs) {
+        for (const [o, e] of (rt.subs.get(buf) || [])) {
             if (o <= off && off + len <= o + e.bytes.length && (!best || e.ver > best.ver)) { best = e; bestOff = o; }
         }
         const sub = best ? { ver: best.ver, bytes: best.bytes.subarray(off - bestOff, off - bestOff + len) } : null;
         if (rt.slices.size > 2000) rt.slices.clear();
-        rt.slices.set(off, { at: rt.ver, len, sub });
+        rt.slices.set(off, { at: rt.ver, len, sub, buf });
         return sub;
     }
 
@@ -3496,7 +3498,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         const L = routeLocs(gl, prog);
         if (L.v < 0 || L.l < 0 || !L.on) { rt.count('noLoc'); return 'fail'; }
         const off = gl.getVertexAttribOffset(L.v, gl.VERTEX_ATTRIB_ARRAY_POINTER);
-        const sub = findSub(off, n * 20);
+        const sub = findSub(gl.getVertexAttrib(L.v, gl.VERTEX_ATTRIB_ARRAY_BUFFER_BINDING), off, n * 20);
         if (!sub) { rt.count('noData'); return 'skip'; }
         const sc = glr.scene, geo = routeGeo(sc);
         // 這批是不是我們的路線：只看形狀（同一條路線換欄不用重判）；每批資料（offset＋版本）只判一次
@@ -3508,7 +3510,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         }
         if (!c.isRoute) { rt.count('notRoute'); return 'skip'; }
         const e = routeLevelBuf(gl, off, sub, n, c.k, sc, geo);
-        rt.batches.set(off, { n, k: c.k, frame: rt.frameNo });
+        rt.batches.set(off, { n, k: c.k, frame: rt.frameNo, buf: gl.getVertexAttrib(L.v, gl.VERTEX_ATTRIB_ARRAY_BUFFER_BINDING) });
         routeUniforms(gl, L, sc.pal);
         if (!rt.glowDone) {
             rt.glowDone = true;
@@ -3596,7 +3598,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             glr.orig.uniform1f.call(gl, L.on, pass);
             rt.lastIdx = 0;
             for (const [off, b] of list) {
-                const sub = findSub(off, b.n * 20);
+                const sub = findSub(b.buf, off, b.n * 20);
                 if (!sub) continue;
                 const e = routeLevelBuf(gl, off, sub, b.n, b.k, sc, geo);
                 P.forEach(p => {
