@@ -31,7 +31,7 @@ const mk = (vs, fs, lv, lf) => { const sh = (t, s) => { const o = gl.createShade
   const p = gl.createProgram(); gl.attachShader(p, sh(gl.VERTEX_SHADER, pad(vs, lv))); gl.attachShader(p, sh(gl.FRAGMENT_SHADER, pad(fs, lf))); gl.linkProgram(p); return p; };
 const VS = 'attribute vec2 a;uniform vec3 c,d;uniform mat4 n;uniform float s;void main(){gl_Position=vec4(a,0.,1.);}';
 const FS = 'precision mediump float;void main(){gl_FragColor=vec4(0.,0.,0.,1.);}';
-const cam = mk(VS, FS, 3457, 1628), text = mk(VS, FS, 1111, 1069);
+const cam = mk(VS, FS, 3457, 1628), text = mk(VS, FS, 1111, 1069), blit = mk(VS, FS, 174, 152);
 const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
 // 標籤：畫面中心右邊 40～60 px、中線上下 10 px 的黑塊（剛好壓在色帶上）
 const X = px => px / 200, Y = py => -py / 150;
@@ -42,12 +42,14 @@ window.frames = 0; window.px = {};
 window.frame = () => {
   window.frames++;
   gl.viewport(0, 0, 400, 300); gl.clearColor(1, 1, 1, 1); gl.clear(gl.COLOR_BUFFER_BIT); gl.disable(gl.BLEND);
+  if (window.blitOnly) { gl.useProgram(blit); } else {
   gl.useProgram(cam);
   const L = n => gl.getUniformLocation(cam, n);
   gl.uniform3fv(L('c'), [hi(CAM.cx), hi(CAM.cy), 0]);
   gl.uniform3fv(L('d'), [CAM.cx - hi(CAM.cx), CAM.cy - hi(CAM.cy), 0]);
   gl.uniformMatrix4fv(L('n'), false, [2/400,0,0,0, 0,-2/300,0,0, 0,0,0,0, 0,0,0,1]);
   gl.uniform1f(L('s'), CAM.S);
+  }
   gl.bindBuffer(gl.ARRAY_BUFFER, buf);
   gl.useProgram(text);
   const abKeep = gl.getParameter(gl.ARRAY_BUFFER_BINDING) === buf;   // 注入發生在這次 useProgram 裡
@@ -109,6 +111,31 @@ def run(engine, pw):
     pg.wait_for_timeout(300)
     r2 = pg.evaluate("({ n: window.frames, px: window.px })")
     check('要求重畫：不用動地圖也重畫一幀、換成 M 藍', r2['n'] > n0 and near(r2['px']['right'], (40, 71, 116)), r2)
+    # 靜止時 Google 只把畫好的底圖貼上來（不重算相機）：色帶也要在
+    pg.evaluate("() => { window.blitOnly = true; window.renderSoon(); }")
+    pg.wait_for_timeout(200)
+    bp = pg.evaluate("window.px")
+    check('只貼底圖的幀也畫色帶（靜止時不會消失）', near(bp['right'], (40, 71, 116)), bp)
+    pg.evaluate("() => { window.blitOnly = false; }")
+    # 要求重畫要節流：同一刻請 5 次只多畫 1 幀；Google 剛畫過（地圖在動）就不請
+    pg.wait_for_timeout(300)
+    n1 = pg.evaluate("window.frames")
+    pg.evaluate("() => { for (let i = 0; i < 5; i++) window.__rr.glRequestRedraw(); }")
+    pg.wait_for_timeout(300)
+    n2 = pg.evaluate("window.frames")
+    check('同一刻請 5 次重畫只多畫 1 幀', n2 - n1 == 1, (n1, n2))
+    pg.evaluate("() => { window.frame(); window.__rr.glRequestRedraw(); }")
+    pg.wait_for_timeout(300)
+    n3 = pg.evaluate("window.frames")
+    check('Google 剛畫過就不另外請它重畫', n3 - n2 == 1, (n2, n3))
+    # 連續帶子：轉角處前後兩段共用頂點（不再各自一塊四邊形）
+    sh = pg.evaluate("""() => { const rr = window.__rr; const pts = []; for (let i = 0; i < 40; i++) pts.push({ x: i * 4, y: (i % 2) * 3 });
+      const v = rr.buildRibbonMesh([{ level: 1, pts }], rr.PALETTES.k2, null); const n = v.length / 12; const g = [];
+      for (let i = 0; i < n; i++) if (v[i*12+4] === 0) g.push([v[i*12], v[i*12+1]]);
+      let shared = 0, quads = g.length / 6;
+      for (let q = 0; q + 1 < quads; q++) { const endA = g[q*6+2], startB = g[(q+1)*6]; if (Math.abs(endA[0]-startB[0]) < 1e-4 && Math.abs(endA[1]-startB[1]) < 1e-4) shared++; }
+      return { quads, shared }; }""")
+    check('轉角處相鄰兩段的光暈共用頂點（沒有重疊或缺口）', sh['quads'] == 39 and sh['shared'] == 38, sh)
     # 色帶網格（純函式）
     m = pg.evaluate("""() => { const rr = window.__rr; const v = rr.buildRibbonMesh([{ level: 0, pts: [{x:0,y:0},{x:100,y:0}] }, { level: 2, pts: [{x:100,y:0},{x:200,y:0}] }], rr.PALETTES.k2, {x: 50, y: 0});
       const n = v.length / 12, kinds = {}; let gmin = 9, gmax = 0;

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.6.0
+// @version      1.6.1
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -173,6 +173,7 @@
     const KEY_SOURCE_MODE = 'forecastSourceMode';   // 'github'（預設）｜'api'
     const KEY_PANEL_HEIGHT = 'panelHeight';         // 使用者拖拉過的面板高度（px）
     const KEY_PALETTE = 'ribbonPalette';            // 'k2'｜'m'
+    const KEY_GL = 'glRibbon';                      // 色帶畫進地圖裡（實驗）；false＝不攔 Google 的繪圖
 
     function getSourceMode() {
         const v = GM_getValue(KEY_SOURCE_MODE, 'github');
@@ -1709,6 +1710,10 @@
         const curPal = state.paletteKey || getPaletteKey();
         box.innerHTML = `
 <div class="${PREFIX}-mtitle">設定</div>
+<label class="${PREFIX}-f" style="flex-direction:row;align-items:center;gap:8px">
+  <input type="checkbox" name="glRibbon" ${GM_getValue(KEY_GL, true) ? 'checked' : ''}>
+  <span>色帶畫進地圖裡（實驗；在地名底下、縮放同步。改了要重新整理頁面）</span>
+</label>
 <div class="${PREFIX}-f">
   <span class="${PREFIX}-flabel">色帶配色</span>
   <div class="${PREFIX}-pals">${Object.entries(PALETTES).map(([k, pal]) => `
@@ -1809,6 +1814,11 @@ ${field('API 授權碼',
                 GM_setValue(KEY_CWA, cwaValue);
                 GM_setValue(KEY_SOURCE_MODE, modeValue);
                 GM_setValue(KEY_PALETTE, palValue);
+                const glOn = !!box.querySelector('input[name="glRibbon"]').checked;
+                if (glOn !== GM_getValue(KEY_GL, true)) {
+                    GM_setValue(KEY_GL, glOn);
+                    if (!glOn) glBreak('已在設定關閉');   // 立刻退回 SVG；攔截本身要重新整理才會拿掉
+                }
                 back.remove();
                 log('設定已儲存');
                 // 只換配色不重算路線（已經套用了）；資料來源或授權碼有改才重抓
@@ -3165,6 +3175,8 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
     // 認不出來、讀不到視野、出錯 → 自動退回 SVG 疊加，畫面不會壞。
     const GL_SIG_CAM = '3457/1628';    // 每幀最先上傳相機參數的程式（畫離屏緩衝，不是可見底圖）
     const GL_SIG_TEXT = '1111/1069';   // 地名文字
+    const GL_SIG_BLIT = '174/152';     // 靜止時把畫好的底圖貼上來（這種幀不會重算相機）
+    const GL_BUSY_MS = 100;            // Google 這麼久內自己畫過，就不另外請它重畫
     const GL_GLOW_HALF_PX = 19;        // 光暈往外擴到離中心這麼遠（SVG 版：寬 24 的線再模糊 5）
     const GL_GLOW_FADE_FROM_PX = 4;    // 光暈從離中心這麼遠開始淡出
     const GL_SCAN_DARKEN = RIBBON_SCAN_ALPHA;
@@ -3191,6 +3203,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         const w = pageWindow();
         const GL = w.WebGLRenderingContext;
         if (!GL || !GL.prototype || glr.armed) return;
+        if (!GM_getValue(KEY_GL, true)) { glr.broken = '已在設定關閉'; return; }
         glr.armed = true;
         const P = GL.prototype;
         const orig = {};
@@ -3213,8 +3226,11 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             if (p !== glr.prog && !glr.broken) {
                 try {
                     const s = sigOf(this, p);
+                    // 每一幀都要畫一次：重算相機的幀、只貼底圖的幀、或新的 rAF 回呼開始，都算新的一幀
                     if (s === GL_SIG_CAM) { injected = false; glr.pend = {}; }
-                    else if (s === GL_SIG_TEXT && !injected) {
+                    else if (s === GL_SIG_BLIT) { injected = false; }
+                    if (glr.newFrame) { glr.newFrame = false; injected = false; }
+                    if (s === GL_SIG_TEXT && !injected) {
                         injected = true;
                         try { glInject(this); } catch (err) { glBreak('注入：' + err.message); }
                     }
@@ -3251,6 +3267,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             glr.nativeRaf = raf.bind(w);
             w.requestAnimationFrame = function (cb) {
                 return glr.nativeRaf(function (t) {
+                    glr.newFrame = true;
                     const before = glr.frame;
                     const r = cb(t);
                     if (glr.frame !== before) glr.tick = cb;
@@ -3407,20 +3424,31 @@ void main(){
             }
             return own;
         };
-        const pieces = [];
+        // 沿線取樣成「連續的帶子」：交界附近每 RIBBON_PIECE_PX 一點，各點帶自己的級數（GPU 在點與點之間內插顏色）。
+        // 前後相鄰的點顏色接不起來（只有碰到「無資料」才會）就斷開另起一條。
+        // v1.6.0 是每小段各畫一個四邊形，轉彎內側相鄰兩段的半透明光暈互相重疊、外側留缺口，
+        // 路線點很密時排成一節一節像蜈蚣腳（使用者實機看到）；連續帶子共用轉角的頂點就沒有這個問題。
+        const strips = [];
+        let strip = null, lastKey = null;
+        const push = (x, y, val) => {
+            const key = val == null ? 'na' : 'ok';
+            const prev = strip && strip[strip.length - 1];
+            if (prev && Math.abs(prev.x - x) < 1e-6 && Math.abs(prev.y - y) < 1e-6) {
+                if (key === lastKey) return;
+                strip = [{ x, y, val }]; strips.push(strip); lastKey = key; return;
+            }
+            if (!strip || key !== lastKey) { strip = [{ x, y, val }]; strips.push(strip); lastKey = key; return; }
+            strip.push({ x, y, val });
+        };
         for (let i = 1; i < pts.length; i++) {
             const p0 = pts[i - 1], p1 = pts[i], len = p1.s - p0.s;
             if (len <= 0) continue;
             const own = lv[i];
-            const near = bounds.some(b => b.from != null && b.to != null && p0.s < b.s + half && p1.s > b.s - half);
+            const near = own != null && bounds.some(b => b.from != null && b.to != null && p0.s < b.s + half && p1.s > b.s - half);
             const n = near ? Math.max(1, Math.ceil(len / RIBBON_PIECE_PX)) : 1;
-            for (let k = 0; k < n; k++) {
-                const t0 = k / n, t1 = (k + 1) / n;
-                pieces.push({
-                    a: { x: p0.x + (p1.x - p0.x) * t0, y: p0.y + (p1.y - p0.y) * t0 },
-                    b: { x: p0.x + (p1.x - p0.x) * t1, y: p0.y + (p1.y - p0.y) * t1 },
-                    x: own == null ? null : levelAt(p0.s + len * (t0 + t1) / 2, own),
-                });
+            for (let k = 0; k <= n; k++) {
+                const t = k / n;
+                push(p0.x + (p1.x - p0.x) * t, p0.y + (p1.y - p0.y) * t, own == null ? null : levelAt(p0.s + len * t, own));
             }
         }
         const out = [];
@@ -3431,23 +3459,43 @@ void main(){
             return RIBBON_GLOW_ALPHA[i] + (RIBBON_GLOW_ALPHA[i + 1] - RIBBON_GLOW_ALPHA[i]) * Math.min(1, x - i);
         };
         const v = (x, y, qx, qy, kind, f, o, g) => out.push(x, y, qx, qy, kind, f[0], f[1], f[2], o[0], o[1], o[2], g);
-        const quad = (pc, hw, ext, kind, f, o, g) => {
-            const dx = pc.b.x - pc.a.x, dy = pc.b.y - pc.a.y, L = Math.hypot(dx, dy);
-            if (!L) return;
-            const ux = dx / L, uy = dy / L, nx = -uy * hw, ny = ux * hw;
-            const ax = pc.a.x - ux * ext, ay = pc.a.y - uy * ext, bx = pc.b.x + ux * ext, by = pc.b.y + uy * ext;
-            v(ax + nx, ay + ny, hw, 0, kind, f, o, g); v(ax - nx, ay - ny, -hw, 0, kind, f, o, g); v(bx + nx, by + ny, hw, 0, kind, f, o, g);
-            v(bx + nx, by + ny, hw, 0, kind, f, o, g); v(ax - nx, ay - ny, -hw, 0, kind, f, o, g); v(bx - nx, by - ny, -hw, 0, kind, f, o, g);
+        // 每一點的法線：前後兩段法線的平均（斜接），長度補成讓帶子寬度不變，最多 2 倍免得尖角炸開
+        const normals = st => st.map((p, j) => {
+            const a0 = st[j - 1] || p, a1 = st[j + 1] || p;
+            const seg = (u, w) => { const dx = w.x - u.x, dy = w.y - u.y, L = Math.hypot(dx, dy); return L ? [-dy / L, dx / L] : null; };
+            const n0 = j > 0 ? seg(a0, p) : null, n1 = j < st.length - 1 ? seg(p, a1) : null;
+            const A = n0 || n1, B = n1 || n0;
+            if (!A) return [0, 0];
+            let mx = A[0] + B[0], my = A[1] + B[1];
+            const mL = Math.hypot(mx, my);
+            if (mL < 1e-6) return A;
+            mx /= mL; my /= mL;
+            const scale = Math.min(2, 1 / Math.max(0.5, mx * A[0] + my * A[1]));
+            return [mx * scale, my * scale];
+        });
+        const band = (st, nm, hw, kind, colF, colO, g) => {
+            for (let j = 1; j < st.length; j++) {
+                const p = st[j - 1], q = st[j], np = nm[j - 1], nq = nm[j];
+                const fp = colF(p), fq = colF(q), op = colO(p), oq = colO(q), gp = g(p), gq = g(q);
+                v(p.x + np[0] * hw, p.y + np[1] * hw, hw, 0, kind, fp, op, gp);
+                v(p.x - np[0] * hw, p.y - np[1] * hw, -hw, 0, kind, fp, op, gp);
+                v(q.x + nq[0] * hw, q.y + nq[1] * hw, hw, 0, kind, fq, oq, gq);
+                v(q.x + nq[0] * hw, q.y + nq[1] * hw, hw, 0, kind, fq, oq, gq);
+                v(p.x - np[0] * hw, p.y - np[1] * hw, -hw, 0, kind, fp, op, gp);
+                v(q.x - nq[0] * hw, q.y - nq[1] * hw, -hw, 0, kind, fq, oq, gq);
+            }
         };
-        for (const pc of pieces) {
-            if (pc.x == null) continue;
-            quad(pc, GL_GLOW_HALF_PX, 0, 0, glowCol, glowCol, alphaAt(pc.x));
-        }
+        const good = strips.filter(st => st.length >= 2);
+        const nms = good.map(normals);
+        good.forEach((st, i) => {
+            if (st[0].val == null) return;
+            band(st, nms[i], GL_GLOW_HALF_PX, 0, () => glowCol, () => glowCol, p => alphaAt(p.val));
+        });
         const oh = RIBBON_FRAME_W_PX / 2;
-        for (const pc of pieces) {
-            const na = pc.x == null;
-            quad(pc, oh, oh, 1, na ? naF : colAt(pal.fill, pc.x), na ? naO : colAt(pal.out, pc.x), 1);
-        }
+        good.forEach((st, i) => {
+            const na = st[0].val == null;
+            band(st, nms[i], oh, 1, p => na ? naF : colAt(pal.fill, p.val), p => na ? naO : colAt(pal.out, p.val), () => 1);
+        });
         if (marker) {
             const R = MARK_R_PX + 2, z = [0, 0, 0];
             const c = (qx, qy) => v(marker.x + qx, marker.y + qy, qx, qy, 2, z, z, 1);
@@ -3458,13 +3506,22 @@ void main(){
 
     /** 要 Google 重畫一幀（色帶內容變了但地圖沒動時）；等不到就先用 SVG 頂著 */
     function glRequestRedraw() {
-        const before = glr.frame;
-        if (glr.tick && glr.nativeRaf) glr.nativeRaf(glr.tick);
-        setTimeout(() => {
-            if (glr.frame !== before || !state.active) return;
-            glr.svgHold = true;
-            drawSvgRibbon();
-        }, GL_REDRAW_WAIT_MS);
+        // 同一幀只請一次；Google 最近才自己畫過（地圖在動）就不請——它下一幀自然會畫新內容。
+        // 在 Google 自己的幀之外多叫它畫，會讓它的縮放動畫走太快、定位跑掉（v1.6.0 實機）。
+        if (glr.redrawPending || !glr.nativeRaf) return;
+        glr.redrawPending = true;
+        glr.nativeRaf(t => {
+            glr.redrawPending = false;
+            if (performance.now() - glr.injectedAt < GL_BUSY_MS) return;
+            const before = glr.frame;
+            if (glr.tick) { glr.newFrame = true; glr.tick(t); }
+            clearTimeout(glr.holdTimer);
+            glr.holdTimer = setTimeout(() => {
+                if (glr.frame !== before || !state.active) return;
+                glr.svgHold = true;
+                drawSvgRibbon();
+            }, GL_REDRAW_WAIT_MS);
+        });
     }
 
     function clearSvgRibbon() {
