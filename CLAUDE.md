@@ -2,26 +2,15 @@
 
 每支工具各自一個資料夾，總覽見 README.md。這裡只放「進行中」工具的交接。
 
-## route-rain（RouteRain・旅途中的雨）— v1.4.1 已推送；新配色（紫／藍兩套）＋光暈已定方向，待實作
+## route-rain（RouteRain・旅途中的雨）— v1.5.0 已推送（新配色＋光暈＋掃描線），待實機驗
 
 ### 目前狀態（2026-11-25）
-- 腳本 v1.4.1（1f4fa1d）。v1.3.x：色帶一定畫 Google 選中那條——網址 `!5i{n}` 取第幾條、資料記 dataKey（停靠點＋`!3e`）、`directionsFor` 等這條路線的資料、攔到新內容就重算、`routeMismatchReason` 核對清單選中那列，對不上就不畫色帶、ⓘ 紅字；自己補抓的 fetch 用 `ownFetches` 跳過攔截器。v1.4.0／1：重算不再收 Google 左側面板（`sidebarCollapseDone`）；點格子＝釘住＋把地圖移到那個點拉近到 17 級（v0.77.0 原樣，目標必須是畫面中心，依賴寫在「點格子」那段開頭）；離開路線地圖 `focusSeq++` 作廢。機制細節已歸檔進知識庫 12 v3.8 第④節。
-- 測試五支：`tests/test_panel.py`、`test_ribbon.py`、`test_modes.py`、`test_route_pick.py`、`test_focus.py`（Chromium＋Firefox 全過）。run() 本身沒有端到端測試，靠真實頁面驗。靜態檢查的「未定義名稱」用 ESLint no-undef（`npm i eslint@8`，env browser＋es2022，globals 加 GM_*、unsafeWindow）。Playwright 升級後要 `python3 -m playwright install firefox`。
-- 實機已驗過（使用者 Chrome）：打開時收左側面板、路線移進可見區；「最佳路線」點第 1／2／3 條、切機車都重算且跟清單一致；色帶白段對齊。
-- **實機還沒驗**：v1.4.1 大範圍路線點格子一次對準（使用者的基隆／萬里／石門路線）；重算後左側面板維持使用者的狀態；原驗收 ②拖動後色帶回來的時機 ③進街景再返回、點地點、自己按展開鈕 ⑤橫捲軸高度。
-- 舊對話串交接時的用量 C：68.2 萬（RouteRain v1.2.0 驗收串，2026-11-25 10:18；經驗已歸檔進 01 v2.70～v2.72、03 v1.73、12 v3.8、02 v3.43）。
-
-### 下一步：照定案改配色（取代定案 9 的配色 I）
-- 已定（使用者選）：
-  - 兩套配色都做，使用者在〔設定〕切換（我設計、使用者授權直接定）：設定裡一列「色帶配色」，兩個選項各附四級小色條；選了地圖色帶、格子、ⓘ 圖例即時一起換，不重算路線；預設 K2 紫。
-  - **K2 紫**：填色 `#ecddf8 #c9a0eb #9d5cde #5f249f`，外框 `#b57dea #944be2 #6622af #320d5b`。**M 藍**：填色 `#dbe2f8 #95b1eb #4a7dc6 #284774`，外框 `#6097ea #3d73bb #274c7f #0f2440`。（LCh 固定色相 312／278；填色 L* 90／72／52／30；外框 L* 62／48／32／14。最淺級外框＝A 中間調。）
-  - 地圖色帶：拿掉整條深藍外框，改成每段的外框跟著該級的外框色；段與段之間漸變 36 px（舊版是同色合併成一條 path 硬接，要改成依距離內插顏色）。
-  - 格線面板的格子：外框也用該級的外框色（inset 1px）。
-  - 「無資料」改成比最淺級深的灰（候選見 ㉑ 第 3 題）。
-  - 不能關掉底下 Google 的路線（畫在畫布裡），也不建議。
-- **做之前先問**（光暈提案頁第 ㉑ 區四題，使用者還沒回）：①光暈 G0 沒有／G1 全部發光／G2 只有第 3、4 級發光 ②掃描線 S1 橫向細線／S2 沿路跑的光（動畫，光頭用最深色）要不要、要哪種 ③色帶寬 10 px（填 6＋框 2×2）或 12 px（填 8） ④無資料 N1 `#c3c7cc`／N2 `#9aa0a6`／N3 N1＋斜線（斜線在 12px 格子有鋸齒參差）。四題定了再列修改清單問「可以開始改嗎」。
-- 提案頁：第一輪 https://claude.ai/artifact/RVDp2UCKp4oskfhZHbKaz9 （①～⑥：J／K／L）、第二輪 https://claude.ai/artifact/7tmdUy2pjPHQm9xsavZCoS （⑦～⑫：K2 紫／M 藍、最淺級外框 A／B）、光暈 https://claude.ai/artifact/KCP899yetJyvPomc1qkj3W （⑬～㉑，⑱ 不用）。下一個編號從 ㉒ 開始。產生器在舊沙箱 `/home/claude/rr-palette/`（build*.py，沒進 repo；底圖是使用者大路線 11.29 級截圖，路線座標取自 RouteRain 色帶 SVG 的外框 path）。
-- 實作要點：光暈＝色帶下墊一層 SVG feGaussianBlur(5) 的寬線（色帶寬＋10），顏色用同色系第 3 級填色，G2 從 2→3 級交界淡入；S2 用 stroke-dasharray＋dashoffset 動畫，`prefers-reduced-motion` 時停。拖動時色帶本來就淡出、停下才重畫，濾鏡效能要實機量。
+- 腳本 v1.5.0：兩套配色 K2 紫（預設）／M 藍，〔設定〕最上面「色帶配色」切換（選了即時預覽、取消改回、儲存才寫 `ribbonPalette`；只換配色不重算路線）。格子／摘要條／圖例用 class `rr-l0～3`／`rr-na`，顏色是根節點 CSS 變數 `--rr-f0～3`／`--rr-o0～3`（`applyPalette()` 寫）；`rainOf()` 不再回傳 color，只回 level。
+- 地圖色帶 `ribbonLayers()`：光暈（feGaussianBlur 5、寬 20、第 3 級填色、不透明度 0.15／0.3／0.45／0.6 依級內插，平頭避免半透明圓頭疊出亮斑）→ 外框 10（該級外框色）→ 填色 6 → S1 掃描線（每 3px 一條、mask 在色帶內）。交界前後 36px 切 3px 小段內插顏色；無資料 #c3c7cc／外框 #9aa0a6，不內插、不發光。拿掉 Google 藍外框。
+- 選定經過（使用者選）：光暈逐級（第 1 級也有、最強 0.6）、S1、色帶 10 px（比較頁 https://claude.ai/artifact/5f3ideF33MQarcBSVAFEkU ㉒～㉓）、無資料 N1＋斜線。
+- v1.4.1 以前：v1.3.x 色帶一定畫 Google 選中那條（`!5i{n}`、dataKey、`routeMismatchReason`）；v1.4.x 重算不收左側面板、點格子＝釘住＋移地圖到畫面中心拉近 17 級。機制細節在知識庫 12 v3.8 第④節。
+- 測試五支：`tests/test_panel.py`、`test_ribbon.py`、`test_modes.py`、`test_focus.py`（都要 `--shots DIR 腳本`）、`test_route_pick.py`（只吃腳本）；Chromium＋Firefox 全過。v1.5.0 新增的檢查都用改壞版反證過（漸變、光暈強度、掃描線、取消改回、斜線、藍外框）。靜態檢查：acorn＋ESLint no-undef（globals 加 GM_*、unsafeWindow）。
+- **實機還沒驗**：v1.5.0 全部（真實 Google 路線上的光暈與掃描線、長路線拖動停下後重畫的速度、兩套配色）；v1.4.1 大範圍路線點格子一次對準；重算後左側面板維持使用者的狀態；原驗收 ②拖動後色帶回來的時機 ③進街景再返回、點地點、自己按展開鈕 ⑤橫捲軸高度。
 
 ### 2026-11-24 第 1～3 批的紀錄（以上面為準）
 - 第 1 批 v1.0.0（底部面板＋格線，取代左側表格；收左側面板）；第 2 批 v1.1.0（地圖色帶、拖動淡出、開啟時移進可見區）；第 3 批 v1.2.0（自動隱藏、暫停膠囊、讓位、點地點自動收合）。舊版 v0.77.0（4fe73f7）。

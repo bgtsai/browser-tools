@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.4.1
+// @version      1.5.0
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -74,10 +74,20 @@
     const GRID_BOTTOM_PAD_PX = 8;              // 最後一列下方的留白
     const COLBOX_PAD_PX = 2;                   // 欄框比色塊每邊多出的寬度
 
-    // 地圖上的路線色帶：先畫 Google 路線藍的外框，再疊色帶，白色那級才看得出是路線
-    const RIBBON_W_PX = 6;                     // 色帶寬
-    const RIBBON_FRAME_W_PX = 10;              // 外框寬（每邊露出 2px）
-    const RIBBON_FRAME_COLOR = '#1967d2';      // Google 路線外緣的深藍
+    // 地圖上的路線色帶：每段外框用該級的外框色（v1.5.0 起不再墊 Google 藍外框，
+    // 新配色最淺級有自己的外框色）。疊在 Google 路線上，蓋住它才不會兩條線並排。
+    const RIBBON_W_PX = 6;                     // 填色寬
+    const RIBBON_FRAME_W_PX = 10;              // 外框寬（每邊露出 2px）；10 px 是使用者看過 10／12 比較頁定的
+    const RIBBON_BLEND_PX = 36;                // 兩級交界前後共這麼長（螢幕 px）逐漸變色，不硬接
+    const RIBBON_PIECE_PX = 3;                 // 交界漸變區切成這麼長的小段各自上色
+    // 光暈：色帶下墊一層模糊的寬線，顏色用同色系第 3 級填色（最深那級才像發光、不像陰影）。
+    // 強度跟雨勢走：第 1～4 級不透明度依序，使用者定「最強到 0.6，其他依次降」
+    const RIBBON_GLOW_EXTRA_PX = 10;           // 光暈比外框寬這麼多
+    const RIBBON_GLOW_BLUR_PX = 5;             // feGaussianBlur 的 stdDeviation
+    const RIBBON_GLOW_ALPHA = [0.15, 0.3, 0.45, 0.6];
+    // S1 掃描線：色帶上固定不動的橫向細線（每 SCAN_PITCH_PX 一條、高 1px）
+    const RIBBON_SCAN_PITCH_PX = 3;
+    const RIBBON_SCAN_ALPHA = 0.28;
     const RIBBON_MIN_STEP_PX = 2;              // 投影後離上一點不到這麼遠就略過，點數少一個量級
     const RIBBON_FADE_MS = 150;                // 地圖一被操作就淡出
     // 拖動中網址的 @ 不更新，放開約 0.5 秒才更新（12 第④節實測）：
@@ -159,6 +169,7 @@
     const KEY_PLACE_CACHE = 'placeNameCache';
     const KEY_SOURCE_MODE = 'forecastSourceMode';   // 'github'（預設）｜'api'
     const KEY_PANEL_HEIGHT = 'panelHeight';         // 使用者拖拉過的面板高度（px）
+    const KEY_PALETTE = 'ribbonPalette';            // 'k2'｜'m'
 
     function getSourceMode() {
         const v = GM_getValue(KEY_SOURCE_MODE, 'github');
@@ -194,18 +205,43 @@
         '連江縣': 'F-D0047-081',
     };
 
-    // 降雨機率色階：配色 I（2026-11-24 使用者選定），四級、級內不分深淺。
-    // 由淺到深要「一級比一級重」：先固定每級亮度再挑色相，中間級避開黃橘（使用者嫌髒），
-    // 選色過程見知識庫 03 第⑩節。白色那級在地圖上保留 Google 的藍框才看得出路線。
-    const RAIN_LEVELS = [
-        { maxPct: 20, color: '#ffffff' },     // 0～20%：不太會淋到
-        { maxPct: 40, color: '#48e7ff' },     // 30～40%：淺青
-        { maxPct: 60, color: '#ff72d1' },     // 50～60%：桃紅
-        { maxPct: 100, color: '#af00e0' },    // 70% 以上：紫
-    ];
-    const RAIN_NA_COLOR = '#eceff1';          // 查不到預報的格子
+    // 降雨機率分級：0～20／30～40／50～60／70% 以上
+    const RAIN_LEVELS = [{ maxPct: 20 }, { maxPct: 40 }, { maxPct: 60 }, { maxPct: 100 }];
+    // 兩套配色（2026-11-25 使用者選定，在〔設定〕切換，預設 K2 紫）。LCh 固定色相 312／278，
+    // 填色 L* 90／72／52／30、外框 L* 62／48／32／14，一級比一級重；最淺級外框取中間調。
+    // 色帶、格子、圖例都從這裡取色，切換時不重算路線。
+    const PALETTES = {
+        k2: { name: 'K2 紫', fill: ['#ecddf8', '#c9a0eb', '#9d5cde', '#5f249f'],
+            out: ['#b57dea', '#944be2', '#6622af', '#320d5b'] },
+        m: { name: 'M 藍', fill: ['#dbe2f8', '#95b1eb', '#4a7dc6', '#284774'],
+            out: ['#6097ea', '#3d73bb', '#274c7f', '#0f2440'] },
+    };
+    const PALETTE_DEFAULT = 'k2';
+    // 查不到預報：比兩套最淺級都深的灰＋斜線（使用者選 N1＋斜線），格子跟色帶共用
+    const RAIN_NA_COLOR = '#c3c7cc';
+    const RAIN_NA_OUT = '#9aa0a6';
+    const RAIN_NA_STRIPES = 'repeating-linear-gradient(135deg,transparent 0 3px,rgba(255,255,255,.75) 3px 4px)';
     // 雷雨、大雨不是機率問題，是後果問題：機率加這麼多再查表（剛好往上一級，紫封頂）
     const RAIN_BUMP_PCT = 20;
+
+    function getPaletteKey() {
+        const v = GM_getValue(KEY_PALETTE, PALETTE_DEFAULT);
+        return PALETTES[v] ? v : PALETTE_DEFAULT;
+    }
+    // 還沒套用過（例如還沒打開面板）就讀儲存的選擇
+    const currentPalette = () => PALETTES[state.paletteKey || getPaletteKey()];
+    /** 格子、摘要條、圖例共用的 class：顏色由面板根節點上的 CSS 變數決定，換配色只改變數 */
+    const levelClass = rain => PREFIX + (rain ? '-l' + rain.level : '-na');
+    /** 把配色寫成面板根節點上的 CSS 變數，並重畫色帶（不重算路線） */
+    function applyPalette(key) {
+        state.paletteKey = PALETTES[key] ? key : PALETTE_DEFAULT;
+        const pal = currentPalette();
+        const root = document.documentElement;
+        pal.fill.forEach((v, i) => root.style.setProperty(`--${PREFIX}-f${i}`, v));
+        pal.out.forEach((v, i) => root.style.setProperty(`--${PREFIX}-o${i}`, v));
+        if (state.ribbon) state.ribbon.cache = null;
+        drawRibbon();
+    }
 
     const state = {
         instanceId: Math.random().toString(36).slice(2, 8),  // 區分同一支腳本的不同次載入
@@ -219,7 +255,8 @@
         needFit: false,             // 這次打開還沒把路線移進可見區
         pageMode: 'route',          // 'route'｜'place'｜'street'｜'other'，見 detectPageMode()
         autoCollapsed: false,       // 點了地圖上的地點，自動收合成標題列（不是使用者按的）
-        forceShown: false,          // 自動隱藏期間按了暫停膠囊，硬叫回來
+        forceShown: false,
+        paletteKey: null,            // 目前配色，見 applyPalette()；null＝還沒套用，讀儲存值          // 自動隱藏期間按了暫停膠囊，硬叫回來
         sawSidebarToggle: false,    // 這次打開後看過 Google 左側面板的開關鈕（拿來當地標）
         capsule: null,              // 暫停膠囊
         layoutKey: '',              // 上次排面板時的「左側面板右緣｜視窗寬」
@@ -1350,7 +1387,7 @@
     const SEEN_WEATHER_CODES = new Set();       // 記錄實際出現過的代碼，用真實使用補完官方拿不到的完整清單
 
     /**
-     * 一格預報 → { pop, eff, level, baseLevel, color, reason }；沒有機率時回 null。
+     * 一格預報 → { pop, eff, level, baseLevel, reason }（顏色由目前配色依 level 決定）；沒有機率時回 null。
      *
      * 取代 v0.x 的 severityOf()＋洋紅疊色：第二個變數疊在色相上，四級配色時
      * 一格會有 8 種顏色，在 12px 的格子上分不出來。改成「雷雨／大雨就把機率提高
@@ -1368,7 +1405,7 @@
         const eff = Math.min(100, pop + (reason ? RAIN_BUMP_PCT : 0));
         const levelOf = pct => RAIN_LEVELS.findIndex(l => pct <= l.maxPct);
         const level = levelOf(eff);
-        return { pop: row.pop, eff, level, baseLevel: levelOf(pop), color: RAIN_LEVELS[level].color, reason };
+        return { pop: row.pop, eff, level, baseLevel: levelOf(pop), reason };
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -1665,8 +1702,18 @@
         const CWA_KEY_PATTERN = /^CWA-[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/;
 
         const curMode = getSourceMode();
+        // 配色選了就即時套用（預覽）；取消／Esc／點背景關掉時改回原本的
+        const curPal = state.paletteKey || getPaletteKey();
         box.innerHTML = `
 <div class="${PREFIX}-mtitle">設定</div>
+<div class="${PREFIX}-f">
+  <span class="${PREFIX}-flabel">色帶配色</span>
+  <div class="${PREFIX}-pals">${Object.entries(PALETTES).map(([k, pal]) => `
+    <label class="${PREFIX}-palopt"><input type="radio" name="palette" value="${k}" ${k === curPal ? 'checked' : ''}>
+      ${pal.name}<span class="${PREFIX}-palbar">${pal.fill.map((f, i) =>
+        `<i style="background:${f};box-shadow:inset 0 0 0 1px ${pal.out[i]}"></i>`).join('')}</span></label>`).join('')}
+  </div>
+</div>
 <label class="${PREFIX}-f">
   <span class="${PREFIX}-flabel">降雨資料來源</span>
   <select name="sourceMode">
@@ -1702,7 +1749,7 @@ ${field('API 授權碼',
 
         back.appendChild(box);
         document.body.appendChild(back);
-        box.querySelector('input')?.focus();
+        box.querySelector('input[name="cwa"]')?.focus();
 
         const warnBox = box.querySelector(`[data-${PREFIX}-warn]`);
         const showWarn = msg => {
@@ -1710,6 +1757,13 @@ ${field('API 授權碼',
             warnBox.style.display = '';
         };
         const hideWarn = () => { warnBox.style.display = 'none'; };
+
+        const close = () => {
+            back.remove();
+            if (state.paletteKey !== curPal) applyPalette(curPal);
+        };
+        box.querySelectorAll('input[name="palette"]').forEach(r =>
+            r.addEventListener('change', () => applyPalette(r.value)));
 
         const selectEl = box.querySelector('select[name="sourceMode"]');
         let lastValidMode = curMode;
@@ -1736,7 +1790,7 @@ ${field('API 授權碼',
                 eye.querySelector('.' + PREFIX + '-eye-off').style.display = show ? '' : 'none';
                 return;
             }
-            if (ev.target.closest('[data-' + PREFIX + '-cancel]')) { back.remove(); return; }
+            if (ev.target.closest('[data-' + PREFIX + '-cancel]')) { close(); return; }
             if (ev.target.closest('[data-' + PREFIX + '-save]')) {
                 const get = n => box.querySelector(`input[name="${n}"]`).value.trim();
                 const cwaValue = get('cwa');
@@ -1747,16 +1801,21 @@ ${field('API 授權碼',
                         : '已選擇「直連 API」，但尚未填入授權碼，無法儲存。');
                     return;
                 }
+                const palValue = state.paletteKey;
+                const sourceChanged = cwaValue !== (cur.cwa || '') || modeValue !== curMode;
                 GM_setValue(KEY_CWA, cwaValue);
                 GM_setValue(KEY_SOURCE_MODE, modeValue);
+                GM_setValue(KEY_PALETTE, palValue);
                 back.remove();
                 log('設定已儲存');
-                rerun();
+                // 只換配色不重算路線（已經套用了）；資料來源或授權碼有改才重抓
+                if (sourceChanged) rerun();
             }
         });
-        back.addEventListener('click', ev => { if (ev.target === back) back.remove(); });
+        back.addEventListener('click', ev => { if (ev.target === back) close(); });
         document.addEventListener('keydown', function esc(ev) {
-            if (ev.key === 'Escape') { back.remove(); document.removeEventListener('keydown', esc); }
+            if (!back.isConnected) { document.removeEventListener('keydown', esc); return; }
+            if (ev.key === 'Escape') { close(); document.removeEventListener('keydown', esc); }
         });
     }
 
@@ -1937,6 +1996,20 @@ ${field('API 授權碼',
 .${P}-lg i{width:12px;height:12px;border-radius:2px;display:inline-block;box-shadow:inset 0 0 0 1px rgba(0,0,0,.12)}
 .${P}-note{font-size:11px;color:#80868b;border-top:1px solid #e8eaed;margin-top:8px;padding-top:6px}
 .${P}-warn{color:#c5221f}
+/* 雨勢四級與無資料：顏色是 applyPalette() 寫在根節點的 CSS 變數，換配色不用重畫格子。
+   [class] 是為了壓過 .${P}-max i、.${P}-lg i 這類 (0,1,1) 的選擇器 */
+${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-shadow:inset 0 0 0 1px var(--${P}-o${i})}`).join('\n')}
+/* 預設值：applyPalette() 會在根節點寫 inline 變數覆蓋，這裡讓還沒套用時也有顏色 */
+:root{${currentPalette().fill.map((v, i) => `--${P}-f${i}:${v};--${P}-o${i}:${currentPalette().out[i]}`).join(';')}}
+[class].${P}-na{background:${RAIN_NA_COLOR} ${RAIN_NA_STRIPES};box-shadow:inset 0 0 0 1px ${RAIN_NA_OUT}}
+/* 設定裡的「色帶配色」：兩個選項各附四級小色條 */
+.${PREFIX}-pals{display:flex;gap:8px}
+.${PREFIX}-palopt{flex:1 1 0;display:flex;align-items:center;gap:8px;border:1px solid #dadce0;border-radius:8px;
+  padding:8px 10px;cursor:pointer;font-size:14px;color:#3c4043}
+.${PREFIX}-palopt:has(input:checked){border-color:#1a73e8;background:#e8f0fe}
+.${PREFIX}-palopt input{margin:0}
+.${PREFIX}-palbar{display:inline-flex;gap:1px;margin-left:auto}
+.${PREFIX}-palbar i{width:12px;height:12px;border-radius:2px;display:inline-block}
 .${PREFIX}-tip{position:fixed;z-index:2147483000;pointer-events:none;display:none;background:#202124;
   color:#fff;border-radius:8px;padding:9px 12px;font-size:12px;line-height:1.6;
   box-shadow:0 6px 20px rgba(0,0,0,.25);max-width:300px}
@@ -2447,6 +2520,7 @@ ${field('API 授權碼',
 
     function activate() {
         injectStyle();
+        applyPalette(getPaletteKey());
         if (!findPanel()) { alert('找不到路線面板，請先在 Google Maps 規劃好路線。'); return; }
 
         state.lastRouteKey = routeSignature(location.href);
@@ -2787,8 +2861,7 @@ ${field('API 授權碼',
         // 標頭：摘要條、時間刻度、▼、標頭那一段的欄框
         parts.push(`<div class="${P}-head" style="width:${innerW}px"><div class="${P}-marks" style="width:${innerW}px">`);
         wettest.forEach((w, ci) => {
-            parts.push(`<div class="${P}-sum" style="left:${colX(ci)}px;background:` +
-                `${w.rain ? w.rain.color : RAIN_NA_COLOR}"></div>`);
+            parts.push(`<div class="${P}-sum ${levelClass(w.rain)}" style="left:${colX(ci)}px"></div>`);
         });
         parts.push(`<div class="${P}-axis" style="left:${colX(0)}px;width:${cols * COL_PITCH_PX - 1}px"></div>`);
         departures.forEach((d, ci) => {
@@ -2810,7 +2883,7 @@ ${field('API 授權碼',
                 `<span class="${P}-m">${nodeTimeLabel(n)}</span></div>`);
             for (let ci = 0; ci < cols; ci++) {
                 const c = cells[ri][ci];
-                parts.push(`<span class="${P}-c" style="background:${c ? c.color : RAIN_NA_COLOR}"></span>`);
+                parts.push(`<span class="${P}-c ${levelClass(c)}"></span>`);
             }
             parts.push('</div>');
         });
@@ -2865,7 +2938,7 @@ ${field('API 授權碼',
             `${clockOf(dep)} 出發 → ${clockOf(arrive)} 抵達`;
         const w = view.wettest[ci].rain;
         state.panel.querySelector('.' + P + '-max').innerHTML = w
-            ? `<i style="background:${w.color}"></i>沿路最高 ${w.pop}%${w.reason ? '・' + w.reason : ''}`
+            ? `<i class="${levelClass(w)}"></i>沿路最高 ${w.pop}%${w.reason ? '・' + w.reason : ''}`
             : '';
         fitTitle();
         const place = (sel, col) => {
@@ -2892,7 +2965,7 @@ ${field('API 授權碼',
         const { nodes, totalSec, meta } = view;
         const pop = state.panel.querySelector('.' + P + '-pop');
         const ib = state.panel.querySelector('.' + P + '-ib');
-        const chip = (color, text) => `<span><i style="background:${color}"></i>${text}</span>`;
+        const chip = (cls, text) => `<span><i class="${cls}"></i>${text}</span>`;
         const lines = [
             `節點 ${nodes.length} 個，涵蓋 ${new Set(nodes.map(n => n.county + n.town)).size} 個鄉鎮，` +
                 `總行程 ${Math.round(totalSec / 60)} 分`,
@@ -2917,10 +2990,10 @@ ${field('API 授權碼',
         if (meta.failures && meta.failures.length) warnings.push(`取得失敗：${meta.failures.join('、')}`);
         pop.innerHTML =
             `<h4>降雨機率</h4><div class="${P}-lg">` +
-            chip(RAIN_LEVELS[0].color, '0～20%') + chip(RAIN_LEVELS[1].color, '30・40%') +
-            chip(RAIN_LEVELS[2].color, '50・60%') + chip(RAIN_LEVELS[3].color, '70% 以上') +
-            chip(RAIN_NA_COLOR, '無資料') + '</div>' +
-            `<div>有雷陣雨、大雨或豪雨時，顏色提高一級（紫色封頂）。</div>` +
+            chip(P + '-l0', '0～20%') + chip(P + '-l1', '30・40%') +
+            chip(P + '-l2', '50・60%') + chip(P + '-l3', '70% 以上') +
+            chip(P + '-na', '無資料') + '</div>' +
+            `<div>有雷陣雨、大雨或豪雨時，顏色提高一級（最深一級封頂）。</div>` +
             `<div>每一列是路線上的一個點、每一欄是一個出發時間；「沿路最濕」是那個出發時間沿路最濕的一格。</div>` +
             warnings.map(w => `<div class="${P}-warn">${w}</div>`).join('') +
             `<div class="${P}-note">${lines.map(l => `<div>${l}</div>`).join('')}</div>`;
@@ -3126,6 +3199,112 @@ ${field('API 授權碼',
 
     const svgPath = pts => pts.map((p, i) => (i ? 'L' : 'M') + p.x.toFixed(1) + ' ' + p.y.toFixed(1)).join('');
 
+
+    const hexRgb = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+    const mixHex = (a, b, t) => {
+        const A = hexRgb(a), B = hexRgb(b);
+        return 'rgb(' + A.map((v, i) => Math.round(v + (B[i] - v) * t)).join(',') + ')';
+    };
+    /** 連續級數 x（0～3，可有小數）在色票上的顏色：相鄰兩級之間線性內插 */
+    const colorAtLevel = (cols, x) => {
+        const i = Math.min(cols.length - 2, Math.floor(x));
+        return mixHex(cols[i], cols[i + 1], Math.min(1, Math.max(0, x - i)));
+    };
+
+    /**
+     * 色帶的 SVG 圖層：光暈 → 外框 → 填色 → 掃描線。
+     * runs：[{ pts:[{x,y}], level:0～3｜null(無資料) }]，相鄰兩段共用接點。
+     *
+     * 交界前後 RIBBON_BLEND_PX/2 內把級數當連續值內插，切成 RIBBON_PIECE_PX 小段各自上色；
+     * 交界以外整段同色，合成一條 path（點數少，接縫也不會有圓頭疊出的深淺）。
+     * 外框全部畫完才畫填色：外框的圓頭才不會壓到前一段的填色。
+     * 無資料那段不內插（灰色混紫色沒有意義），也不發光。
+     */
+    function ribbonLayers(runs) {
+        const pal = currentPalette();
+        // 攤平成一條折線，記下每個點的累積長度與交界位置
+        const pts = [], lv = [];
+        const bounds = [];            // { s, from, to }
+        let s = 0;
+        runs.forEach((r, ri) => {
+            // 交界＝這一段的第一個點，也就是上一段的最後一點
+            if (ri > 0 && pts.length && runs[ri - 1].level !== r.level) {
+                bounds.push({ s, from: runs[ri - 1].level, to: r.level });
+            }
+            r.pts.forEach((p, k) => {
+                if (ri > 0 && k === 0 && pts.length) return;   // 接點跟上一段重複
+                if (pts.length) s += Math.hypot(p.x - pts[pts.length - 1].x, p.y - pts[pts.length - 1].y);
+                pts.push({ x: p.x, y: p.y, s });
+                lv.push(r.level);
+            });
+        });
+        const half = RIBBON_BLEND_PX / 2;
+        // 某距離的級數：交界附近線性過渡；有一邊是無資料就硬接
+        const levelAt = (d, own) => {
+            for (const b of bounds) {
+                if (b.from == null || b.to == null) continue;
+                if (Math.abs(d - b.s) < half) return b.from + (b.to - b.from) * (d - (b.s - half)) / RIBBON_BLEND_PX;
+            }
+            return own;
+        };
+        // 切小段：交界附近每 RIBBON_PIECE_PX 一段，其他整條線段一段
+        const pieces = [];            // { a:{x,y}, b:{x,y}, x }
+        for (let i = 1; i < pts.length; i++) {
+            const p0 = pts[i - 1], p1 = pts[i];
+            const len = p1.s - p0.s;
+            if (len <= 0) continue;
+            const own = lv[i];
+            const near = bounds.some(b => b.from != null && b.to != null && p0.s < b.s + half && p1.s > b.s - half);
+            const n = near ? Math.max(1, Math.ceil(len / RIBBON_PIECE_PX)) : 1;
+            for (let k = 0; k < n; k++) {
+                const t0 = k / n, t1 = (k + 1) / n;
+                const a = { x: p0.x + (p1.x - p0.x) * t0, y: p0.y + (p1.y - p0.y) * t0 };
+                const b = { x: p0.x + (p1.x - p0.x) * t1, y: p0.y + (p1.y - p0.y) * t1 };
+                pieces.push({ a, b, x: own == null ? null : levelAt(p0.s + len * (t0 + t1) / 2, own) });
+            }
+        }
+        // 相鄰同色的小段合成一條 path
+        const groups = [];
+        for (const pc of pieces) {
+            const key = pc.x == null ? 'na' : pc.x.toFixed(2);
+            const g = groups[groups.length - 1];
+            if (g && g.key === key) g.d.push('L' + pc.b.x.toFixed(1) + ' ' + pc.b.y.toFixed(1));
+            else groups.push({ key, x: pc.x, d: ['M' + pc.a.x.toFixed(1) + ' ' + pc.a.y.toFixed(1),
+                'L' + pc.b.x.toFixed(1) + ' ' + pc.b.y.toFixed(1)] });
+        }
+        const cap = 'fill="none" stroke-linecap="round" stroke-linejoin="round"';
+        // 光暈的小段用平頭：半透明的圓頭彼此重疊會疊出更亮的點（交界處一顆顆亮斑），模糊後看不出缺角
+        const capButt = 'fill="none" stroke-linecap="butt" stroke-linejoin="round"';
+        const layer = (w, colFn, extra, caps = cap) => groups.map(g => {
+            const col = colFn(g.x);
+            return col ? `<path d="${g.d.join('')}" stroke="${col}" stroke-width="${w}" ${caps} ${extra(g.x) || ''}/>` : '';
+        }).join('');
+        const out = [];
+        const id = PREFIX + '-rb';
+        out.push(`<defs><filter id="${id}-glow" x="-50%" y="-50%" width="200%" height="200%">` +
+            `<feGaussianBlur stdDeviation="${RIBBON_GLOW_BLUR_PX}"/></filter>` +
+            `<pattern id="${id}-scan" width="4" height="${RIBBON_SCAN_PITCH_PX}" patternUnits="userSpaceOnUse">` +
+            `<rect width="4" height="1" fill="#000" fill-opacity="${RIBBON_SCAN_ALPHA}"/></pattern>` +
+            `<mask id="${id}-mask"><path d="${svgPath(pts)}" stroke="#fff" stroke-width="${RIBBON_FRAME_W_PX}" ${cap}/></mask></defs>`);
+        // 光暈：強度依連續級數內插（第 1 級也有）
+        const alphaAt = x => {
+            const i = Math.min(2, Math.floor(x));
+            return RIBBON_GLOW_ALPHA[i] + (RIBBON_GLOW_ALPHA[i + 1] - RIBBON_GLOW_ALPHA[i]) * Math.min(1, x - i);
+        };
+        out.push(`<g filter="url(#${id}-glow)">` + layer(RIBBON_FRAME_W_PX + RIBBON_GLOW_EXTRA_PX,
+            x => x == null ? null : pal.fill[2], x => `stroke-opacity="${alphaAt(x).toFixed(2)}"`, capButt) + '</g>');
+        out.push(layer(RIBBON_FRAME_W_PX, x => x == null ? RAIN_NA_OUT : colorAtLevel(pal.out, x), () => ''));
+        out.push(layer(RIBBON_W_PX, x => x == null ? RAIN_NA_COLOR : colorAtLevel(pal.fill, x), () => ''));
+        // S1 掃描線：整片橫線，只留色帶範圍內
+        if (pts.length > 1) {
+            const xs = pts.map(p => p.x), ys = pts.map(p => p.y), pad = RIBBON_FRAME_W_PX;
+            const x0 = Math.min(...xs) - pad, y0 = Math.min(...ys) - pad;
+            out.push(`<rect x="${x0.toFixed(0)}" y="${y0.toFixed(0)}" width="${(Math.max(...xs) + pad - x0).toFixed(0)}" ` +
+                `height="${(Math.max(...ys) + pad - y0).toFixed(0)}" fill="url(#${id}-scan)" mask="url(#${id}-mask)"/>`);
+        }
+        return out;
+    }
+
     /** 照目前顯示的那一欄重畫色帶；指到某格時另外標出那個點 */
     function drawRibbon() {
         const view = state.view;
@@ -3149,21 +3328,11 @@ ${field('API 授權碼',
         rb.el.setAttribute('height', Math.round(rb.el.style.position === 'fixed' ? innerHeight : host.height));
         rb.el.setAttribute('viewBox', `${ox} ${oy} ${rb.el.getAttribute('width')} ${rb.el.getAttribute('height')}`);
         const ci = shownColumn(view);
-        const cap = 'fill="none" stroke-linecap="round" stroke-linejoin="round"';
-        const all = svgPath([].concat(...runs.map(r => r.pts)));
-        const parts = [`<path d="${all}" stroke="${RIBBON_FRAME_COLOR}" stroke-width="${RIBBON_FRAME_W_PX}" ${cap}/>`];
-        // 同色的段合併成一條 path，接縫處才不會有圓頭疊出來的深淺
-        const byColor = new Map();
-        for (const r of runs) {
-            if (r.pts.length < 2) continue;
+        const parts = [];
+        parts.push(...ribbonLayers(runs.map(r => {
             const c = view.cells[r.node][ci];
-            const color = c ? c.color : RAIN_NA_COLOR;
-            if (!byColor.has(color)) byColor.set(color, []);
-            byColor.get(color).push(svgPath(r.pts));
-        }
-        for (const [color, ds] of byColor) {
-            parts.push(`<path d="${ds.join('')}" stroke="${color}" stroke-width="${RIBBON_W_PX}" ${cap}/>`);
-        }
+            return { pts: r.pts, level: c ? c.level : null };
+        })));
         if (view.hoverRow != null && view.hoverCol != null) {
             const n = view.nodes[view.hoverRow];
             const proj = screenProjector();

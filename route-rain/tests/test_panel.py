@@ -16,7 +16,7 @@ TAIL = "    if (document.readyState === 'loading') {\n        document.addEventL
 assert src.count(TAIL) == 1, '啟動段的寫法變了，測試要跟著改'
 src = src.replace(TAIL, HOOK + "\n    }")
 EXPOSE = ("    window.__rr = { state, injectStyle, buildPanel, render, layoutPanel, setCollapsed, rainOf,"
-          " collapseGoogleSidebar, restoreGoogleSidebar, deactivate, RAIN_LEVELS };\n")
+          " collapseGoogleSidebar, restoreGoogleSidebar, deactivate, RAIN_LEVELS, applyPalette, PALETTES, openSettings };\n")
 src = src.replace(HOOK, EXPOSE + "    if (false) {")
 fixture = (HERE / 'fixture.js').read_text(encoding='utf-8')
 OPEN = """() => { const rr = window.__rr; rr.injectStyle(); const p = rr.buildPanel(); document.body.appendChild(p);
@@ -67,18 +67,37 @@ def run(engine, pw):
     check('時間欄寬 36、右緣全部對齊', len(set(round(x[0], 2) for x in m)) == 1 and all(x[1] == 36 for x in m), m[:3])
     check('起點寫「出發」、終點寫「抵達」、中間寫 +N分', m[0][2] == '出發' and m[-1][2] == '抵達' and m[1][2] == '+2分', [x[2] for x in m])
     # 配色：查表與提高一級
-    lv = pg.evaluate("""(() => { const r = window.__rr.rainOf; const c = x => x && x.color;
+    lv = pg.evaluate("""(() => { const r = window.__rr.rainOf; const c = x => x && x.level;
       return [c(r({pop:20,weather:'多雲'})), c(r({pop:30,weather:'陣雨'})), c(r({pop:30,weather:'午後短暫雷陣雨'})),
               c(r({pop:60,weather:'豪雨'})), c(r({pop:80,weather:'雷陣雨'})), r({pop:null}), r({pop:40,weather:'大雨'}).reason,
               c(r({pop:24,weather:''})), c(r({pop:25,weather:''}))]; })()""")
-    check('配色 I 查表＋雷雨大雨提高一級＋紫封頂', lv[:5] == ['#ffffff', '#48e7ff', '#ff72d1', '#af00e0', '#af00e0'] and lv[5] is None and lv[6] == '大雨', lv)
-    check('機率先四捨五入到 10%（24→白、25→淺青）', lv[7] == '#ffffff' and lv[8] == '#48e7ff', lv[7:])
+    check('分級查表＋雷雨大雨提高一級＋最深級封頂', lv[:5] == [0, 1, 2, 3, 3] and lv[5] is None and lv[6] == '大雨', lv)
+    check('機率先四捨五入到 10%（24→第 1 級、25→第 2 級）', lv[7] == 0 and lv[8] == 1, lv[7:])
     bg = lambda sel, i: pg.evaluate(f"getComputedStyle(document.querySelectorAll({json.dumps(sel)})[{i}]).backgroundColor")
-    # 21:30 出發：大同區 21-24 時 20% → 白；中山區 30% 陣雨 → 淺青
-    check('格子顏色：大同區 20% 白、中山區 30% 淺青', bg('.rr-row:nth-child(1) .rr-c', 0) == 'rgb(255, 255, 255)' and bg('.rr-row:nth-child(3) .rr-c', 0) == 'rgb(72, 231, 255)')
-    check('摘要條＝那一欄最濕的顏色', bg('.rr-sum', 0) == 'rgb(72, 231, 255)')
-    na = pg.evaluate("getComputedStyle(document.querySelectorAll('.rr-row')[0].querySelectorAll('.rr-c')[95]).backgroundColor")
-    check('查不到預報的格子是灰色', na == 'rgb(236, 239, 241)', na)
+    # 21:30 出發：大同區 21-24 時 20% → 第 1 級；中山區 30% 陣雨 → 第 2 級（預設 K2 紫）
+    check('格子顏色：大同區 20% K2 第 1 級、中山區 30% 第 2 級', bg('.rr-row:nth-child(1) .rr-c', 0) == 'rgb(236, 221, 248)' and bg('.rr-row:nth-child(3) .rr-c', 0) == 'rgb(201, 160, 235)')
+    sh = pg.evaluate("getComputedStyle(document.querySelectorAll('.rr-row')[2].querySelectorAll('.rr-c')[0]).boxShadow")
+    check('格子外框＝該級外框色（inset 1px）', 'rgb(148, 75, 226)' in sh and 'inset' in sh, sh)
+    check('摘要條＝那一欄最濕的顏色', bg('.rr-sum', 0) == 'rgb(201, 160, 235)')
+    na = pg.evaluate("(() => { const s = getComputedStyle(document.querySelectorAll('.rr-row')[0].querySelectorAll('.rr-c')[95]); return [s.backgroundColor, s.backgroundImage]; })()")
+    check('查不到預報的格子是 #c3c7cc＋斜線', na[0] == 'rgb(195, 199, 204)' and 'repeating-linear-gradient' in na[1], na)
+    lg = pg.evaluate("[...document.querySelectorAll('.rr-lg i')].map(i => getComputedStyle(i).backgroundColor)")
+    check('ⓘ 圖例四級＋無資料跟格子同色', lg == ['rgb(236, 221, 248)', 'rgb(201, 160, 235)', 'rgb(157, 92, 222)', 'rgb(95, 36, 159)', 'rgb(195, 199, 204)'], lg)
+    # 換配色：只改 CSS 變數，格子、摘要條、圖例即時跟著換，不重畫格線
+    pg.evaluate("window.__rrFirstCell = document.querySelector('.rr-row .rr-c')")
+    pg.evaluate("window.__rr.applyPalette('m')")
+    same = pg.evaluate("window.__rrFirstCell === document.querySelector('.rr-row .rr-c')")
+    check('換成 M 藍：格子即時換色、格線沒重畫', bg('.rr-row:nth-child(3) .rr-c', 0) == 'rgb(149, 177, 235)' and bg('.rr-lg i', 0) == 'rgb(219, 226, 248)' and same)
+    # 設定：選了即時預覽，取消改回原本的；儲存才記住
+    pg.evaluate("window.__rr.openSettings()")
+    opts = pg.evaluate("[...document.querySelectorAll('#rr-modal input[name=palette]')].map(r => [r.value, r.checked, r.parentElement.querySelectorAll('.rr-palbar i').length])")
+    check('設定有「色帶配色」兩個選項、各附四級色條，目前選 M', opts == [['k2', False, 4], ['m', True, 4]], opts)
+    shot('8_settings')
+    pg.click('#rr-modal input[value=k2]')
+    check('設定裡選 K2：即時換色', bg('.rr-row:nth-child(3) .rr-c', 0) == 'rgb(201, 160, 235)')
+    pg.click('[data-rr-cancel]')
+    check('按取消：改回原本的 M 藍', bg('.rr-row:nth-child(3) .rr-c', 0) == 'rgb(149, 177, 235)')
+    pg.evaluate("window.__rr.applyPalette('k2')")
     sel = pg.text_content('.rr-sel'); mx = pg.text_content('.rr-max')
     check('剛打開：標題列顯示最早一欄', sel == '21:30 出發 → 21:44 抵達' and mx == '沿路最高 30%', (sel, mx))
     shot('1_open')
@@ -86,7 +105,7 @@ def run(engine, pw):
     # 指到某格
     def cell_xy(r, c):
         return pg.evaluate(f"(() => {{ const e = document.querySelectorAll('.rr-row')[{r}].querySelectorAll('.rr-c')[{c}].getBoundingClientRect(); return [e.left + 6, e.top + 6]; }})()")
-    # 次日 09:30 出發（第 48 欄），中山區 30% 雷陣雨 → 桃紅
+    # 次日 09:30 出發（第 48 欄），中山區 30% 雷陣雨 → 第 3 級
     x, y = cell_xy(4, 48)
     pg.mouse.move(x, y)
     hov = R('.rr-cbr.rr-hov')
@@ -95,7 +114,7 @@ def run(engine, pw):
     check('標題列換成指到的那一欄', sel == '09:30 出發 → 09:44 抵達' and mx == '沿路最高 30%・雷陣雨', (sel, mx))
     tip = pg.inner_text('#rr-tip')
     check('tooltip：降雨機率 30%・雷陣雨（顏色提高一級）', '降雨機率\t30%・雷陣雨（顏色提高一級）' in tip.replace(' ', '\t') or '30%・雷陣雨（顏色提高一級）' in tip, tip)
-    check('格子變桃紅', bg('.rr-row:nth-child(5) .rr-c', 48) == 'rgb(255, 114, 209)')
+    check('格子變第 3 級', bg('.rr-row:nth-child(5) .rr-c', 48) == 'rgb(157, 92, 222)')
     hl = pg.evaluate("document.querySelectorAll('.rr-lab')[4].classList.contains('rr-hl')")
     check('指到的列地點欄反白', hl)
     shot('2_hover')

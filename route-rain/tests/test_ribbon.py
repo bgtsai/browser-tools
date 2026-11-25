@@ -15,7 +15,7 @@ assert src.count(HOOK) == 1
 TAIL = "    if (document.readyState === 'loading') {\n        document.addEventListener('DOMContentLoaded', boot);\n    } else {\n        boot();\n    }"
 assert src.count(TAIL) == 1, '啟動段的寫法變了，測試要跟著改'
 src = src.replace(TAIL, HOOK + "\n    }")
-src = src.replace(HOOK, "    window.__rr = { state, injectStyle, buildPanel, render, deactivate, fitRouteIntoView, readViewport };\n    if (false) {")
+src = src.replace(HOOK, "    window.__rr = { state, injectStyle, buildPanel, render, deactivate, fitRouteIntoView, readViewport, applyPalette };\n    if (false) {")
 # boot() 才會掛「地圖被操作就淡出」的監聽：測試要它，但不要它注入按鈕
 src = src.replace("    window.__rr = {", "    window.__rrBoot = boot;\n    window.__rr = {", 1)
 fixture = (HERE / 'fixture.js').read_text(encoding='utf-8')
@@ -53,21 +53,36 @@ def run(engine, pw):
       return { sib: !!s && s.previousElementSibling === cv, paths: s ? s.querySelectorAll('path').length : 0,
         strokes: s ? [...s.querySelectorAll('path')].map(p => [p.getAttribute('stroke'), +p.getAttribute('stroke-width')]) : [] }; })()""")
     check('色帶插在地圖畫布正後面', info['sib'], info)
-    check('先畫藍外框（10）再疊色帶（6）', info['strokes'] and info['strokes'][0] == ['#1967d2', 10] and all(w == 6 for _, w in info['strokes'][1:]), info['strokes'])
-    # 21:30 出發：大同區 20% 白、中山區 30% 陣雨淺青、松山區 30% 陣雨淺青
-    cols = sorted(c for c, _ in info['strokes'][1:])
-    check('最早一欄的色帶顏色＝白＋淺青', cols == ['#48e7ff', '#ffffff'], cols)
+    L = pg.evaluate("""(() => { const s = document.getElementById('rr-ribbon');
+      const v = sel => [...s.querySelectorAll(sel)].map(p => [p.getAttribute('stroke'), +p.getAttribute('stroke-width'), +(p.getAttribute('stroke-opacity') || 1)]);
+      return { glow: v('g[filter] path'), body: v(':scope > path'), scan: !!s.querySelector('rect[mask][fill^="url"]'),
+        blur: +(s.querySelector('feGaussianBlur') || {getAttribute: () => 0}).getAttribute('stdDeviation') }; })()""")
+    order = [w for _, w, _ in L['body']]
+    check('沒有 Google 藍外框；先畫全部外框（10）再畫填色（6）', '#1967d2' not in [s for s, _, _ in L['body']] and order == sorted(order, reverse=True) and set(order) == {10, 6}, order)
+    check('光暈：模糊 5、寬 20、第 3 級填色', L['blur'] == 5 and L['glow'] and all(s == '#9d5cde' and w == 20 for s, w, _ in L['glow']), L['glow'][:3])
+    check('S1 掃描線：色帶範圍內的橫線', L['scan'])
+    # 21:30 出發：大同區 20% 第 1 級、中山區／松山區 30% 第 2 級，交界漸變
+    fills = [s for s, w, _ in L['body'] if w == 6]
+    check('最早一欄的色帶：第 1 級→第 2 級、中間有漸變色', 'rgb(236,221,248)' in fills and 'rgb(201,160,235)' in fills and len(set(fills)) > 4, fills)
+    ga = sorted(set(o for _, _, o in L['glow']))
+    check('光暈強度：第 1 級 0.15、第 2 級 0.30，交界內插', ga[0] == 0.15 and ga[-1] == 0.3 and len(ga) > 3, ga)
     # 投影位置：路線起點對得上獨立算出的座標
     start = pg.evaluate("(() => { const d = document.querySelector('#rr-ribbon path').getAttribute('d'); const m = d.match(/^M([-\\d.]+) ([-\\d.]+)/); return [+m[1], +m[2]]; })()")
     exp = pg.evaluate(f"({PROJ})(25.05, 121.51)")
     check('色帶起點＝經緯度投影到螢幕的位置', abs(start[0] - exp[0]) < 0.2 and abs(start[1] - exp[1]) < 0.2, (start, exp))
     shot('r1_open')
 
-    # 指到第 48 欄（次日 09:30）：中山區 30% 雷陣雨 → 桃紅；地圖標出那個點
+    # 指到第 48 欄（次日 09:30）：中山區 30% 雷陣雨 → 第 3 級；地圖標出那個點
     cell = pg.evaluate("(() => { const e = document.querySelectorAll('.rr-row')[4].querySelectorAll('.rr-c')[48].getBoundingClientRect(); return [e.left + 6, e.top + 6]; })()")
     pg.mouse.move(*cell)
-    cols = sorted(set(p.get_attribute('stroke') for p in pg.query_selector_all('#rr-ribbon path')[1:]))
-    check('指到第 48 欄：色帶換成那一欄（含桃紅）', '#ff72d1' in cols, cols)
+    cols = set(p.get_attribute('stroke') for p in pg.query_selector_all('#rr-ribbon > path[stroke-width="6"]'))
+    check('指到第 48 欄：色帶換成那一欄（含第 3 級）', 'rgb(157,92,222)' in cols, sorted(cols))
+    # 換配色：色帶重畫成 M 藍，不重算路線
+    pg.evaluate("window.__rr.applyPalette('m')")
+    cols = set(p.get_attribute('stroke') for p in pg.query_selector_all('#rr-ribbon > path[stroke-width="6"]'))
+    shot('r2m_hover_m')
+    check('換成 M 藍：色帶即時重畫', 'rgb(74,125,198)' in cols and 'rgb(157,92,222)' not in cols, sorted(cols)[:4])
+    pg.evaluate("window.__rr.applyPalette('k2')")
     mk = pg.evaluate("(() => { const c = document.querySelector('#rr-ribbon circle'); return c ? [+c.getAttribute('cx'), +c.getAttribute('cy')] : null; })()")
     exp = pg.evaluate(f"({PROJ})(25.054, 121.526)")
     check('指到某格：地圖上標出那個點', mk and abs(mk[0] - exp[0]) < 0.2 and abs(mk[1] - exp[1]) < 0.2, (mk, exp))
