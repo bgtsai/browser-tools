@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.9.1
+// @version      1.9.2
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -3337,7 +3337,8 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
     const RT_MAX_COPY = 400000;        // 只複製這麼大以內的上傳（路線一次幾 KB；圖磚也會經過）
     const rt = {
         curSig: '', glowDone: false, colorOk: true, routeDraws: 0, broken: '', glowBroken: '',
-        subs: new Map(),                // offset → { bytes, ver }
+        subs: new Map(),                // 上傳的 offset → { bytes, ver }
+        slices: new Map(),              // 繪製的 offset → 找到的那一段（快取）
         cls: new Map(),                 // offset → { ver, geo, k, isRoute }
         ver: 0, bufs: new Map(), locs: new WeakMap(), lastIdx: 0,
         batches: new Map(),             // 最近看到的導航路線批次 offset → { n, k, frame }（下一幀先畫它們的光暈）
@@ -3444,6 +3445,24 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         };
     }
 
+    /**
+     * 找出含有 [off, off+len) 的那次上傳，切出這一段。Google 常把好幾塊圖磚的線段（含導航路線）一次上傳，
+     * 繪製時的 offset 落在某次上傳的中間（v1.9.0 實機：短路線西段整批「沒有資料」、留著 Google 藍色）。
+     * 有好幾次上傳蓋到同一段時用最新的。結果依 offset 快取，上傳有變（版本號增加）才重找。
+     */
+    function findSub(off, len) {
+        const c = rt.slices.get(off);
+        if (c && c.at === rt.ver && c.len === len) return c.sub;
+        let best = null, bestOff = 0;
+        for (const [o, e] of rt.subs) {
+            if (o <= off && off + len <= o + e.bytes.length && (!best || e.ver > best.ver)) { best = e; bestOff = o; }
+        }
+        const sub = best ? { ver: best.ver, bytes: best.bytes.subarray(off - bestOff, off - bestOff + len) } : null;
+        if (rt.slices.size > 2000) rt.slices.clear();
+        rt.slices.set(off, { at: rt.ver, len, sub });
+        return sub;
+    }
+
     /** 程式裡要用到的位置（每個程式查一次） */
     function routeLocs(gl, prog) {
         let L = rt.locs.get(prog);
@@ -3477,8 +3496,8 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         const L = routeLocs(gl, prog);
         if (L.v < 0 || L.l < 0 || !L.on) { rt.count('noLoc'); return 'fail'; }
         const off = gl.getVertexAttribOffset(L.v, gl.VERTEX_ATTRIB_ARRAY_POINTER);
-        const sub = rt.subs.get(off);
-        if (!sub || sub.bytes.length < n * 20) { rt.count('noData'); return 'skip'; }
+        const sub = findSub(off, n * 20);
+        if (!sub) { rt.count('noData'); return 'skip'; }
         const sc = glr.scene, geo = routeGeo(sc);
         // 這批是不是我們的路線：只看形狀（同一條路線換欄不用重判）；每批資料（offset＋版本）只判一次
         let c = rt.cls.get(off);
@@ -3577,8 +3596,8 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             glr.orig.uniform1f.call(gl, L.on, pass);
             rt.lastIdx = 0;
             for (const [off, b] of list) {
-                const sub = rt.subs.get(off);
-                if (!sub || sub.bytes.length < b.n * 20) continue;
+                const sub = findSub(off, b.n * 20);
+                if (!sub) continue;
                 const e = routeLevelBuf(gl, off, sub, b.n, b.k, sc, geo);
                 P.forEach(p => {
                     if (!p) return;
