@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.11.0
+// @version      1.11.1
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -122,7 +122,7 @@
     //   ① 動作被切成很多段    → 整段平移只按下／放開一次，中間持續送 move
     //   ② 每段之間等網址更新  → 先算好整段軌跡再一次播完，只在最後校正一次
     //   ③ 等速移動            → 加上 easeInOutCubic 緩動，起停自然
-    //   ④ 縮放一級一級跳      → 改用滾輪（實測是連續的，會出現 17.6z 這種非整數）
+    //   ④ 縮放不順            → v1.11.1 起改用鍵盤 +／-（Google 原生的一級縮放動畫；以前是一串滾輪事件）
     const PAN_MIN_MS = 350;                    // 平移最短時長
     // ── 點格子把地圖移到那個點（v0.77.0 的做法，v1.4.0 搬回來）──
     // 與 Google 自己一致：實測點路線節點時，它一律縮放到整數 17.00
@@ -134,13 +134,8 @@
     const CONVERGE_MIN_EFFECT = 0.5;           // 一次修正的實際改善量，至少要有該次拖曳量的一半；
                                                // 也用於「再點同一個節點」時判斷不必動作
     const DEAD_ZONE_PX = 50;                   // 停滯時若剩下的誤差在此範圍內，視為抖動、接受它
-    // 滾輪縮放的實測結果（間隔 vs 每事件縮放量）：
-    //   16ms → 0.000 級（完全無效，那正是 requestAnimationFrame 的間隔）
-    //   30ms → 0.256 級（打折）
-    //   50ms 以上 → 0.320 級（滿效率）
-    // 因此縮放不能用 rAF 逐影格送，必須用固定間隔串接。
-    const WHEEL_INTERVAL_MS = 50;              // 滾輪事件間隔，低於 30ms 會被整批忽略
-    const WHEEL_ZOOM_PER_EVENT = 0.32;         // 每個事件的縮放量（50ms 間隔下實測）
+    // 舊的滾輪縮放實測（v1.11.0 以前）：16ms 間隔 0 級、30ms 0.256 級、50ms 以上 0.320 級——一串事件接起來不順，已換成鍵盤 +／-。
+    const KEY_ZOOM_GAP_MS = 150;               // 連按 +／- 的間隔（ms）：60 會少算一級，150 實測每次都算
     // 拖曳時游標不能離開畫布，單次手勢最多只能移動約 0.4 個畫面；超過就分幾次拖。
     const DRAG_MAX_SCREENS = 0.6;              // 單次拖曳的位移上限（畫面數）；
                                                // 方向感知的按下點讓行程從 0.4 提高到 0.6
@@ -3293,7 +3288,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         track('colorMask', (r, g, b, a) => { glr.cm = [r, g, b, a]; });
         track('depthMask', m => { glr.dm = m; });
         armRouteHook(P, visible);
-        try { w.__rrRoute = { get state() { return { ver: typeof GM_info !== "undefined" ? GM_info.script.version : "", patched: !!rt.patched, broken: rt.broken, glow: rt.glowBroken, subs: rt.subs.size, why: rt.why, diag: rt.diag, votes: [...rt.votes].map(([p, v]) => p + ' ' + v.pass + '/' + v.fail) }; } }; } catch (e) { /* 只是診斷 */ }
+        try { w.__rrRoute = { get state() { return { ver: typeof GM_info !== "undefined" ? GM_info.script.version : "", patched: !!rt.patched, broken: rt.broken, glow: rt.glowBroken, subs: rt.subs.size, why: rt.why, diag: rt.diag, votes: [...rt.votes].map(([p, v]) => p + ' ' + v) }; } }; } catch (e) { /* 只是診斷 */ }
         // 要求重畫：記下「執行時有畫地圖」的那個 rAF 回呼，之後再排一次。
         // 腳本是 document-start，Google 拿到的就是包過的這個 rAF。
         const raf = w.requestAnimationFrame;
@@ -3349,7 +3344,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         why: {},                        // 診斷：次數（頁面上 window.__rrRoute 讀得到）
         style: null,                    // Google 的兩張樣式貼圖（讀出來的像素，見 routeStyle）
         pairs: new Map(),               // 樣式代號（貼圖、w.xy）→ 「本體色/外框色」
-        votes: new Map(),               // 「本體色/外框色」→ { pass, fail }：沿著我們路線的次數，用來學選中路線（含路況色）的顏色
+        votes: new Map(),               // 本體色 → 幾批裡它是「沿著我們路線、而且最深」的那組（學選中路線的顏色）
         styleVer: 0,                    // 學到的顏色有變 → 每批重判
         diag: [],                       // 診斷：最近 RT_DIAG_MAX 次「判斷一批是不是路線」的細節（每組段數、斷點、沿著幾段）
         cacheScene: null,               // 最近一次路線全部換色成功時的色帶內容（靜止時 Google 貼的就是那張）
@@ -3781,14 +3776,20 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             k[1] + (dv.getInt16(b + 2, true) + dv.getInt16(b + 6, true)) / 2 * f];
     };
 
-    const RT_VOTE_MIN = 2;            // 一種顏色至少這麼多批「沿著我們路線」才當成選中路線的顏色
-    const RT_VOTE_RATIO = 3;          // 而且沿著的次數 ≥ 不沿著的 3 倍（替代路線只有共用的那幾段會沿著，岔開後都不沿著）
+    const RT_VOTE_MIN = 2;            // 一種本體色至少這麼多批是「沿著我們路線、而且最深」的那組，才當成選中路線的顏色
+
+    /** 「r.g.b.a/r.g.b.a」（本體/外框）的本體色亮度 */
+    function fillLum(pair) {
+        const [r, g, b] = pair.split('/')[0].split('.').map(Number);
+        return 0.299 * r + 0.587 * g + 0.114 * b;
+    }
 
     /**
      * 讀 Google 的線條樣式：每段線段的 w.xy 查貼圖 g 得到樣式位置 P（Ba：g＋b·256、a），
      * 再查貼圖 e 的第 18·P.y＋7 列（本體色，shader 的 _k）、＋10 列（外框色，_j）。跟頂點 shader 的 Ca／Aa 一樣。
      * 選中路線（2026-11-25 實測，自行車與汽車相同）本體 #23038e、外框 #450efb；替代路線 #3331f3／#b8c9fd；街道灰色系。
-     * 路況色沒量到（晚上沒塞車），所以不寫死：用「沿著我們路線」投票學（vote），學到的顏色之後不看形狀就算路線。
+     * 不寫死：路線批裡「沿著我們路線」的組中本體色最深的那種投一票（vote），學到的本體色之後不看形狀就算路線。
+     * 路況（汽車，2026-11-25 實測）只改外框色：選中＋路況＝外框 #ffb33f、替代＋路況＝#ffe3b3，本體不變，所以只比本體色。
      * 讀一次兩張貼圖約 9 ms（1024×64＋16384×18），只在第一次或 Google 改了貼圖（texSubImage2D／texImage2D）時重讀。
      */
     function routeStyle(gl, prog, L) {
@@ -3825,13 +3826,12 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
                     rt.pairs.set(key, p);
                     return p;
                 },
-                isRoute(pair) { const v = rt.votes.get(pair); return !!v && v.pass >= RT_VOTE_MIN && v.pass >= RT_VOTE_RATIO * v.fail; },
-                vote(pair, pass) {
-                    let v = rt.votes.get(pair);
-                    if (!v) rt.votes.set(pair, v = { pass: 0, fail: 0 });
-                    const before = this.isRoute(pair);
-                    if (pass) v.pass++; else v.fail++;
-                    if (this.isRoute(pair) !== before) rt.styleVer++;
+                // 只看本體色：路況是改外框色（實測選中路線＋路況＝外框 #ffb33f，本體不變）
+                isRoute(pair) { return (rt.votes.get(pair.split('/')[0]) || 0) >= RT_VOTE_MIN; },
+                vote(pair) {
+                    const f = pair.split('/')[0], v = (rt.votes.get(f) || 0) + 1;
+                    rt.votes.set(f, v);
+                    if (v === RT_VOTE_MIN) rt.styleVer++;
                 },
             };
         } catch (e) { rt.count('styleErr'); return null; }
@@ -3914,11 +3914,13 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         const tile = [...groups.values()].some(g => g.breaks > RT_MAX_BREAKS);
         let mask = null;
         const take = g => { if (!mask) mask = new Uint8Array(n); for (const i of g.segs) mask[i] = 1; };
+        const passed = [];
         for (const [key, g] of groups) {
             // 已經學到的選中路線顏色（含路況色）：不管在哪一批、形狀怎樣都算——跟使用者看的是同一個東西
             const pair = pairOf(key);
             if (pair && style.isRoute(pair)) { take(g); continue; }
             if (tile) continue;
+            g.pair = pair;
             const m = Math.min(g.segs.length, RT_SAMPLES);
             let hit = 0;
             for (let s = 0; s < m; s++) {
@@ -3927,9 +3929,17 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
                 if (nearRoute(geo, x, y, dv.getInt16(b + 4, true) - dv.getInt16(b, true), dv.getInt16(b + 6, true) - dv.getInt16(b + 2, true))) hit++;
             }
             if (info) (info.hits || (info.hits = [])).push(hit + '/' + m);
-            const pass = hit >= m * RT_NEAR_SHARE;
-            if (pair) style.vote(pair, pass);
-            if (pass) take(g);
+            if (hit >= m * RT_NEAR_SHARE) passed.push(g);
+        }
+        // 沿著路線的組裡，只取本體色最深的那種：替代路線跟選中路線共用一段路時也會「沿著」（v1.11.0 汽車路線實機：
+        // 替代路線的顏色被學進去、三條全塗色）。實測選中路線本體 #23038e（深），替代 #3331f3（亮）；路況只改外框色。
+        const known = passed.filter(g => g.pair);
+        const dark = known.length ? Math.min(...known.map(g => fillLum(g.pair))) : null;
+        for (const g of passed) {
+            if (!g.pair) { take(g); continue; }
+            if (fillLum(g.pair) !== dark) continue;
+            style.vote(g.pair);
+            take(g);
         }
         return mask;
     }
@@ -4590,7 +4600,7 @@ void main(){
     /** 路線外框在目前視野下的螢幕範圍 */
     // ── 點格子：把地圖移到那個點並拉近（從 v0.77.0 照原樣搬回來）──
     //
-    // 目標必須是「畫面（畫布）中心」，不能改成別的點：Google 的滾輪縮放以畫面中心為錨點，
+    // 目標必須是「畫面（畫布）中心」，不能改成別的點：Google 的鍵盤 +／- 縮放以畫面中心為錨點，
     // 只有停在中心的點拉近時不會跑掉。改成別的點（例如底部面板上方的可見區中心），
     // 偏移在拉近 N 級時放大 2^N 倍——v1.4.0 就這樣改過，從 11 級拉到 17 級時偏了幾千 px、
     // 要點兩次才對準。面板蓋不到畫面中心（實測面板上緣 773、中心 476，視窗高 953）。
@@ -4601,7 +4611,7 @@ void main(){
      * 實測那些等待佔掉整段動畫 31% 的時間，而且畫面在等待期間完全靜止——
      * 那正是「一段一段、不連續」的來源。
      *
-     * 我們自己知道送了幾個滾輪事件、拖了幾像素，可以直接推算新的視野，
+     * 我們自己知道縮了幾級、拖了幾像素，可以直接推算新的視野，
      * 讓各階段無縫接續。累積的誤差在最後統一校正一次即可。
      */
     function makeViewModel(vp) {
@@ -4821,7 +4831,7 @@ void main(){
                     model.offsetTo(lat, lon).dx, model.offsetTo(lat, lon).dy)) });
         }
 
-        // ③ 拉近到目標層級（滾輪錨定畫面中心，目標會留在原地）。
+        // ③ 拉近到目標層級（鍵盤 +／- 錨定畫面中心，目標會留在原地）。
         //    這裡一定要就地等它跑完：縮放動畫進行中網址不會更新，
         //    若留到後面才用「整段開始前」的舊 key 去等，第一段比對會立刻通過，
         //    退化成「連續兩次讀到相同」而誤判停穩——實測因此重複拉近、衝到 18.82 級。
@@ -4894,7 +4904,8 @@ void main(){
         if (inside && target - vp.zoom < 1) return;
         // 拉近前先平移：拉近以畫布中心為錨點，先把路線帶到中間，拉近後才不會跑出畫面
         if (target > vp.zoom) await panRouteToArea(canvas, tl);
-        if (Math.abs(target - vp.zoom) > ZOOM_TOLERANCE) await smoothZoom(canvas, target - vp.zoom);
+        // 縮放只能整級（鍵盤 +／-）：往下取整，寧可多縮小一點，也不要拉太近讓路線跑出可見區
+        if (Math.abs(target - vp.zoom) > ZOOM_TOLERANCE) await smoothZoom(canvas, Math.floor(target - vp.zoom + 1e-6));
         await panRouteToArea(canvas, tl);
         if (routeSignature(location.href) !== routeKey) warn('移動地圖時路線被改動了（拖到路線？）');
         const end = readViewport();
@@ -5000,41 +5011,32 @@ void main(){
     }
 
     /**
-     * 滾輪縮放。
-     *
-     * 以固定 50ms 間隔送出事件，不用 requestAnimationFrame——實測 16ms 間隔
-     * （rAF 的節奏）會讓所有事件被整批忽略，一級都不動。這正是先前
-     * 「zoomError=5、縮放完全沒發生」的原因。
-     *
-     * 滾輪本身的縮放是連續的（會產生 17.6z 這種非整數層級），所以即使不是
-     * 逐影格送，視覺上仍然是平滑推近，不像縮放按鈕那樣一級一級跳。
-     * 另外它以游標位置為錨點，在畫布中心送出就不會帶偏中心。
-     */
-    /**
-     * @returns 實際套用的縮放量。動作結束後會自行等待視野反映，呼叫端不必處理。
+     * 縮放：送鍵盤 +／- 給地圖畫布，用 Google 自己的縮放動畫（v1.11.1，使用者要求改用原生縮放）。
+     * 一個鍵＝一整級、以畫面中心為錨，小數部分保留（13.55 按三次 + 是 16.55）。
+     * 以前送一串滾輪事件（每 50 ms 一個、每個約 0.32 級）：一段一段接起來，看起來不順。
+     * 單一滾輪事件的縮放量又小又不成比例（2026-11-25 實測 deltaY 100→0.25 級、400→0.38 級），不能拿來一次縮到位。
+     * 按鍵間隔 KEY_ZOOM_GAP_MS：60 ms 時連按三次只走兩級，150 ms 三次都有算（同日實測）。
+     * 回傳實際縮了幾級（整數；deltaZoom 四捨五入）。
      */
     async function smoothZoom(canvas, deltaZoom) {
-        if (Math.abs(deltaZoom) < WHEEL_ZOOM_PER_EVENT / 2) return 0;
+        const steps = Math.round(deltaZoom);
+        if (!steps) return 0;
         // 自己取動作前的 key。先前由呼叫端傳入，只要傳到舊的 key，
         // waitViewportSettled 的第一段就會立刻通過而退化成會誤判的版本——
         // 實測因此重複拉近、衝到 18.82 級。包進來就不可能配錯。
         const keyBefore = viewportKey();
-        const r = canvas.getBoundingClientRect();
-        const cx = r.left + r.width / 2;
-        const cy = r.top + r.height / 2;
         const w = pageWindow();
-        const WE = w.WheelEvent || WheelEvent;
-        const events = Math.max(1, Math.round(Math.abs(deltaZoom) / WHEEL_ZOOM_PER_EVENT));
-        const sign = deltaZoom > 0 ? -1 : 1;      // deltaY 為負代表放大
-        for (let i = 0; i < events; i++) {
-            canvas.dispatchEvent(new WE('wheel', {
+        const KE = w.KeyboardEvent || KeyboardEvent;
+        const inward = steps > 0;
+        for (let i = 0; i < Math.abs(steps); i++) {
+            canvas.dispatchEvent(new KE('keydown', {
                 bubbles: true, cancelable: true, composed: true, view: w,
-                clientX: cx, clientY: cy, deltaY: sign * 120, deltaMode: 0,
+                key: inward ? '+' : '-', code: inward ? 'Equal' : 'Minus', keyCode: inward ? 187 : 189,
             }));
-            await wait(WHEEL_INTERVAL_MS);
+            if (i + 1 < Math.abs(steps)) await wait(KEY_ZOOM_GAP_MS);
         }
         lastSettled = await waitViewportSettled(keyBefore);
-        return events * WHEEL_ZOOM_PER_EVENT * (deltaZoom > 0 ? 1 : -1);
+        return steps;
     }
 
     /**

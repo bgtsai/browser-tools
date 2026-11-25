@@ -43,6 +43,8 @@
      const n = U(down.c.x - (e.clientX - down.x), down.c.y - (e.clientY - down.y), __map.zoom); __map.lat = n.lat; __map.lon = n.lon; });
    cv.addEventListener('pointerup', () => { down = null; later(); });
    cv.addEventListener('wheel', e => { __map.wheels++; __map.zoom += e.deltaY < 0 ? 0.32 : -0.32; later(); });
+   // 鍵盤 +／-＝Google 原生一級縮放（v1.11.1 起腳本用這個）；wheels 計數＝縮放動作次數
+   cv.addEventListener('keydown', e => { if (e.key !== '+' && e.key !== '-') return; __map.wheels++; __map.zoom += e.key === '+' ? 1 : -1; later(); });
  };
  // GM 替身
  window.__gm={};
