@@ -3260,6 +3260,15 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             }
             return orig.uniform1f.apply(this, arguments);
         };
+        // 混色與遮罩狀態自己記：getParameter(BLEND_*／COLOR_WRITEMASK／DEPTH_WRITEMASK) 在 Chrome 每次約 120 µs
+        // （要跟 GPU 行程同步，實測），每幀問 8 次就多 1 ms。腳本是 document-start，Google 每次設定都會經過這裡。
+        const track = (n, f) => { const o = P[n]; P[n] = function () { f.apply(null, arguments); return o.apply(this, arguments); }; };
+        track('blendFunc', (s, d) => { glr.bs = [s, d, s, d]; });
+        track('blendFuncSeparate', (a, b, c2, d) => { glr.bs = [a, b, c2, d]; });
+        track('blendEquation', m => { glr.be = [m, m]; });
+        track('blendEquationSeparate', (a, b) => { glr.be = [a, b]; });
+        track('colorMask', (r, g, b, a) => { glr.cm = [r, g, b, a]; });
+        track('depthMask', m => { glr.dm = m; });
         // 要求重畫：記下「執行時有畫地圖」的那個 rAF 回呼，之後再排一次。
         // 腳本是 document-start，Google 拿到的就是包過的這個 rAF。
         const raf = w.requestAnimationFrame;
@@ -3342,10 +3351,12 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             ab: gl.getParameter(gl.ARRAY_BUFFER_BINDING),
             blend: gl.isEnabled(gl.BLEND), depth: gl.isEnabled(gl.DEPTH_TEST),
             stencil: gl.isEnabled(gl.STENCIL_TEST), cull: gl.isEnabled(gl.CULL_FACE), scissor: gl.isEnabled(gl.SCISSOR_TEST),
-            bs: [gl.getParameter(gl.BLEND_SRC_RGB), gl.getParameter(gl.BLEND_DST_RGB),
-                gl.getParameter(gl.BLEND_SRC_ALPHA), gl.getParameter(gl.BLEND_DST_ALPHA)],
-            be: [gl.getParameter(gl.BLEND_EQUATION_RGB), gl.getParameter(gl.BLEND_EQUATION_ALPHA)],
-            dm: gl.getParameter(gl.DEPTH_WRITEMASK), cm: gl.getParameter(gl.COLOR_WRITEMASK),
+            // 沒記到（例如頁面載入後才架設）才問 GPU，問一次就記住
+            bs: glr.bs || (glr.bs = [gl.getParameter(gl.BLEND_SRC_RGB), gl.getParameter(gl.BLEND_DST_RGB),
+                gl.getParameter(gl.BLEND_SRC_ALPHA), gl.getParameter(gl.BLEND_DST_ALPHA)]),
+            be: glr.be || (glr.be = [gl.getParameter(gl.BLEND_EQUATION_RGB), gl.getParameter(gl.BLEND_EQUATION_ALPHA)]),
+            dm: glr.dm !== undefined ? glr.dm : (glr.dm = gl.getParameter(gl.DEPTH_WRITEMASK)),
+            cm: glr.cm || (glr.cm = Array.from(gl.getParameter(gl.COLOR_WRITEMASK))),
         };
         try {
             glr.orig.useProgram.call(gl, prog);
