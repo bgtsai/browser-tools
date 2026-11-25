@@ -2,7 +2,7 @@
 // 從腳本用 acorn 依節點範圍抽出 routeMask 與相依的純函式／常數，餵假的線段資料（每筆 20 bytes：int16×4 起訖、uint16×2 樣式）。
 const fs = require('fs'), path = require('path');
 const acorn = require(require.resolve('acorn', { paths: [process.cwd(), '/home/claude/jstools'] }));
-const NAMES = ['RT_NEAR', 'RT_NEAR_SHARE', 'RT_SAMPLES', 'RT_MAX_BREAKS', 'RT_CELL', 'segMid', 'nearIdx', 'nearRoute', 'routeMask'];
+const NAMES = ['RT_NEAR', 'RT_NEAR_SHARE', 'RT_SAMPLES', 'RT_PARALLEL', 'RT_MAX_BREAKS', 'RT_CELL', 'segMid', 'nearIdx', 'nearRoute', 'routeMask'];
 
 function extract(src) {
     const ast = acorn.parse(src, { ecmaVersion: 2022 });
@@ -39,6 +39,9 @@ function run(src) {
     chain(A, [90, 2], route); chain(A, [90, 2], route);
     const alt = [[0, 0], [50, 0], [50, 300], [50, 600], [400, 600], [800, 600], [1000, 600], [1000, 0]];
     chain(A, [90, 0], alt); chain(A, [90, 0], alt);
+    // ③另一條替代路線在終點附近岔出去（圖磚裡只剩離路線 40 單位內、約 160 m 的一截，往南垂直走）
+    const fork = [[1000, 0], [1000, -10], [1000, -20], [1000, -30], [1000, -40]];
+    chain(A, [90, 1], fork); chain(A, [90, 1], fork);
     const mA = routeMask(pack(A), A.length, k, geo);
     const of = (segs, m, st) => segs.map((s, i) => (s[4] === st[0] && s[5] === st[1] ? (m ? m[i] : 0) : null)).filter(v => v !== null);
     const all = (a, v) => a.length > 0 && a.every(x => x === v);
@@ -50,6 +53,7 @@ function run(src) {
     const checks = [
         ['路線批混了替代路線：選中路線的線段全部認成路線', all(of(A, mA, [90, 2]), 1)],
         ['替代路線（只共用起點一小段）不算', all(of(A, mA, [90, 0]), 0)],
+        ['替代路線在路線旁岔出去的一截（距離都在門檻內、但方向垂直）不算', all(of(A, mA, [90, 1]), 0)],
         ['圖磚批（有斷點很多的街道組）整批不算，連路線底下那條路也不算', mB === null],
         ['沒有線段回 null', routeMask(new Uint8Array(0), 0, k, geo) === null],
     ];
@@ -69,6 +73,7 @@ if (process.argv.includes('--mutants')) {
         ['斷點不設上限', s => s.replace('const RT_MAX_BREAKS = 3;', 'const RT_MAX_BREAKS = 1e9;')],
         ['不分組（整批一起判斷）', s => s.replace('const b = i * 20, key = dv.getUint16(b + 8, true) * 65536 + dv.getUint16(b + 10, true);', 'const b = i * 20, key = 0;')],
         ['只看單組斷點（v1.10.0）', s => s.replace('for (const g of groups.values()) if (g.breaks > RT_MAX_BREAKS) return null;', '').replace('        for (const g of groups.values()) {\n            const m = Math.min', '        for (const g of groups.values()) {\n            if (g.breaks > RT_MAX_BREAKS) continue;\n            const m = Math.min')],
+        ['不看方向', s => s.replace('if (!U2 || !L2 || dot * dot >= RT_PARALLEL * RT_PARALLEL * U2 * L2) return true;', 'return true;')],
         ['不看貼不貼著', s => s.replace('if (hit < m * RT_NEAR_SHARE) continue;', '')],
     ];
     let miss = 0;

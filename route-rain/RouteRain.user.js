@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.10.1
+// @version      1.10.2
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -3722,6 +3722,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
     const RT_NEAR = 5e-6;              // 線段中點離路線折線這麼近（世界單位，約 200 m）算「貼著」
     const RT_NEAR_SHARE = 0.75;        // 抽樣裡這麼多貼著就算導航路線
     const RT_SAMPLES = 12;
+    const RT_PARALLEL = 0.7;           // 線段跟最近那段路線的夾角 cos 至少這麼多（約 45° 以內）才算沿著路線
     const RT_MAX_BREAKS = 3;           // 路線批每組（同一個 w.xy）最多幾個斷點（實測都是 1＝外框＋本體兩趟；留餘裕給跨出圖磚再進來）
     const RT_CELL = 2e-5;              // 格網邊長（約 800 m）：找附近的路線點只看自己和周圍 8 格
     const geoCache = new WeakMap();
@@ -3760,16 +3761,22 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             k[1] + (dv.getInt16(b + 2, true) + dv.getInt16(b + 6, true)) / 2 * f];
     };
 
-    /** 這一點離路線折線夠不夠近（RT_NEAR） */
-    function nearRoute(geo, x, y) {
-        const pts = geo.pts, T2 = RT_NEAR * RT_NEAR;
+    /**
+     * 這一段線段是不是「沿著」路線：中點離路線折線夠近（RT_NEAR），而且跟那一段路線方向差不多（|cos| ≥ RT_PARALLEL）。
+     * 只看距離不夠（v1.10.1 實機 17 級）：替代路線在終點附近往南岔出去那一截，圖磚裡只剩離路線 200 m 內的部分，
+     * 整組都「貼著」→ 被塗色。岔出去的線跟路線垂直，方向一比就分得出來。(ux, uy)＝線段方向（不用單位化）。
+     */
+    function nearRoute(geo, x, y, ux, uy) {
+        const pts = geo.pts, T2 = RT_NEAR * RT_NEAR, U2 = ux * ux + uy * uy;
         for (const j of nearIdx(geo, x, y)) {
             for (const q of [j - 1, j]) {
                 if (q < 0 || q + 1 >= pts.length) continue;
                 const a = pts[q], c = pts[q + 1], dx = c[0] - a[0], dy = c[1] - a[1], L2 = dx * dx + dy * dy;
                 const t = L2 ? Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / L2)) : 0;
                 const ex = a[0] + dx * t - x, ey = a[1] + dy * t - y;
-                if (ex * ex + ey * ey <= T2) return true;
+                if (ex * ex + ey * ey > T2) continue;
+                const dot = ux * dx + uy * dy;
+                if (!U2 || !L2 || dot * dot >= RT_PARALLEL * RT_PARALLEL * U2 * L2) return true;
             }
         }
         return false;
@@ -3786,7 +3793,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
      *    導航路線那幾批只有路線（選中＋替代），每組在一塊圖磚裡是一條線、畫外框＋本體兩趟＝1 個斷點；
      *    圖磚那幾批一定有很多條路的街道類、建築輪廓，斷點很多。v1.10.0 只看單組的斷點，
      *    17 級時路線旁的短街、建築輪廓、路線底下那條路本身（各自斷點少）還是被塗色（實機量：圖磚批 35 批全部有 >3 斷點的組，路線批全部 ≤1）。
-     *  - 再每組判斷：均勻抽 RT_SAMPLES 段，中點貼著路線的比例 ≥ RT_NEAR_SHARE 才是選中路線（替代路線不貼著）。
+     *  - 再每組判斷：均勻抽 RT_SAMPLES 段，「沿著」路線（nearRoute：夠近且方向相近）的比例 ≥ RT_NEAR_SHARE 才是選中路線。
      */
     function routeMask(bytes, n, k, geo) {
         if (geo.pts.length < 2 || n < 1) return null;
@@ -3807,8 +3814,9 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             const m = Math.min(g.segs.length, RT_SAMPLES);
             let hit = 0;
             for (let s = 0; s < m; s++) {
-                const [x, y] = segMid(dv, g.segs[Math.floor((s + 0.5) * g.segs.length / m)], k);
-                if (nearRoute(geo, x, y)) hit++;
+                const i = g.segs[Math.floor((s + 0.5) * g.segs.length / m)], b = i * 20;
+                const [x, y] = segMid(dv, i, k);
+                if (nearRoute(geo, x, y, dv.getInt16(b + 4, true) - dv.getInt16(b, true), dv.getInt16(b + 6, true) - dv.getInt16(b + 2, true))) hit++;
             }
             if (hit < m * RT_NEAR_SHARE) continue;
             if (!mask) mask = new Uint8Array(n);
