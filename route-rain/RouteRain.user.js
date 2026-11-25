@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.7.3
+// @version      1.8.0
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -3267,11 +3267,6 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             return orig.uniform3fv.apply(this, arguments);
         };
         P.uniformMatrix4fv = function (loc, tr, m) {
-            // 路線程式每幀第二次上傳相機＝接下來是導航路線：先在底下畫光暈（取代模式）
-            if (rt.curSig === GL_SIG_ROUTE && visible(this) && ++rt.cams === 2 && rt.ready(this)) {
-                try { glInject(this, 'glow'); } catch (err) { glBreak('光暈：' + err.message); }
-                orig.useProgram.call(this, cur);
-            }
             const p = glr.pend;
             if (p && cur && glr.sig.get(cur) === GL_SIG_CAM && !p.M && p.v && visible(this)) p.M = Float32Array.from(m);
             return orig.uniformMatrix4fv.apply(this, arguments);
@@ -3327,6 +3322,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
     const rt = {
         curSig: '', cams: 0, glowDone: false, colorOk: true, routeDraws: 0, broken: '',
         subs: new Map(),                // offset → { bytes, ver }
+        cls: new Map(),                 // offset → { ver, sc, k, isRoute }
         ver: 0, bufs: new Map(), locs: new WeakMap(), ext: null, lastIdx: 0,
         why: {},                        // 診斷：沒換到色的原因次數（頁面上 window.__rrRoute 讀得到）
         cacheScene: null,               // 最近一次路線全部換色成功時的色帶內容（靜止時 Google 貼的就是那張）
@@ -3399,15 +3395,14 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
                 ext.__rr = true;
                 const gl = this, draw = ext.drawArraysInstancedANGLE;
                 ext.drawArraysInstancedANGLE = function (mode, first, count, n) {
-                    if (rt.curSig === GL_SIG_ROUTE && rt.cams >= 2 && visible(gl) && rt.ready(gl)) {
-                        let done = false;
-                        try { done = routeDraw(gl, ext, draw, mode, first, count, n); }
+                    // 不靠「第幾次上傳相機」認路線（Google 一幀分幾批畫是它決定的，長短路線就不同）：
+                    // 每次線條繪製都看它指向的線段資料，線段落在我們的路線上才換色
+                    if (rt.curSig === GL_SIG_ROUTE && visible(gl) && rt.ready(gl)) {
+                        let r = 'fail';
+                        try { r = routeDraw(gl, ext, draw, mode, first, count, n); }
                         catch (err) { rt.broken = '路線換色：' + err.message; warn(rt.broken); }
-                        if (done) return undefined;
-                        rt.colorOk = false;
-                    } else if (rt.curSig === GL_SIG_ROUTE && rt.cams >= 2 && visible(gl)) {
-                        const w = rt.broken ? 'broken' : !rt.patched ? 'notPatched' : !glr.scene ? 'noScene' : !glr.cam ? 'noCam' : 'notReady';
-                        rt.why[w] = (rt.why[w] || 0) + 1;
+                        if (r === 'done') return undefined;
+                        if (r === 'fail') rt.colorOk = false;
                     }
                     return draw.call(this, mode, first, count, n);
                 };
@@ -3425,12 +3420,25 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
                 F: gl.getUniformLocation(prog, 'rrF'), O: gl.getUniformLocation(prog, 'rrO'), k: gl.getUniformLocation(prog, 'k') };
             rt.locs.set(prog, L);
         }
-        if (L.v < 0 || L.l < 0 || !L.on) { rt.why['noLoc'] = (rt.why['noLoc'] || 0) + 1; return false; }
+        if (L.v < 0 || L.l < 0 || !L.on) { rt.why['noLoc'] = (rt.why['noLoc'] || 0) + 1; return 'fail'; }
         const off = gl.getVertexAttribOffset(L.v, gl.VERTEX_ATTRIB_ARRAY_POINTER);
         const sub = rt.subs.get(off);
-        if (!sub || sub.bytes.length < n * 20) { rt.why['noData'] = (rt.why['noData'] || 0) + 1; return false; }
-        const k = gl.getUniform(prog, L.k);
+        if (!sub || sub.bytes.length < n * 20) { rt.why['noData'] = (rt.why['noData'] || 0) + 1; return 'skip'; }
         const sc = glr.scene, pal = sc.pal;
+        // 這段資料是不是我們的路線：每段資料（offset＋版本）只判斷一次；k（圖磚原點）同一段資料不會變，順便記住
+        let c = rt.cls.get(off);
+        if (!c || c.ver !== sub.ver || c.sc !== sc) {
+            const k = (c && c.ver === sub.ver) ? c.k : Array.from(gl.getUniform(prog, L.k));
+            c = { ver: sub.ver, sc, k, isRoute: onRoute(sub.bytes, n, k, sc) };
+            rt.cls.set(off, c);
+        }
+        if (!c.isRoute) { rt.why.notRoute = (rt.why.notRoute || 0) + 1; return 'skip'; }
+        const k = c.k;
+        // 光暈畫在路線底下：這一幀第一次認出路線時先畫
+        if (!rt.glowDone) {
+            try { glInject(gl, 'glow'); } catch (err) { glBreak('光暈：' + err.message); }
+            glr.orig.useProgram.call(gl, prog);
+        }
         let e = rt.bufs.get(off);
         const key = sub.ver + '|' + k.join(',');
         if (!e || e.sc !== sc || e.key !== key || e.n !== n || e.start !== rt.lastIdx) {
@@ -3461,6 +3469,36 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         }
         rt.routeDraws++;
         rt.why.ok = (rt.why.ok || 0) + 1;
+        return 'done';
+    }
+
+    const RT_NEAR = 1.5e-6;            // 線段中點離我們的路線這麼近（世界單位，約 60 m）才算在路線上
+    const RT_SAMPLES = 12;             // 每段資料抽幾個線段來比
+
+    /** 這批線段是不是我們的路線：均勻抽 RT_SAMPLES 段，中點全部貼著路線折線才算（純函式，可單獨測） */
+    function onRoute(bytes, n, k, sc) {
+        if (!sc.flat) {
+            const f = [];
+            sc.runs.forEach(r => r.pts.forEach(p => f.push(p)));
+            sc.flat = f;
+        }
+        const pts = sc.flat;
+        if (pts.length < 2 || n < 1) return false;
+        const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const f = k[3] / 16, m = Math.min(n, RT_SAMPLES), T2 = RT_NEAR * RT_NEAR;
+        for (let s = 0; s < m; s++) {
+            const i = Math.floor((s + 0.5) * n / m), b = i * 20;
+            const x = k[0] + (dv.getInt16(b, true) + dv.getInt16(b + 4, true)) / 2 * f;
+            const y = k[1] + (dv.getInt16(b + 2, true) + dv.getInt16(b + 6, true)) / 2 * f;
+            let near = false;
+            for (let j = 1; j < pts.length && !near; j++) {
+                const a = pts[j - 1], c = pts[j], dx = c[0] - a[0], dy = c[1] - a[1], L2 = dx * dx + dy * dy;
+                const t = L2 ? Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / L2)) : 0;
+                const ex = a[0] + dx * t - x, ey = a[1] + dy * t - y;
+                if (ex * ex + ey * ey <= T2) near = true;
+            }
+            if (!near) return false;
+        }
         return true;
     }
 
