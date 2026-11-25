@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.10.0
+// @version      1.10.1
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -3722,7 +3722,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
     const RT_NEAR = 5e-6;              // 線段中點離路線折線這麼近（世界單位，約 200 m）算「貼著」
     const RT_NEAR_SHARE = 0.75;        // 抽樣裡這麼多貼著就算導航路線
     const RT_SAMPLES = 12;
-    const RT_MAX_BREAKS = 3;           // 一組（同一個 w.xy）最多幾個斷點還算一條線（路線＝外框＋本體兩趟＝1；跨出圖磚再進來會多）
+    const RT_MAX_BREAKS = 3;           // 路線批每組（同一個 w.xy）最多幾個斷點（實測都是 1＝外框＋本體兩趟；留餘裕給跨出圖磚再進來）
     const RT_CELL = 2e-5;              // 格網邊長（約 800 m）：找附近的路線點只看自己和周圍 8 格
     const geoCache = new WeakMap();
 
@@ -3782,9 +3782,11 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
      *  ②路線旁的圖磚街道也貼著路線（RT_NEAR 約 200 m，因為取樣折線在彎路抄捷徑，不能再收緊）→ 高級數整塊街道塗成雨勢色。
      * 線段資料 byte 8～11 是 w.xy（樣式；頂點 shader 用它查樣式貼圖），同一條線用同一個值：選中路線、每條替代路線、
      * 每一類街道各自一組。所以依 w.xy 分組，每組自己判斷：
-     *  - 均勻抽 RT_SAMPLES 段，中點貼著路線的比例 ≥ RT_NEAR_SHARE；
-     *  - 而且整組幾乎是一條連續的線：前一段終點不等於下一段起點的「斷點」≤ RT_MAX_BREAKS。
-     *    導航路線在一塊圖磚裡是一條線，Google 畫兩趟（外框、本體）＝ 1 個斷點；一類街道是很多條路、斷點很多。
+     *  - 整批先看：任何一組的斷點（前一段終點≠下一段起點）> RT_MAX_BREAKS 就是圖磚資料，整批不算。
+     *    導航路線那幾批只有路線（選中＋替代），每組在一塊圖磚裡是一條線、畫外框＋本體兩趟＝1 個斷點；
+     *    圖磚那幾批一定有很多條路的街道類、建築輪廓，斷點很多。v1.10.0 只看單組的斷點，
+     *    17 級時路線旁的短街、建築輪廓、路線底下那條路本身（各自斷點少）還是被塗色（實機量：圖磚批 35 批全部有 >3 斷點的組，路線批全部 ≤1）。
+     *  - 再每組判斷：均勻抽 RT_SAMPLES 段，中點貼著路線的比例 ≥ RT_NEAR_SHARE 才是選中路線（替代路線不貼著）。
      */
     function routeMask(bytes, n, k, geo) {
         if (geo.pts.length < 2 || n < 1) return null;
@@ -3799,9 +3801,9 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             g.ex = dv.getInt16(b + 4, true); g.ey = dv.getInt16(b + 6, true);
             g.segs.push(i);
         }
+        for (const g of groups.values()) if (g.breaks > RT_MAX_BREAKS) return null;
         let mask = null;
         for (const g of groups.values()) {
-            if (g.breaks > RT_MAX_BREAKS) continue;
             const m = Math.min(g.segs.length, RT_SAMPLES);
             let hit = 0;
             for (let s = 0; s < m; s++) {
