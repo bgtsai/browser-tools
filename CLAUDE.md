@@ -2,10 +2,11 @@
 
 每支工具各自一個資料夾，總覽見 README.md。這裡只放「進行中」工具的交接。
 
-## route-rain（RouteRain・旅途中的雨）— v1.6.1 已推送（色帶畫進 Google 的 WebGL；修 v1.6.0 實機問題），第 2 批「取代 Google 路線顏色」進行中
+## route-rain（RouteRain・旅途中的雨）— v1.6.2 已推送（色帶畫進 Google 的 WebGL；修 v1.6.0 實機問題＋效能），**等使用者裝 v1.6.2 驗「靜止時換欄」**，再決定第 2 批
 
 ### 目前狀態（2026-11-25）
 - **使用者同意的完整順序**（2026-11-25 15:56）：①v1.6.1 修第 1 批 ②我注入使用者 Chrome 新分頁實測 ③第 2 批調查（攔路線 bufferData、解每段位置、換 shader 重畫形狀不變）④v1.7.0 取代 Google 路線顏色（本體用 Google 的線、光暈用連續帶子；退路：取代→第 1 批疊加→SVG）⑤我再注入實測 ⑥最後請使用者正式安裝驗（重點：靜止時換欄色帶會不會立刻換——注入測不到，因為 Google 的 rAF 參考在載入時就存好了）。不用每步停下來等使用者。
+- **v1.6.2**：混色／遮罩狀態攔 blendFunc 等自己記（getParameter 那幾個每次約 120 µs）；真實頁面注入實測：注入中位數 0.6 ms、p90 0.9 ms；readPixels 驗過四級＋無資料顏色正確、地名蓋在色帶上。第 2 批調查 4（路線實例資料怎麼上傳、怎麼解、片段 shader 怎麼換色）與「靜止時要整張重畫」這個未知，見知識庫草稿。
 - **v1.6.1**：v1.6.0 實機問題——①靜止時色帶消失（Google 靜止只用 174/152 把快取底圖貼上來、不重算相機，原本只在相機幀注入）→ 每幀都注入（rAF 回呼開始或 174/152 都算新的一幀，沿用上次相機）②變慢、縮放定位不準、Firefox 跳位（每次 drawRibbon 都額外叫 Google 的 rAF 回呼，同一幀可能畫兩次，縮放動畫走太快）→ `glRequestRedraw()` 同一幀只排一次，且 100 ms 內 Google 畫過就不叫 ③蜈蚣條紋（每小段各一個半透明光暈四邊形，轉角內側重疊外側缺口）→ `buildRibbonMesh()` 改成連續帶子（斜接法線、最多 2 倍，碰到無資料才斷開）④〔設定〕加「色帶畫進地圖裡（實驗）」`glRibbon`，關掉＝不攔截（重新整理後生效，當下先 glBreak 退回 SVG）。右邊海上白色方格是 Google 圖磚沒載完的底格（變慢的結果）。
 - **v1.6.0（第 1 批）**：`armGlHook()`（document-start）包 page 的 WebGLRenderingContext.prototype 的 useProgram／uniform3fv／uniformMatrix4fv／uniform1f，與 requestAnimationFrame。shader 長度 3457/1628＝讀相機（中心高位、低位、矩陣、倍率 S）、1111/1069＝文字；文字程式每幀第一次 useProgram 前 `glInject()` 用自己的 program＋VAO 畫 `buildRibbonMesh()` 的三角形（光暈平頭→本體延伸半個外框→標記點），畫完還原 VAO／ARRAY_BUFFER／BLEND 系列／DEPTH／STENCIL／CULL／SCISSOR／mask。`drawRibbon()` 在 `glLive()` 時只交 `glr.scene`（世界座標）並 `glRequestRedraw()`（重排記下的 Google rAF 回呼；150 ms 內沒新的一幀就先畫 SVG 頂著，下一幀注入時清掉）；否則 `drawSvgRibbon()`（舊路徑）。GL 模式不淡出。出錯 `glBreak()` 永久退回 SVG；ⓘ 顯示目前哪一種。整點刻度內圈＝配色第 4 級填色（K2 #5f249f／M #284774）。
 - 測試新增 `tests/test_gl.py`（假 WebGL 頁：shader 長度同真的；檢查注入、文字蓋在色帶上、掃描線、光暈、GL 狀態還原、rAF 要求重畫、認不出就退回；無頭 Firefox 沒有 WebGL，只測載入）。改壞版反證：還原 ARRAY_BUFFER／BLEND、掃描線、rAF 回呼、光暈強度、簽名錯都抓得到。
