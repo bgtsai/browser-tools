@@ -31,11 +31,14 @@ const mk = (vs, fs, lv, lf) => { const sh = (t, s) => { const o = gl.createShade
   const p = gl.createProgram(); gl.attachShader(p, sh(gl.VERTEX_SHADER, pad(vs, lv))); gl.attachShader(p, sh(gl.FRAGMENT_SHADER, pad(fs, lf))); gl.linkProgram(p); return p; };
 const VS = 'attribute vec2 a;uniform vec3 c,d;uniform mat4 n;uniform float s;void main(){gl_Position=vec4(a,0.,1.);}';
 const FS = 'precision mediump float;void main(){gl_FragColor=vec4(0.,0.,0.,1.);}';
-const cam = mk(VS, FS, 3457, 1628), text = mk(VS, FS, 1111, 1069), blit = mk(VS, FS, 174, 152);
+const cam = mk(VS, FS, 3457, 1628), text = mk(VS, FS, 1111, 1069), blit = mk(VS, FS, 174, 152), mark = mk(VS, FS, 1480, 548);
 const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
 // 標籤：畫面中心右邊 40～60 px、中線上下 10 px 的黑塊（剛好壓在色帶上）
 const X = px => px / 200, Y = py => -py / 150;
 gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([X(40),Y(-10), X(60),Y(-10), X(60),Y(10), X(40),Y(-10), X(60),Y(10), X(40),Y(10)]), gl.STATIC_DRAW);
+const mbuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, mbuf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([X(-120),Y(-4), X(-110),Y(-4), X(-110),Y(4), X(-120),Y(-4), X(-110),Y(4), X(-120),Y(4)]), gl.STATIC_DRAW);
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
 window.CAM = { cx: 0.8375, cy: 0.4281, S: 256 * 2 ** 15 };
 const hi = v => Math.fround(v);
 window.frames = 0; window.px = {};
@@ -51,13 +54,16 @@ window.frame = () => {
   gl.uniform1f(L('s'), CAM.S);
   }
   gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.useProgram(mark);                // 路線上的小標記：在文字之前畫，也要蓋在色帶上
+  { gl.bindBuffer(gl.ARRAY_BUFFER, mbuf); const ml = gl.getAttribLocation(mark, 'a'); gl.enableVertexAttribArray(ml); gl.vertexAttribPointer(ml, 2, gl.FLOAT, false, 0, 0); gl.drawArrays(gl.TRIANGLES, 0, 6); }
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
   gl.useProgram(text);
   const abKeep = gl.getParameter(gl.ARRAY_BUFFER_BINDING) === buf;   // 注入發生在這次 useProgram 裡
   gl.bindBuffer(gl.ARRAY_BUFFER, buf);
   const al = gl.getAttribLocation(text, 'a'); gl.enableVertexAttribArray(al); gl.vertexAttribPointer(al, 2, gl.FLOAT, false, 0, 0);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
   const rd = (x, y) => { const o = new Uint8Array(4); gl.readPixels(x, 299 - y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, o); return Array.from(o); };
-  window.px = { ribbon: rd(100, 150), ribbon2: rd(100, 151), ribbon3: rd(100, 152), label: rd(250, 150), up: rd(100, 140), glow: rd(100, 162), far: rd(100, 220),
+  window.px = { ribbon: rd(100, 150), ribbon2: rd(100, 151), ribbon3: rd(100, 152), label: rd(250, 150), mark: rd(85, 150), up: rd(100, 140), glow: rd(100, 162), far: rd(100, 220),
     right: rd(330, 150), prog: gl.getParameter(gl.CURRENT_PROGRAM) === text, ab: abKeep,
     blend: gl.isEnabled(gl.BLEND) };
 };
@@ -101,6 +107,7 @@ def run(engine, pw):
     check('色帶第 1 級填色畫在路線位置（含掃描線變暗的列）', any(near(c, f0) for c in rows), rows)
     check('S1 掃描線：相鄰三列裡有一列變暗', any(near(c, [round(v * (1 - 0.28)) for v in f0], 8) for c in rows), rows)
     check('地名（文字程式畫的黑塊）蓋在色帶上面', px['label'][:3] == [0, 0, 0], px['label'])
+    check('文字之前畫的路線小標記（1480/548）也蓋在色帶上面', px['mark'][:3] == [0, 0, 0], px['mark'])
     check('第 4 級填色畫在右半段', near(px['right'], (95, 36, 159)), px['right'])
     check('光暈：中線外 12 px 有淡紫、遠處仍是白', px['glow'][:3] != [255, 255, 255] and px['far'][:3] == [255, 255, 255], (px['glow'], px['far']))
     check('GL 狀態還原：目前程式、ARRAY_BUFFER、BLEND 都是 Google 原本的', px['prog'] and px['ab'] and px['blend'] is False, px)
@@ -150,6 +157,11 @@ def run(engine, pw):
       return { first: t1 - t0, same, deferred, rebuilt, verts: m1.length / 14 }; }""")
     check('長路線（6000 點）注入一幀 < 30 ms、點數有略過', perf['first'] < 30 and perf['verts'] < 6000, perf)
     check('平移＋縮放不到半級沿用網格；超過半級時連續縮放中先沿用、停下才重建', perf['same'] and perf['deferred'] and perf['rebuilt'], perf)
+    # 急轉彎：光暈往外延伸不能變成尖刺（最多 1.15 倍）
+    sp = pg.evaluate("""() => { const rr = window.__rr; const v = rr.buildRibbonMesh([{ level: 2, pts: [{x:0,y:0},{x:100,y:0},{x:10,y:12}] }], rr.PALETTES.k2, null);
+      let m = 0; for (let i = 0; i < v.length / 14; i++) if (v[i*14+6] === 0) m = Math.max(m, Math.hypot(v[i*14+2], v[i*14+3]) * Math.abs(v[i*14+4]));
+      return m; }""")
+    check('急轉彎時光暈不戳出尖刺（延伸 ≤ 19×1.15 px）', sp <= 19 * 1.15 + 1e-3, sp)
     # 色帶網格（純函式）
     m = pg.evaluate("""() => { const rr = window.__rr; const v = rr.buildRibbonMesh([{ level: 0, pts: [{x:0,y:0},{x:100,y:0}] }, { level: 2, pts: [{x:100,y:0},{x:200,y:0}] }], rr.PALETTES.k2, {x: 50, y: 0});
       const n = v.length / 14, kinds = {}; let gmin = 9, gmax = 0;
@@ -159,12 +171,12 @@ def run(engine, pw):
     check('光暈強度從第 1 級 0.15 漸變到第 3 級 0.45', abs(m['gmin'] - 0.15) < 1e-6 and abs(m['gmax'] - 0.45) < 1e-6, m)
     # 認不出文字程式（Google 改版）→ 不注入、不算 live
     pg2 = b.new_page(viewport={'width': 400, 'height': 300})
-    pg2.set_content(PAGE.replace('1111, 1069', '1112, 1069'))
+    pg2.set_content(PAGE.replace('1111, 1069', '1112, 1069').replace('1480, 548', '1481, 548'))
     pg2.add_script_tag(content=fixture); pg2.add_script_tag(content=src)
     pg2.evaluate("() => { window.__rr.state.active = true; window.renderSoon(); }")
     pg2.wait_for_timeout(300)
     r3 = pg2.evaluate("({ live: window.__rr.glLive(), frame: window.__rr.glr.frame })")
-    check('認不出文字程式：不注入、退回 SVG', not r3['live'] and r3['frame'] == 0, r3)
+    check('認不出上層繪圖程式（Google 改版）：不注入、退回 SVG', not r3['live'] and r3['frame'] == 0, r3)
     check('沒有頁面錯誤', not errs, errs)
     b.close()
 

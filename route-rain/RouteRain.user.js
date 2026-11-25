@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.6.4
+// @version      1.6.5
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -3175,6 +3175,10 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
     // 認不出來、讀不到視野、出錯 → 自動退回 SVG 疊加，畫面不會壞。
     const GL_SIG_CAM = '3457/1628';    // 每幀最先上傳相機參數的程式（畫離屏緩衝，不是可見底圖）
     const GL_SIG_TEXT = '1111/1069';   // 地名文字
+    // 畫在底圖之上的那幾組（路線上的小標記、文字、圖示…）：注入要在它們「任何一組」每幀第一次出現之前，
+    // 只看文字（1111/1069）的話，文字之前先畫的路線小標記（使用者實機截圖：路上的白色小方塊）會被色帶蓋住。
+    // 實測靜止幀順序：174/152（貼底圖）→ 1480/548 → 1111/1069 → 548/378 → 1111/1069 → 2506/739
+    const GL_SIG_OVERLAYS = new Set(['1480/548', GL_SIG_TEXT, '548/378', '2506/739']);
     const GL_SIG_BLIT = '174/152';     // 靜止時把畫好的底圖貼上來（這種幀不會重算相機）
     const GL_BUSY_MS = 100;            // Google 這麼久內自己畫過，就不另外請它重畫
     const GL_GLOW_HALF_PX = 19;        // 光暈往外擴到離中心這麼遠（SVG 版：寬 24 的線再模糊 5）
@@ -3230,7 +3234,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
                     if (s === GL_SIG_CAM) { injected = false; glr.pend = {}; }
                     else if (s === GL_SIG_BLIT) { injected = false; }
                     if (glr.newFrame) { glr.newFrame = false; injected = false; }
-                    if (s === GL_SIG_TEXT && !injected) {
+                    if (GL_SIG_OVERLAYS.has(s) && !injected) {
                         injected = true;
                         try { glInject(this); } catch (err) { glBreak('注入：' + err.message); }
                     }
@@ -3530,7 +3534,7 @@ void main(){
         };
         const v = (x, y, nx, ny, qx, qy, kind, f, o, g) => out.push(x, y, nx, ny, qx, qy, kind, f[0], f[1], f[2], o[0], o[1], o[2], g);
         // 每一點的法線：前後兩段法線的平均（斜接），長度補成讓帶子寬度不變，最多 2 倍免得尖角炸開
-        const normals = st => st.map((p, j) => {
+        const normals = (st, limit) => st.map((p, j) => {
             const a0 = st[j - 1] || p, a1 = st[j + 1] || p;
             const seg = (u, w) => { const dx = w.x - u.x, dy = w.y - u.y, L = Math.hypot(dx, dy); return L ? [-dy / L, dx / L] : null; };
             const n0 = j > 0 ? seg(a0, p) : null, n1 = j < st.length - 1 ? seg(p, a1) : null;
@@ -3540,7 +3544,7 @@ void main(){
             const mL = Math.hypot(mx, my);
             if (mL < 1e-6) return A;
             mx /= mL; my /= mL;
-            const scale = Math.min(2, 1 / Math.max(0.5, mx * A[0] + my * A[1]));
+            const scale = Math.min(limit, 1 / Math.max(0.5, mx * A[0] + my * A[1]));
             return [mx * scale, my * scale];
         });
         const band = (st, nm, hw, kind, colF, colO, g) => {
@@ -3556,10 +3560,13 @@ void main(){
             }
         };
         const good = strips.filter(st => st.length >= 2);
-        const nms = good.map(normals);
+        // 光暈寬（離中心 19 px），急轉彎時斜接延伸會變成往外戳的尖刺（使用者實機：轉角像蜈蚣腳），
+        // 所以光暈的延伸上限壓到 1.15 倍；本體窄，維持 2 倍才不會在轉角變細
+        const nms = good.map(st => normals(st, 2));
+        const nmsGlow = good.map(st => normals(st, 1.15));
         good.forEach((st, i) => {
             if (st[0].val == null) return;
-            band(st, nms[i], GL_GLOW_HALF_PX, 0, () => glowCol, () => glowCol, p => alphaAt(p.val));
+            band(st, nmsGlow[i], GL_GLOW_HALF_PX, 0, () => glowCol, () => glowCol, p => alphaAt(p.val));
         });
         const oh = RIBBON_FRAME_W_PX / 2;
         good.forEach((st, i) => {
