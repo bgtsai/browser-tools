@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.5.0
+// @version      1.5.1
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -68,7 +68,8 @@
     const SUM_Y_PX = 12;                       // 「沿路最濕」摘要條
     const SUM_H_PX = 8;
     const AXIS_Y_PX = 34;                      // 時間軸線（2px 高，中心在 35）
-    const HOUR_DOT_PX = 18;                    // 整點圓
+    const HOUR_DOT_PX = 20;                    // 整點圓（含白圈；18 時兩位數字只剩約 14 px 寬太擠）
+    const HOUR_RING_PX = 2;                    // 整點圓外的白圈
     const QUARTER_DOT_PX = 4;                  // 15 分小點
     const HEAD_H_PX = 52;                      // 標頭總高（sticky）
     const GRID_BOTTOM_PAD_PX = 8;              // 最後一列下方的留白
@@ -76,8 +77,10 @@
 
     // 地圖上的路線色帶：每段外框用該級的外框色（v1.5.0 起不再墊 Google 藍外框，
     // 新配色最淺級有自己的外框色）。疊在 Google 路線上，蓋住它才不會兩條線並排。
-    const RIBBON_W_PX = 6;                     // 填色寬
-    const RIBBON_FRAME_W_PX = 10;              // 外框寬（每邊露出 2px）；10 px 是使用者看過 10／12 比較頁定的
+    const RIBBON_W_PX = 10;                    // 填色寬
+    // 外框寬（每邊露出 2px）。必須蓋得住底下 Google 的路線：15 級實測 Google 線約 12 px
+    // （深邊 2＋填色 7～8＋深邊 2），10 px 時兩側會露深藍；再留每邊 1 px 給投影偏移 → 14（使用者看比較頁定的）
+    const RIBBON_FRAME_W_PX = 14;
     const RIBBON_BLEND_PX = 36;                // 兩級交界前後共這麼長（螢幕 px）逐漸變色，不硬接
     const RIBBON_PIECE_PX = 3;                 // 交界漸變區切成這麼長的小段各自上色
     // 光暈：色帶下墊一層模糊的寬線，顏色用同色系第 3 級填色（最深那級才像發光、不像陰影）。
@@ -1962,10 +1965,11 @@ ${field('API 授權碼',
   box-shadow:inset 0 0 0 1px rgba(0,0,0,.12)}
 .${P}-axis{position:absolute;top:${AXIS_Y_PX}px;height:2px;background:#dadce0}
 .${P}-hour{position:absolute;top:${AXIS_Y_PX + 1 - HOUR_DOT_PX / 2}px;width:${HOUR_DOT_PX}px;height:${HOUR_DOT_PX}px;
-  border-radius:50%;background:#fff;border:1px solid #9aa0a6;font-size:11px;color:#3c4043;
+  box-sizing:border-box;border-radius:50%;background:#1a73e8;border:${HOUR_RING_PX}px solid #fff;
+  box-shadow:0 1px 3px rgba(60,64,67,.4),0 1px 1px rgba(60,64,67,.15);font-size:11px;color:#fff;letter-spacing:-.3px;
   display:flex;align-items:center;justify-content:center;font-variant-numeric:tabular-nums}
 .${P}-q{position:absolute;top:${AXIS_Y_PX + 1 - QUARTER_DOT_PX / 2}px;width:${QUARTER_DOT_PX}px;
-  height:${QUARTER_DOT_PX}px;border-radius:50%;background:#9aa0a6}
+  height:${QUARTER_DOT_PX}px;border-radius:50%;background:#bdc1c6}
 .${P}-pin{position:absolute;top:${PIN_Y_PX}px;width:${CELL_PX}px;height:8px;display:none;pointer-events:none}
 .${P}-pin svg{display:block}
 .${P}-rows{position:relative}
@@ -1978,12 +1982,15 @@ ${field('API 授權碼',
   font-variant-numeric:tabular-nums}
 .${P}-c{width:${CELL_PX}px;height:${CELL_PX}px;flex:0 0 ${CELL_PX}px;margin:${(ROW_PITCH_PX - CELL_PX) / 2}px
   ${COL_PITCH_PX - CELL_PX}px 0 0;border-radius:2px;box-shadow:inset 0 0 0 1px rgba(0,0,0,.12)}
-/* 欄框分成標頭與格線兩段：標頭是 sticky，畫成一整塊的話上下捲動時會跟標頭錯開 */
-.${P}-cbh,.${P}-cbr{position:absolute;width:${CELL_PX + COLBOX_PAD_PX * 2}px;border:2px solid #202124;
-  pointer-events:none;display:none;z-index:3}
-.${P}-cbh{top:${SUM_Y_PX - COLBOX_PAD_PX}px;bottom:0;border-bottom:0;border-radius:3px 3px 0 0}
-.${P}-cbr{top:0;border-top:0;border-radius:0 0 3px 3px}
-.${P}-cbh.${P}-hov,.${P}-cbr.${P}-hov{border-color:#1a73e8;z-index:4}
+/* 欄框分成標頭與格線兩段：標頭是 sticky，畫成一整塊的話上下捲動時會跟標頭錯開。
+   樣式是細邊＋往外的光暈（使用者看比較頁定的，粗框太雜）；兩段接縫處用 clip-path 切掉光暈，
+   否則接縫會多出一道橫向的光 */
+.${P}-cbh,.${P}-cbr{position:absolute;width:${CELL_PX + COLBOX_PAD_PX * 2}px;box-sizing:border-box;
+  border:1px solid #202124;box-shadow:0 0 8px 2px rgba(32,33,36,.6);pointer-events:none;display:none;z-index:3}
+.${P}-cbh{top:${SUM_Y_PX - COLBOX_PAD_PX}px;bottom:0;border-bottom:0;border-radius:3px 3px 0 0;
+  clip-path:inset(-12px -12px 0 -12px)}
+.${P}-cbr{top:0;border-top:0;border-radius:0 0 3px 3px;clip-path:inset(0 -12px -12px -12px)}
+.${P}-cbh.${P}-hov,.${P}-cbr.${P}-hov{border-color:#1a73e8;box-shadow:0 0 8px 2px rgba(26,115,232,.6);z-index:4}
 .${P}-msg{padding:12px 16px;font-size:13px;color:#3c4043;line-height:1.7;white-space:pre-wrap}
 .${P}-msg b{color:#1a73e8}
 /* ⓘ 點開的說明：圖例與資料來源 */
@@ -1997,11 +2004,12 @@ ${field('API 授權碼',
 .${P}-note{font-size:11px;color:#80868b;border-top:1px solid #e8eaed;margin-top:8px;padding-top:6px}
 .${P}-warn{color:#c5221f}
 /* 雨勢四級與無資料：顏色是 applyPalette() 寫在根節點的 CSS 變數，換配色不用重畫格子。
-   [class] 是為了壓過 .${P}-max i、.${P}-lg i 這類 (0,1,1) 的選擇器 */
-${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-shadow:inset 0 0 0 1px var(--${P}-o${i})}`).join('\n')}
+   [class] 是為了壓過 .${P}-max i、.${P}-lg i 這類 (0,1,1) 的選擇器。
+   格子不加外框也不加光暈（使用者看比較頁定的：外框太雜、光暈會滲到只隔 1 px 的隔壁格） */
+${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-shadow:none}`).join('\n')}
 /* 預設值：applyPalette() 會在根節點寫 inline 變數覆蓋，這裡讓還沒套用時也有顏色 */
 :root{${currentPalette().fill.map((v, i) => `--${P}-f${i}:${v};--${P}-o${i}:${currentPalette().out[i]}`).join(';')}}
-[class].${P}-na{background:${RAIN_NA_COLOR} ${RAIN_NA_STRIPES};box-shadow:inset 0 0 0 1px ${RAIN_NA_OUT}}
+[class].${P}-na{background:${RAIN_NA_COLOR} ${RAIN_NA_STRIPES};box-shadow:none}
 /* 設定裡的「色帶配色」：兩個選項各附四級小色條 */
 .${PREFIX}-pals{display:flex;gap:8px}
 .${PREFIX}-palopt{flex:1 1 0;display:flex;align-items:center;gap:8px;border:1px solid #dadce0;border-radius:8px;

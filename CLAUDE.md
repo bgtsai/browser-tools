@@ -2,11 +2,12 @@
 
 每支工具各自一個資料夾，總覽見 README.md。這裡只放「進行中」工具的交接。
 
-## route-rain（RouteRain・旅途中的雨）— v1.5.0 已推送（新配色＋光暈＋掃描線），待實機驗
+## route-rain（RouteRain・旅途中的雨）— v1.5.1 已推送（新配色＋光暈＋掃描線；色帶 14 px、格子無框、欄框光暈、刻度同心圓），待實機驗
 
 ### 目前狀態（2026-11-25）
 - 腳本 v1.5.0：兩套配色 K2 紫（預設）／M 藍，〔設定〕最上面「色帶配色」切換（選了即時預覽、取消改回、儲存才寫 `ribbonPalette`；只換配色不重算路線）。格子／摘要條／圖例用 class `rr-l0～3`／`rr-na`，顏色是根節點 CSS 變數 `--rr-f0～3`／`--rr-o0～3`（`applyPalette()` 寫）；`rainOf()` 不再回傳 color，只回 level。
 - 地圖色帶 `ribbonLayers()`：光暈（feGaussianBlur 5、寬 20、第 3 級填色、不透明度 0.15／0.3／0.45／0.6 依級內插，平頭避免半透明圓頭疊出亮斑）→ 外框 10（該級外框色）→ 填色 6 → S1 掃描線（每 3px 一條、mask 在色帶內）。交界前後 36px 切 3px 小段內插顏色；無資料 #c3c7cc／外框 #9aa0a6，不內插、不發光。拿掉 Google 藍外框。
+- v1.5.1（使用者看 https://claude.ai/artifact/71puiR6Jco8MbSQL3Y3LMe ㉔～㉙、https://claude.ai/artifact/77r6DnCB8raJqgdVbprtak ㉚～㉜ 選）：色帶 14 px（填 10，因 Google 線 15 級實測約 12 px）；格子、摘要條、圖例無外框無光暈；指到／釘住欄框 1px 邊＋8px 光暈（藍／深），標頭與格線兩段用 clip-path 切掉接縫光暈；整點刻度 20px 同心圓（Google 藍內圈＋2px 白圈＋陰影、白字），15 分小點 #bdc1c6。
 - 選定經過（使用者選）：光暈逐級（第 1 級也有、最強 0.6）、S1、色帶 10 px（比較頁 https://claude.ai/artifact/5f3ideF33MQarcBSVAFEkU ㉒～㉓）、無資料 N1＋斜線。
 - v1.4.1 以前：v1.3.x 色帶一定畫 Google 選中那條（`!5i{n}`、dataKey、`routeMismatchReason`）；v1.4.x 重算不收左側面板、點格子＝釘住＋移地圖到畫面中心拉近 17 級。機制細節在知識庫 12 v3.8 第④節。
 - 測試五支：`tests/test_panel.py`、`test_ribbon.py`、`test_modes.py`、`test_focus.py`（都要 `--shots DIR 腳本`）、`test_route_pick.py`（只吃腳本）；Chromium＋Firefox 全過。v1.5.0 新增的檢查都用改壞版反證過（漸變、光暈強度、掃描線、取消改回、斜線、藍外框）。靜態檢查：acorn＋ESLint no-undef（globals 加 GM_*、unsafeWindow）。

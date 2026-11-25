@@ -57,7 +57,9 @@ def run(engine, pw):
       return { ax: [ax.top, ax.height], hour: f('.rr-hour'), q: f('.rr-q') }; })()""")
     axc = marks['ax'][0] + marks['ax'][1] / 2
     hourc = [(h[0] + h[2]/2, h[1] + h[3]/2) for h in marks['hour']]
-    check('整點圓 18px、垂直中心＝軸線中心', all(h[2] == 18 for h in marks['hour']) and all(abs(c[1]-axc) < 0.01 for c in hourc), (axc, hourc[:2]))
+    hs = pg.evaluate("(() => { const s = getComputedStyle(document.querySelector('.rr-hour')); return [s.backgroundColor, s.borderTopWidth, s.borderTopColor, s.boxShadow, s.color]; })()")
+    check('整點圓：Google 藍內圈＋2px 白圈＋陰影、白字', hs[0] == 'rgb(26, 115, 232)' and hs[1] == '2px' and hs[2] == 'rgb(255, 255, 255)' and 'rgba(60, 64, 67' in hs[3] and hs[4] == 'rgb(255, 255, 255)', hs)
+    check('整點圓 20px、垂直中心＝軸線中心', all(h[2] == 20 for h in marks['hour']) and all(abs(c[1]-axc) < 0.01 for c in hourc), (axc, hourc[:2]))
     cellc = set(round(l + 6, 2) for l in lefts)
     check('整點圓與小點的水平中心＝色塊中心', all(round(c[0], 2) in cellc for c in hourc) and all(round(q[0]+q[2]/2, 2) in cellc for q in marks['q']))
     check('刻度都落在整數像素', all(float(v).is_integer() for m in marks['hour'] + marks['q'] for v in m[:2]))
@@ -77,7 +79,7 @@ def run(engine, pw):
     # 21:30 出發：大同區 21-24 時 20% → 第 1 級；中山區 30% 陣雨 → 第 2 級（預設 K2 紫）
     check('格子顏色：大同區 20% K2 第 1 級、中山區 30% 第 2 級', bg('.rr-row:nth-child(1) .rr-c', 0) == 'rgb(236, 221, 248)' and bg('.rr-row:nth-child(3) .rr-c', 0) == 'rgb(201, 160, 235)')
     sh = pg.evaluate("getComputedStyle(document.querySelectorAll('.rr-row')[2].querySelectorAll('.rr-c')[0]).boxShadow")
-    check('格子外框＝該級外框色（inset 1px）', 'rgb(148, 75, 226)' in sh and 'inset' in sh, sh)
+    check('格子不加外框也不加光暈', sh == 'none', sh)
     check('摘要條＝那一欄最濕的顏色', bg('.rr-sum', 0) == 'rgb(201, 160, 235)')
     na = pg.evaluate("(() => { const s = getComputedStyle(document.querySelectorAll('.rr-row')[0].querySelectorAll('.rr-c')[95]); return [s.backgroundColor, s.backgroundImage]; })()")
     check('查不到預報的格子是 #c3c7cc＋斜線', na[0] == 'rgb(195, 199, 204)' and 'repeating-linear-gradient' in na[1], na)
@@ -110,6 +112,8 @@ def run(engine, pw):
     pg.mouse.move(x, y)
     hov = R('.rr-cbr.rr-hov')
     check('指到的欄出現藍框，位置＝那一欄', abs(hov[0] - (140 + 48*13 - 2)) < 0.01 and hov[2] == 16, hov)
+    fb = pg.evaluate("(() => { const s = getComputedStyle(document.querySelector('.rr-cbr.rr-hov')); return [s.borderLeftWidth, s.borderLeftColor, s.boxShadow, s.clipPath]; })()")
+    check('指到的欄框：1px 藍邊＋藍色光暈，接縫處切掉光暈', fb[0] == '1px' and fb[1] == 'rgb(26, 115, 232)' and 'rgba(26, 115, 232' in fb[2] and '8px' in fb[2] and fb[3].startswith('inset(0'), fb)
     sel = pg.text_content('.rr-sel'); mx = pg.text_content('.rr-max')
     check('標題列換成指到的那一欄', sel == '09:30 出發 → 09:44 抵達' and mx == '沿路最高 30%・雷陣雨', (sel, mx))
     tip = pg.inner_text('#rr-tip')

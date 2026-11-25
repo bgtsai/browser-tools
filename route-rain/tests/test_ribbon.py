@@ -58,11 +58,11 @@ def run(engine, pw):
       return { glow: v('g[filter] path'), body: v(':scope > path'), scan: !!s.querySelector('rect[mask][fill^="url"]'),
         blur: +(s.querySelector('feGaussianBlur') || {getAttribute: () => 0}).getAttribute('stdDeviation') }; })()""")
     order = [w for _, w, _ in L['body']]
-    check('沒有 Google 藍外框；先畫全部外框（10）再畫填色（6）', '#1967d2' not in [s for s, _, _ in L['body']] and order == sorted(order, reverse=True) and set(order) == {10, 6}, order)
-    check('光暈：模糊 5、寬 20、第 3 級填色', L['blur'] == 5 and L['glow'] and all(s == '#9d5cde' and w == 20 for s, w, _ in L['glow']), L['glow'][:3])
+    check('沒有 Google 藍外框；先畫全部外框（14）再畫填色（10）', '#1967d2' not in [s for s, _, _ in L['body']] and order == sorted(order, reverse=True) and set(order) == {14, 10}, order)
+    check('光暈：模糊 5、寬 24、第 3 級填色', L['blur'] == 5 and L['glow'] and all(s == '#9d5cde' and w == 24 for s, w, _ in L['glow']), L['glow'][:3])
     check('S1 掃描線：色帶範圍內的橫線', L['scan'])
     # 21:30 出發：大同區 20% 第 1 級、中山區／松山區 30% 第 2 級，交界漸變
-    fills = [s for s, w, _ in L['body'] if w == 6]
+    fills = [s for s, w, _ in L['body'] if w == 10]
     check('最早一欄的色帶：第 1 級→第 2 級、中間有漸變色', 'rgb(236,221,248)' in fills and 'rgb(201,160,235)' in fills and len(set(fills)) > 4, fills)
     ga = sorted(set(o for _, _, o in L['glow']))
     check('光暈強度：第 1 級 0.15、第 2 級 0.30，交界內插', ga[0] == 0.15 and ga[-1] == 0.3 and len(ga) > 3, ga)
@@ -75,11 +75,11 @@ def run(engine, pw):
     # 指到第 48 欄（次日 09:30）：中山區 30% 雷陣雨 → 第 3 級；地圖標出那個點
     cell = pg.evaluate("(() => { const e = document.querySelectorAll('.rr-row')[4].querySelectorAll('.rr-c')[48].getBoundingClientRect(); return [e.left + 6, e.top + 6]; })()")
     pg.mouse.move(*cell)
-    cols = set(p.get_attribute('stroke') for p in pg.query_selector_all('#rr-ribbon > path[stroke-width="6"]'))
+    cols = set(p.get_attribute('stroke') for p in pg.query_selector_all('#rr-ribbon > path[stroke-width="10"]'))
     check('指到第 48 欄：色帶換成那一欄（含第 3 級）', 'rgb(157,92,222)' in cols, sorted(cols))
     # 換配色：色帶重畫成 M 藍，不重算路線
     pg.evaluate("window.__rr.applyPalette('m')")
-    cols = set(p.get_attribute('stroke') for p in pg.query_selector_all('#rr-ribbon > path[stroke-width="6"]'))
+    cols = set(p.get_attribute('stroke') for p in pg.query_selector_all('#rr-ribbon > path[stroke-width="10"]'))
     shot('r2m_hover_m')
     check('換成 M 藍：色帶即時重畫', 'rgb(74,125,198)' in cols and 'rgb(157,92,222)' not in cols, sorted(cols)[:4])
     pg.evaluate("window.__rr.applyPalette('k2')")
