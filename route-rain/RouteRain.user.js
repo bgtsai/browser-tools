@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.7.2
+// @version      1.7.3
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -3243,7 +3243,9 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
                 try {
                     const s = sigOf(this, p);
                     // 每一幀都要畫一次：重算相機的幀、只貼底圖的幀、或新的 rAF 回呼開始，都算新的一幀
-                    if (s === GL_SIG_CAM) { injected = false; glr.pend = {}; rt.newFrame(); }
+                    // 相機程式一幀可能用兩次（長路線實測：圖磚一批、路線前又一次），所以不拿它當「新的一幀」重數路線相機
+                    if (s === GL_SIG_CAM) { injected = false; glr.pend = {}; if (rt.sawOverlay) rt.newFrame(); }
+                    if (GL_SIG_OVERLAYS.has(s)) rt.sawOverlay = true;
                     else if (s === GL_SIG_BLIT) { injected = false; rt.newFrame(); }
                     if (glr.newFrame) { glr.newFrame = false; injected = false; rt.newFrame(); }
                     if (GL_SIG_OVERLAYS.has(s) && !injected) {
@@ -3329,6 +3331,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         why: {},                        // 診斷：沒換到色的原因次數（頁面上 window.__rrRoute 讀得到）
         cacheScene: null,               // 最近一次路線全部換色成功時的色帶內容（靜止時 Google 貼的就是那張）
         newFrame() {
+            this.sawOverlay = false;
             if (this.routeDraws > 0) this.cacheScene = this.colorOk ? glr.scene : null;
             this.cams = 0; this.glowDone = false; this.colorOk = true; this.routeDraws = 0; this.lastIdx = 0; },
         /** 這一幀可以走取代模式嗎（shader 改寫成功、有色帶要畫、拿得到相機） */
