@@ -2,9 +2,13 @@
 
 每支工具各自一個資料夾，總覽見 README.md。這裡只放「進行中」工具的交接。
 
-## route-rain（RouteRain・旅途中的雨）— v1.5.1 已推送（新配色＋光暈＋掃描線；色帶 14 px、格子無框、欄框光暈、刻度同心圓），待實機驗
+## route-rain（RouteRain・旅途中的雨）— v1.6.0 已推送（色帶畫進 Google 的 WebGL：在地名底下、縮放同步），待實機驗；第 2 批「取代 Google 路線顏色」未做
 
 ### 目前狀態（2026-11-25）
+- **v1.6.0（第 1 批）**：`armGlHook()`（document-start）包 page 的 WebGLRenderingContext.prototype 的 useProgram／uniform3fv／uniformMatrix4fv／uniform1f，與 requestAnimationFrame。shader 長度 3457/1628＝讀相機（中心高位、低位、矩陣、倍率 S）、1111/1069＝文字；文字程式每幀第一次 useProgram 前 `glInject()` 用自己的 program＋VAO 畫 `buildRibbonMesh()` 的三角形（光暈平頭→本體延伸半個外框→標記點），畫完還原 VAO／ARRAY_BUFFER／BLEND 系列／DEPTH／STENCIL／CULL／SCISSOR／mask。`drawRibbon()` 在 `glLive()` 時只交 `glr.scene`（世界座標）並 `glRequestRedraw()`（重排記下的 Google rAF 回呼；150 ms 內沒新的一幀就先畫 SVG 頂著，下一幀注入時清掉）；否則 `drawSvgRibbon()`（舊路徑）。GL 模式不淡出。出錯 `glBreak()` 永久退回 SVG；ⓘ 顯示目前哪一種。整點刻度內圈＝配色第 4 級填色（K2 #5f249f／M #284774）。
+- 測試新增 `tests/test_gl.py`（假 WebGL 頁：shader 長度同真的；檢查注入、文字蓋在色帶上、掃描線、光暈、GL 狀態還原、rAF 要求重畫、認不出就退回；無頭 Firefox 沒有 WebGL，只測載入）。改壞版反證：還原 ARRAY_BUFFER／BLEND、掃描線、rAF 回呼、光暈強度、簽名錯都抓得到。
+- **實機待驗（v1.6.0）**：Chrome 上色帶是否在地名底下、縮放平移時同步；靜止時指到別欄，色帶會不會立刻換（靠重排 Google 的 rAF 回呼，真實頁面沒驗過；不行時會先用 SVG 頂著＝暫時蓋住地名）；Firefox 的 Tampermonkey 沙箱跨 compartment 呼叫是否正常（不行會 glBreak 退回 SVG）；地圖傾斜／旋轉時不畫（`M[1]`、`M[4]` 非 0）。
+- **第 2 批（未做）**：取代 Google 導航路線顏色——路線＝程式 3092/964 每幀第二次上傳相機後的 2 次 ANGLE drawArraysInstanced；頂點 shader 讀懂的部分見知識庫草稿（`_pending/20261125-1020_RouteRain.md` 調查 2、3）。
 - 腳本 v1.5.0：兩套配色 K2 紫（預設）／M 藍，〔設定〕最上面「色帶配色」切換（選了即時預覽、取消改回、儲存才寫 `ribbonPalette`；只換配色不重算路線）。格子／摘要條／圖例用 class `rr-l0～3`／`rr-na`，顏色是根節點 CSS 變數 `--rr-f0～3`／`--rr-o0～3`（`applyPalette()` 寫）；`rainOf()` 不再回傳 color，只回 level。
 - 地圖色帶 `ribbonLayers()`：光暈（feGaussianBlur 5、寬 20、第 3 級填色、不透明度 0.15／0.3／0.45／0.6 依級內插，平頭避免半透明圓頭疊出亮斑）→ 外框 10（該級外框色）→ 填色 6 → S1 掃描線（每 3px 一條、mask 在色帶內）。交界前後 36px 切 3px 小段內插顏色；無資料 #c3c7cc／外框 #9aa0a6，不內插、不發光。拿掉 Google 藍外框。
 - v1.5.1（使用者看 https://claude.ai/artifact/71puiR6Jco8MbSQL3Y3LMe ㉔～㉙、https://claude.ai/artifact/77r6DnCB8raJqgdVbprtak ㉚～㉜ 選）：色帶 14 px（填 10，因 Google 線 15 級實測約 12 px）；格子、摘要條、圖例無外框無光暈；指到／釘住欄框 1px 邊＋8px 光暈（藍／深），標頭與格線兩段用 clip-path 切掉接縫光暈；整點刻度 20px 同心圓（Google 藍內圈＋2px 白圈＋陰影、白字），15 分小點 #bdc1c6。

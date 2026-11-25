@@ -58,7 +58,7 @@ def run(engine, pw):
     axc = marks['ax'][0] + marks['ax'][1] / 2
     hourc = [(h[0] + h[2]/2, h[1] + h[3]/2) for h in marks['hour']]
     hs = pg.evaluate("(() => { const s = getComputedStyle(document.querySelector('.rr-hour')); return [s.backgroundColor, s.borderTopWidth, s.borderTopColor, s.boxShadow, s.color]; })()")
-    check('整點圓：Google 藍內圈＋2px 白圈＋陰影、白字', hs[0] == 'rgb(26, 115, 232)' and hs[1] == '2px' and hs[2] == 'rgb(255, 255, 255)' and 'rgba(60, 64, 67' in hs[3] and hs[4] == 'rgb(255, 255, 255)', hs)
+    check('整點圓：配色最深級內圈（K2 #5f249f）＋2px 白圈＋陰影、白字', hs[0] == 'rgb(95, 36, 159)' and hs[1] == '2px' and hs[2] == 'rgb(255, 255, 255)' and 'rgba(60, 64, 67' in hs[3] and hs[4] == 'rgb(255, 255, 255)', hs)
     check('整點圓 20px、垂直中心＝軸線中心', all(h[2] == 20 for h in marks['hour']) and all(abs(c[1]-axc) < 0.01 for c in hourc), (axc, hourc[:2]))
     cellc = set(round(l + 6, 2) for l in lefts)
     check('整點圓與小點的水平中心＝色塊中心', all(round(c[0], 2) in cellc for c in hourc) and all(round(q[0]+q[2]/2, 2) in cellc for q in marks['q']))
@@ -89,6 +89,8 @@ def run(engine, pw):
     pg.evaluate("window.__rrFirstCell = document.querySelector('.rr-row .rr-c')")
     pg.evaluate("window.__rr.applyPalette('m')")
     same = pg.evaluate("window.__rrFirstCell === document.querySelector('.rr-row .rr-c')")
+    hm = pg.evaluate("getComputedStyle(document.querySelector('.rr-hour')).backgroundColor")
+    check('換成 M 藍：整點圓內圈跟著換（#284774）', hm == 'rgb(40, 71, 116)', hm)
     check('換成 M 藍：格子即時換色、格線沒重畫', bg('.rr-row:nth-child(3) .rr-c', 0) == 'rgb(149, 177, 235)' and bg('.rr-lg i', 0) == 'rgb(219, 226, 248)' and same)
     # 設定：選了即時預覽，取消改回原本的；儲存才記住
     pg.evaluate("window.__rr.openSettings()")

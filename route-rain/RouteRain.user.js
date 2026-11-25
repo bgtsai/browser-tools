@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.5.1
+// @version      1.6.0
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -1965,7 +1965,7 @@ ${field('API 授權碼',
   box-shadow:inset 0 0 0 1px rgba(0,0,0,.12)}
 .${P}-axis{position:absolute;top:${AXIS_Y_PX}px;height:2px;background:#dadce0}
 .${P}-hour{position:absolute;top:${AXIS_Y_PX + 1 - HOUR_DOT_PX / 2}px;width:${HOUR_DOT_PX}px;height:${HOUR_DOT_PX}px;
-  box-sizing:border-box;border-radius:50%;background:#1a73e8;border:${HOUR_RING_PX}px solid #fff;
+  box-sizing:border-box;border-radius:50%;background:var(--${P}-f3);border:${HOUR_RING_PX}px solid #fff;
   box-shadow:0 1px 3px rgba(60,64,67,.4),0 1px 1px rgba(60,64,67,.15);font-size:11px;color:#fff;letter-spacing:-.3px;
   display:flex;align-items:center;justify-content:center;font-variant-numeric:tabular-nums}
 .${P}-q{position:absolute;top:${AXIS_Y_PX + 1 - QUARTER_DOT_PX / 2}px;width:${QUARTER_DOT_PX}px;
@@ -2988,6 +2988,8 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             `交通方式 ${meta.mode.mode}（判斷依據：${meta.mode.via}）`,
             `路線比對：${meta.matchNote}`,
             `時間依據：${meta.timeBasis || '不含路況'}`,
+            glLive() ? '地圖色帶：畫在地圖裡（在地名、圖示底下，縮放時同步）'
+                : `地圖色帶：疊在地圖上（${glr.broken || '還沒接上地圖的繪製'}）`,
         ];
         const warnings = [];
         // 選出來的路線跟 Google 清單上選中那列對不上：色帶不畫（drawRibbon 看 state.routeMismatch）
@@ -3154,6 +3156,350 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
      * 路線時間小卡等 DOM——插在畫布後面，地名、側邊面板、縮放鈕、圖層縮圖自然都疊在色帶上面。
      * 掛在 body 用 fixed 的話，色帶會蓋過 Google 的側邊面板與所有控制項。拖動地圖後節點仍在。
      */
+    // ── 畫進 Google 地圖自己的 WebGL 畫面（v1.6.0）──
+    // 疊在畫布外面的 SVG 一定蓋在整張地圖（含地名、圖示）上面，拖動縮放時也只能先淡出再重畫。
+    // 實測（知識庫 12）：整張地圖只有一張 WebGL1 畫布，每一幀依序畫 底圖與路線 → 文字 → 圖示 → 文字。
+    // 在「文字那組繪圖程式每一幀第一次被 useProgram」之前插進我們自己的繪製，色帶就剛好在路線之上、
+    // 文字與圖示之下，而且 Google 每畫一幀我們就跟著畫一幀＝縮放平移即時同步。
+    // 辨認繪圖程式靠 shader 原始碼長度（壓縮過的程式碼裡沒有穩定名稱；useProgram 的先後順序每次開頁都不同）。
+    // 認不出來、讀不到視野、出錯 → 自動退回 SVG 疊加，畫面不會壞。
+    const GL_SIG_CAM = '3457/1628';    // 每幀最先上傳相機參數的程式（畫離屏緩衝，不是可見底圖）
+    const GL_SIG_TEXT = '1111/1069';   // 地名文字
+    const GL_GLOW_HALF_PX = 19;        // 光暈往外擴到離中心這麼遠（SVG 版：寬 24 的線再模糊 5）
+    const GL_GLOW_FADE_FROM_PX = 4;    // 光暈從離中心這麼遠開始淡出
+    const GL_SCAN_DARKEN = RIBBON_SCAN_ALPHA;
+    const GL_STALE_MS = 1000;          // 這麼久沒有一幀成功注入，就當作 WebGL 模式失效
+    const GL_REDRAW_WAIT_MS = 150;     // 要求 Google 重畫後等這麼久，沒有新的一幀就先用 SVG 頂著
+
+    const glr = {
+        armed: false, broken: '',       // broken：出錯原因（有值就不再注入）
+        sig: new WeakMap(),             // program → 'vs長度/fs長度'
+        cam: null, pend: null,          // 最近一幀的相機參數
+        frame: 0, injectedAt: 0,        // 成功注入的幀數、時間
+        scene: null,                    // drawRibbon 交來的世界座標色帶
+        prog: null, vao: null, buf: null, loc: null, gl: null,
+        tick: null, nativeRaf: null,    // 會畫地圖的那個 rAF 回呼，拿來要求重畫
+        svgHold: false,                 // 靜止時內容變了、Google 沒重畫 → 暫時用 SVG 頂著
+    };
+
+    /** WebGL 模式目前能用嗎（最近 GL_STALE_MS 內注入成功過，或至少拿到過相機且沒壞） */
+    function glLive() {
+        return !glr.broken && glr.frame > 0 && !!glr.cam;
+    }
+
+    function armGlHook() {
+        const w = pageWindow();
+        const GL = w.WebGLRenderingContext;
+        if (!GL || !GL.prototype || glr.armed) return;
+        glr.armed = true;
+        const P = GL.prototype;
+        const orig = {};
+        for (const n of ['useProgram', 'uniform3fv', 'uniformMatrix4fv', 'uniform1f']) orig[n] = P[n];
+        glr.orig = orig;
+        let cur = null, injected = false;
+        const sigOf = (gl, p) => {
+            if (!p) return '';
+            let s = glr.sig.get(p);
+            if (s === undefined) {
+                try {
+                    s = gl.getAttachedShaders(p)
+                        .map(sh => (gl.getShaderSource(sh) || '').length).join('/');
+                } catch (e) { s = '?'; }
+                glr.sig.set(p, s);
+            }
+            return s;
+        };
+        P.useProgram = function (p) {
+            if (p !== glr.prog && !glr.broken) {
+                try {
+                    const s = sigOf(this, p);
+                    if (s === GL_SIG_CAM) { injected = false; glr.pend = {}; }
+                    else if (s === GL_SIG_TEXT && !injected) {
+                        injected = true;
+                        try { glInject(this); } catch (err) { glBreak('注入：' + err.message); }
+                    }
+                } catch (err) { glBreak('useProgram：' + err.message); }
+            }
+            cur = p;
+            return orig.useProgram.call(this, p);
+        };
+        // 相機：圖磚程式每幀依序上傳 中心高位(3fv) → 中心低位(3fv) → 投影矩陣(Matrix4fv) → 倍率(1f)
+        P.uniform3fv = function (loc, v) {
+            const p = glr.pend;
+            if (p && cur && glr.sig.get(cur) === GL_SIG_CAM && !p.M) {
+                if (!p.c) p.c = [v[0], v[1]]; else if (!p.v) p.v = [v[0], v[1]];
+            }
+            return orig.uniform3fv.apply(this, arguments);
+        };
+        P.uniformMatrix4fv = function (loc, tr, m) {
+            const p = glr.pend;
+            if (p && cur && glr.sig.get(cur) === GL_SIG_CAM && !p.M && p.v) p.M = Float32Array.from(m);
+            return orig.uniformMatrix4fv.apply(this, arguments);
+        };
+        P.uniform1f = function (loc, x) {
+            const p = glr.pend;
+            if (p && cur && glr.sig.get(cur) === GL_SIG_CAM && p.M && p.S === undefined) {
+                p.S = x;
+                glr.cam = { cx: p.c[0] + p.v[0], cy: p.c[1] + p.v[1], M: p.M, S: x };
+            }
+            return orig.uniform1f.apply(this, arguments);
+        };
+        // 要求重畫：記下「執行時有畫地圖」的那個 rAF 回呼，之後再排一次。
+        // 腳本是 document-start，Google 拿到的就是包過的這個 rAF。
+        const raf = w.requestAnimationFrame;
+        if (typeof raf === 'function') {
+            glr.nativeRaf = raf.bind(w);
+            w.requestAnimationFrame = function (cb) {
+                return glr.nativeRaf(function (t) {
+                    const before = glr.frame;
+                    const r = cb(t);
+                    if (glr.frame !== before) glr.tick = cb;
+                    return r;
+                });
+            };
+        }
+        log('WebGL 注入已架設');
+    }
+
+    function glBreak(why) {
+        if (glr.broken) return;
+        glr.broken = why;
+        warn('WebGL 模式停用，改回 SVG 疊加：' + why);
+        setTimeout(() => { try { drawRibbon(); } catch (e) { /* 面板可能已關 */ } }, 0);
+    }
+
+    function glEnsure(gl) {
+        if (glr.prog && glr.gl === gl) return true;
+        const vaoExt = gl.getExtension('OES_vertex_array_object');
+        if (!vaoExt) { glBreak('沒有 OES_vertex_array_object'); return false; }
+        const sh = (type, src) => {
+            const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+            if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+            return s;
+        };
+        const prog = gl.createProgram();
+        gl.attachShader(prog, sh(gl.VERTEX_SHADER, GL_VS));
+        gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, GL_FS));
+        gl.linkProgram(prog);
+        if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+        glr.sig.set(prog, 'mine');
+        const loc = { M: gl.getUniformLocation(prog, 'M'), k: gl.getUniformLocation(prog, 'k'),
+            dpr: gl.getUniformLocation(prog, 'dpr') };
+        for (const a of ['aP', 'aQ', 'aK', 'aF', 'aO', 'aG']) loc[a] = gl.getAttribLocation(prog, a);
+        const buf = gl.createBuffer();
+        const vao = vaoExt.createVertexArrayOES();
+        const savedVao = gl.getParameter(vaoExt.VERTEX_ARRAY_BINDING_OES);
+        const savedBuf = gl.getParameter(gl.ARRAY_BUFFER_BINDING);
+        vaoExt.bindVertexArrayOES(vao);
+        gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+        const F = 4, stride = GL_VERT_FLOATS * F;
+        const attr = (l, n, off) => { gl.enableVertexAttribArray(l); gl.vertexAttribPointer(l, n, gl.FLOAT, false, stride, off * F); };
+        attr(loc.aP, 2, 0); attr(loc.aQ, 2, 2); attr(loc.aK, 1, 4); attr(loc.aF, 3, 5); attr(loc.aO, 3, 8); attr(loc.aG, 1, 11);
+        vaoExt.bindVertexArrayOES(savedVao);
+        gl.bindBuffer(gl.ARRAY_BUFFER, savedBuf);
+        Object.assign(glr, { gl, prog, buf, vao, vaoExt, loc });
+        return true;
+    }
+
+    /** 在 Google 畫文字之前畫我們的色帶；所有改過的 GL 狀態都還原 */
+    function glInject(gl) {
+        const cam = glr.cam;
+        glr.frame++;
+        glr.injectedAt = performance.now();
+        if (glr.svgHold) { glr.svgHold = false; setTimeout(clearSvgRibbon, 0); }
+        const sc = glr.scene;
+        if (!cam || !sc || !sc.runs.length) return;
+        if (!glEnsure(gl)) return;
+        const canvas = gl.canvas;
+        const cssW = canvas.clientWidth || canvas.width;
+        // 相機單位／CSS px（不傾斜時）：clip_x = M0·X / M15，畫面半寬 = cssW/2
+        const k = cam.M[15] / (cssW / 2) / cam.M[0];
+        if (!(k > 0) || Math.abs(cam.M[4]) > 1e-6 || Math.abs(cam.M[1]) > 1e-6) return;   // 有旋轉或傾斜：先不畫
+        const toPx = ([wx, wy]) => ({ x: (wx - cam.cx) * cam.S / k, y: (wy - cam.cy) * cam.S / k });
+        const runs = sc.runs.map(r => ({ level: r.level, pts: r.pts.map(toPx) }));
+        const verts = buildRibbonMesh(runs, sc.pal, sc.marker && toPx(sc.marker));
+        if (!verts.length) return;
+        const { prog, buf, vao, vaoExt, loc } = glr;
+        const st = {
+            vao: gl.getParameter(vaoExt.VERTEX_ARRAY_BINDING_OES),
+            ab: gl.getParameter(gl.ARRAY_BUFFER_BINDING),
+            blend: gl.isEnabled(gl.BLEND), depth: gl.isEnabled(gl.DEPTH_TEST),
+            stencil: gl.isEnabled(gl.STENCIL_TEST), cull: gl.isEnabled(gl.CULL_FACE), scissor: gl.isEnabled(gl.SCISSOR_TEST),
+            bs: [gl.getParameter(gl.BLEND_SRC_RGB), gl.getParameter(gl.BLEND_DST_RGB),
+                gl.getParameter(gl.BLEND_SRC_ALPHA), gl.getParameter(gl.BLEND_DST_ALPHA)],
+            be: [gl.getParameter(gl.BLEND_EQUATION_RGB), gl.getParameter(gl.BLEND_EQUATION_ALPHA)],
+            dm: gl.getParameter(gl.DEPTH_WRITEMASK), cm: gl.getParameter(gl.COLOR_WRITEMASK),
+        };
+        try {
+            glr.orig.useProgram.call(gl, prog);
+            vaoExt.bindVertexArrayOES(vao);
+            gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+            gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STREAM_DRAW);
+            glr.orig.uniformMatrix4fv.call(gl, loc.M, false, cam.M);
+            glr.orig.uniform1f.call(gl, loc.k, k);
+            glr.orig.uniform1f.call(gl, loc.dpr, canvas.width / cssW);
+            gl.disable(gl.DEPTH_TEST); gl.disable(gl.STENCIL_TEST); gl.disable(gl.CULL_FACE); gl.disable(gl.SCISSOR_TEST);
+            gl.enable(gl.BLEND);
+            gl.blendEquation(gl.FUNC_ADD);
+            gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);     // 畫布是 premultipliedAlpha
+            gl.depthMask(false); gl.colorMask(true, true, true, true);
+            gl.drawArrays(gl.TRIANGLES, 0, verts.length / GL_VERT_FLOATS);
+        } finally {
+            vaoExt.bindVertexArrayOES(st.vao);
+            gl.bindBuffer(gl.ARRAY_BUFFER, st.ab);
+            (st.blend ? gl.enable : gl.disable).call(gl, gl.BLEND);
+            (st.depth ? gl.enable : gl.disable).call(gl, gl.DEPTH_TEST);
+            (st.stencil ? gl.enable : gl.disable).call(gl, gl.STENCIL_TEST);
+            (st.cull ? gl.enable : gl.disable).call(gl, gl.CULL_FACE);
+            (st.scissor ? gl.enable : gl.disable).call(gl, gl.SCISSOR_TEST);
+            gl.blendFuncSeparate(st.bs[0], st.bs[1], st.bs[2], st.bs[3]);
+            gl.blendEquationSeparate(st.be[0], st.be[1]);
+            gl.depthMask(st.dm); gl.colorMask(st.cm[0], st.cm[1], st.cm[2], st.cm[3]);
+            // CURRENT_PROGRAM 由接下來 Google 自己的 useProgram 設回去（注入就發生在它之前）
+        }
+    }
+
+    // 每個頂點：aP 位置(px，相對畫面中心) aQ 局部座標(px：x＝離中心線、y＝標記用) aK 種類 aF 填色 aO 外框色 aG 光暈強度
+    const GL_VERT_FLOATS = 12;
+    const GL_VS = `attribute vec2 aP,aQ;attribute float aK,aG;attribute vec3 aF,aO;
+uniform mat4 M;uniform float k;varying vec2 vQ;varying float vK,vG;varying vec3 vF,vO;
+void main(){vQ=aQ;vK=aK;vG=aG;vF=aF;vO=aO;gl_Position=M*vec4(aP*k,0.0,1.0);}`;
+    const GL_FS = `precision mediump float;varying vec2 vQ;varying float vK,vG;varying vec3 vF,vO;uniform float dpr;
+void main(){
+ if(vK<0.5){float d=abs(vQ.x);float a=vG*(1.0-smoothstep(${GL_GLOW_FADE_FROM_PX.toFixed(1)},${GL_GLOW_HALF_PX.toFixed(1)},d));
+  if(a<=0.002)discard;gl_FragColor=vec4(vF*a,a);return;}
+ if(vK<1.5){float d=abs(vQ.x);vec3 c;if(d<=${(RIBBON_W_PX / 2).toFixed(1)})c=vF;else if(d<=${(RIBBON_FRAME_W_PX / 2).toFixed(1)})c=vO;else discard;
+  if(mod(floor(gl_FragCoord.y/dpr),${RIBBON_SCAN_PITCH_PX.toFixed(1)})<1.0)c*=${(1 - GL_SCAN_DARKEN).toFixed(3)};
+  gl_FragColor=vec4(c,1.0);return;}
+ float r=length(vQ);vec4 c;
+ if(r<=4.0)c=vec4(0.125,0.129,0.141,1.0);else if(r<=${(MARK_R_PX - 1.5).toFixed(1)})c=vec4(0.85,0.85,0.85,0.85);
+ else if(r<=${(MARK_R_PX + 1.5).toFixed(1)})c=vec4(0.125,0.129,0.141,1.0);else discard;
+ gl_FragColor=c;}`;
+
+    const rgb01 = h => hexRgb(h).map(v => v / 255);
+    const mix01 = (a, b, t) => a.map((v, i) => v + (b[i] - v) * t);
+    const colAt = (cols, x) => {
+        const i = Math.min(cols.length - 2, Math.floor(x));
+        return mix01(rgb01(cols[i]), rgb01(cols[i + 1]), Math.min(1, Math.max(0, x - i)));
+    };
+
+    /**
+     * 色帶的三角形（純函式，可單獨測）。runs：[{pts:[{x,y}], level:0～3｜null}]，px、相對畫面中心。
+     * 先光暈（平頭，免得半透明疊出亮斑）、再本體（頭尾各延伸半個外框寬，補轉角的缺口）、最後標記點。
+     * 交界前後 RIBBON_BLEND_PX/2 內切 RIBBON_PIECE_PX 小段內插顏色，規則同 SVG 版 ribbonLayers()。
+     */
+    function buildRibbonMesh(runs, pal, marker) {
+        const pts = [], lv = [], bounds = [];
+        let s = 0;
+        runs.forEach((r, ri) => {
+            if (ri > 0 && pts.length && runs[ri - 1].level !== r.level) bounds.push({ s, from: runs[ri - 1].level, to: r.level });
+            r.pts.forEach((p, k) => {
+                if (ri > 0 && k === 0 && pts.length) return;
+                if (pts.length) s += Math.hypot(p.x - pts[pts.length - 1].x, p.y - pts[pts.length - 1].y);
+                pts.push({ x: p.x, y: p.y, s }); lv.push(r.level);
+            });
+        });
+        const half = RIBBON_BLEND_PX / 2;
+        const levelAt = (d, own) => {
+            for (const b of bounds) {
+                if (b.from == null || b.to == null) continue;
+                if (Math.abs(d - b.s) < half) return b.from + (b.to - b.from) * (d - (b.s - half)) / RIBBON_BLEND_PX;
+            }
+            return own;
+        };
+        const pieces = [];
+        for (let i = 1; i < pts.length; i++) {
+            const p0 = pts[i - 1], p1 = pts[i], len = p1.s - p0.s;
+            if (len <= 0) continue;
+            const own = lv[i];
+            const near = bounds.some(b => b.from != null && b.to != null && p0.s < b.s + half && p1.s > b.s - half);
+            const n = near ? Math.max(1, Math.ceil(len / RIBBON_PIECE_PX)) : 1;
+            for (let k = 0; k < n; k++) {
+                const t0 = k / n, t1 = (k + 1) / n;
+                pieces.push({
+                    a: { x: p0.x + (p1.x - p0.x) * t0, y: p0.y + (p1.y - p0.y) * t0 },
+                    b: { x: p0.x + (p1.x - p0.x) * t1, y: p0.y + (p1.y - p0.y) * t1 },
+                    x: own == null ? null : levelAt(p0.s + len * (t0 + t1) / 2, own),
+                });
+            }
+        }
+        const out = [];
+        const glowCol = rgb01(pal.fill[2]);
+        const naF = rgb01(RAIN_NA_COLOR), naO = rgb01(RAIN_NA_OUT);
+        const alphaAt = x => {
+            const i = Math.min(2, Math.floor(x));
+            return RIBBON_GLOW_ALPHA[i] + (RIBBON_GLOW_ALPHA[i + 1] - RIBBON_GLOW_ALPHA[i]) * Math.min(1, x - i);
+        };
+        const v = (x, y, qx, qy, kind, f, o, g) => out.push(x, y, qx, qy, kind, f[0], f[1], f[2], o[0], o[1], o[2], g);
+        const quad = (pc, hw, ext, kind, f, o, g) => {
+            const dx = pc.b.x - pc.a.x, dy = pc.b.y - pc.a.y, L = Math.hypot(dx, dy);
+            if (!L) return;
+            const ux = dx / L, uy = dy / L, nx = -uy * hw, ny = ux * hw;
+            const ax = pc.a.x - ux * ext, ay = pc.a.y - uy * ext, bx = pc.b.x + ux * ext, by = pc.b.y + uy * ext;
+            v(ax + nx, ay + ny, hw, 0, kind, f, o, g); v(ax - nx, ay - ny, -hw, 0, kind, f, o, g); v(bx + nx, by + ny, hw, 0, kind, f, o, g);
+            v(bx + nx, by + ny, hw, 0, kind, f, o, g); v(ax - nx, ay - ny, -hw, 0, kind, f, o, g); v(bx - nx, by - ny, -hw, 0, kind, f, o, g);
+        };
+        for (const pc of pieces) {
+            if (pc.x == null) continue;
+            quad(pc, GL_GLOW_HALF_PX, 0, 0, glowCol, glowCol, alphaAt(pc.x));
+        }
+        const oh = RIBBON_FRAME_W_PX / 2;
+        for (const pc of pieces) {
+            const na = pc.x == null;
+            quad(pc, oh, oh, 1, na ? naF : colAt(pal.fill, pc.x), na ? naO : colAt(pal.out, pc.x), 1);
+        }
+        if (marker) {
+            const R = MARK_R_PX + 2, z = [0, 0, 0];
+            const c = (qx, qy) => v(marker.x + qx, marker.y + qy, qx, qy, 2, z, z, 1);
+            c(-R, -R); c(R, -R); c(R, R); c(-R, -R); c(R, R); c(-R, R);
+        }
+        return new Float32Array(out);
+    }
+
+    /** 要 Google 重畫一幀（色帶內容變了但地圖沒動時）；等不到就先用 SVG 頂著 */
+    function glRequestRedraw() {
+        const before = glr.frame;
+        if (glr.tick && glr.nativeRaf) glr.nativeRaf(glr.tick);
+        setTimeout(() => {
+            if (glr.frame !== before || !state.active) return;
+            glr.svgHold = true;
+            drawSvgRibbon();
+        }, GL_REDRAW_WAIT_MS);
+    }
+
+    function clearSvgRibbon() {
+        if (state.ribbon) state.ribbon.el.innerHTML = '';
+    }
+
+    /** drawRibbon 在 WebGL 模式下：把要畫的東西換成世界座標交給注入那邊 */
+    function glSetScene(view) {
+        const toW = (lat, lon) => {
+            const s = Math.sin(lat * Math.PI / 180);
+            return [(lon + 180) / 360, 0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)];
+        };
+        const ci = shownColumn(view);
+        const tl = view.timeline;
+        const runs = [];
+        let cur = null, last = null;
+        for (let i = 0; i < tl.length; i++) {
+            const node = view.pointNode[i];
+            const p = toW(tl[i].lat, tl[i].lon);
+            if (!cur || cur.node !== node) {
+                const c = view.cells[node][ci];
+                cur = { node, level: c ? c.level : null, pts: last ? [last] : [] };
+                runs.push(cur);
+            }
+            cur.pts.push(p);
+            last = p;
+        }
+        let marker = null;
+        if (view.hoverRow != null && view.hoverCol != null) {
+            const n = view.nodes[view.hoverRow];
+            marker = toW(n.lat, n.lon);
+        }
+        glr.scene = { runs, pal: currentPalette(), marker };
+    }
+
     function ensureRibbon() {
         const canvas = findMapCanvas();
         const rb = state.ribbon;
@@ -3172,6 +3518,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
     }
 
     function removeRibbon() {
+        if (glr.scene) { glr.scene = null; glr.svgHold = false; if (glr.tick && glr.nativeRaf) glr.nativeRaf(glr.tick); }
         if (!state.ribbon) return;
         clearTimeout(state.ribbon.pollTimer);
         state.ribbon.el.remove();
@@ -3314,7 +3661,24 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
     }
 
     /** 照目前顯示的那一欄重畫色帶；指到某格時另外標出那個點 */
+    /**
+     * 重畫色帶：WebGL 模式就把資料交給注入那邊並要求 Google 重畫一幀；否則畫 SVG 疊加。
+     */
     function drawRibbon() {
+        const view = state.view;
+        const ok = state.active && view && view.timeline && view.timeline.length &&
+            !state.routeMismatch && mapShowsRoute();
+        if (glLive()) {
+            glr.scene = null;
+            if (ok) glSetScene(view);
+            if (!glr.svgHold) clearSvgRibbon();
+            glRequestRedraw();
+            return;
+        }
+        drawSvgRibbon();
+    }
+
+    function drawSvgRibbon() {
         const view = state.view;
         if (!state.active || !view || !view.timeline || !view.timeline.length) {
             if (state.ribbon) state.ribbon.el.innerHTML = '';
@@ -3363,6 +3727,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
     function noteMapActivity(pressed) {
         const rb = state.ribbon;
         if (!rb) return;
+        if (glLive()) return;                      // 畫在地圖裡：每一幀都跟著畫，不用淡出
         if (pressed) rb.pressed = true;
         rb.lastActivity = Date.now();
         if (!rb.faded) { rb.faded = true; rb.el.style.opacity = '0'; }
@@ -4033,6 +4398,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
     // 攔截器必須最先架好——實測「直接開啟已規劃好的網址」時，
     // directions 請求在頁面載入的最初期（0.00s）就發出，晚一步就錯過。
     armInterceptors();
+    armGlHook();
 
     // UI 則要等 DOM 有東西可以掛才啟動
     if (document.readyState === 'loading') {
