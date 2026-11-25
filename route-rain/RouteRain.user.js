@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.8.0
+// @version      1.8.1
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -3472,7 +3472,10 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         return 'done';
     }
 
-    const RT_NEAR = 1.5e-6;            // 線段中點離我們的路線這麼近（世界單位，約 60 m）才算在路線上
+    // 我們的路線折線是取樣點連起來的（點距可達幾百公尺），彎路上直線抄捷徑，會離 Google 的線一兩百公尺
+    // （v1.8.0 實機：彎的那幾批被判成「不是路線」、留著 Google 藍色）→ 放寬到約 200 m，改成抽樣裡 75% 貼著就算
+    const RT_NEAR = 5e-6;              // 世界單位，約 200 m
+    const RT_NEAR_SHARE = 0.75;
     const RT_SAMPLES = 12;             // 每段資料抽幾個線段來比
 
     /** 這批線段是不是我們的路線：均勻抽 RT_SAMPLES 段，中點全部貼著路線折線才算（純函式，可單獨測） */
@@ -3486,6 +3489,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         if (pts.length < 2 || n < 1) return false;
         const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
         const f = k[3] / 16, m = Math.min(n, RT_SAMPLES), T2 = RT_NEAR * RT_NEAR;
+        let hit = 0;
         for (let s = 0; s < m; s++) {
             const i = Math.floor((s + 0.5) * n / m), b = i * 20;
             const x = k[0] + (dv.getInt16(b, true) + dv.getInt16(b + 4, true)) / 2 * f;
@@ -3497,9 +3501,9 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
                 const ex = a[0] + dx * t - x, ey = a[1] + dy * t - y;
                 if (ex * ex + ey * ey <= T2) near = true;
             }
-            if (!near) return false;
+            if (near) hit++;
         }
-        return true;
+        return hit >= m * RT_NEAR_SHARE;
     }
 
     /**
