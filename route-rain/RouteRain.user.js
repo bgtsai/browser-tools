@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.9.4
+// @version      1.10.0
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -3319,12 +3319,15 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
     //   線段一段一段拼成，接頭會重疊；光暈半透明，重疊處會變深 → 用模板緩衝的一個位元，每個像素只畫一次。
     // 光暈形狀＝Google 的線（含轉角、接頭），不會像我們自己拉的帶子在急彎戳出尖刺（v1.6.x～1.8.x 的蜈蚣腳）。
     // 每段線段的端點：攔 Google 上傳線段資料的 bufferSubData（每筆 20 bytes，int16×4＝起訖點，世界座標＝k.xy＋D·k.w/16）。
-    // 哪幾批是導航路線：看資料是否貼著我們的路線（onRoute），不靠 Google 一幀分幾批畫。
+    // 哪些線段是導航路線：每批依線段樣式（w.xy）分組，每組看是否貼著我們的路線、是不是一條連續的線（routeMask）；
+    // 同一批裡的替代路線、街道照 Google 原色（每段級數 RT_LV_SKIP）。
     // 任何一步拿不到 → 那一幀照舊在上層畫整條自己的色帶，不會變成錯的顏色。
     const RT_ANCHOR = 's=texture2D(e,(G?S:R)+T*Q);';
-    const RT_PATCH = 'float rl=clamp(rrL,0.,4.);int i0=int(floor(rl));int i1=int(min(floor(rl)+1.,4.));float rt=fract(rl);' +
-        'if(rrOn>1.5){s=vec4(rrGC,mix(rrGA[i0],rrGA[i1],rt));}' +
-        'else if(rrOn>.5){s.rgb=G?mix(rrO[i0],rrO[i1],rt):mix(rrF[i0],rrF[i1],rt);}';
+    // rrL＞4.5（RT_LV_SKIP）＝同一批裡不是我們路線的線段（替代路線、街道）：本體照 Google 原色，光暈那趟 s＝0（頂點 shader 後面看 s.a＝0 就收成一點）
+    const RT_PATCH = 'float rl=clamp(rrL,0.,4.);int i0=int(floor(rl));int i1=int(min(floor(rl)+1.,4.));float rt=fract(rl);bool rk=rrL>4.5;' +
+        'if(rrOn>1.5){s=rk?vec4(0.):vec4(rrGC,mix(rrGA[i0],rrGA[i1],rt));}' +
+        'else if(rrOn>.5&&!rk){s.rgb=G?mix(rrO[i0],rrO[i1],rt):mix(rrF[i0],rrF[i1],rt);}';
+    const RT_LV_SKIP = 5;
     const RT_W_ANCHOR = 'Z=V*.5;';      // X＝線寬、Y＝半寬（之後用來撐開四邊形、算覆蓋率）
     const RT_W_PATCH = 'if(rrOn>1.5){X*=rrGS;Y=X*.5;}';
     const RT_VS_DECL = 'attribute float rrL;uniform float rrOn,rrGS;uniform vec3 rrF[5],rrO[5],rrGC;uniform float rrGA[5];void main(){';
@@ -3339,7 +3342,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         curSig: '', glowDone: false, colorOk: true, routeDraws: 0, broken: '', glowBroken: '',
         subs: new Map(),                // 上傳的 offset → { bytes, ver }
         slices: new Map(),              // 繪製的 offset → 找到的那一段（快取）
-        cls: new Map(),                 // offset → { ver, geo, k, isRoute }
+        cls: new Map(),                 // offset → { ver, geo, k, mask }（mask：每段線段是不是我們的路線，null＝整批都不是）
         ver: 0, bufs: new Map(), locs: new WeakMap(), lastIdx: 0,
         batches: new Map(),             // 最近看到的導航路線批次 offset → { n, k, frame }（下一幀先畫它們的光暈）
         frameNo: 0,
@@ -3505,12 +3508,12 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         let c = rt.cls.get(off);
         if (!c || c.ver !== sub.ver || c.geo !== geo) {
             const k = (c && c.ver === sub.ver) ? c.k : Array.from(gl.getUniform(prog, L.k));
-            c = { ver: sub.ver, geo, k, isRoute: onRoute(sub.bytes, n, k, geo) };
+            c = { ver: sub.ver, geo, k, mask: routeMask(sub.bytes, n, k, geo) };
             rt.cls.set(off, c);
         }
-        if (!c.isRoute) { rt.count('notRoute'); return 'skip'; }
-        const e = routeLevelBuf(gl, off, sub, n, c.k, sc, geo);
-        rt.batches.set(off, { n, k: c.k, frame: rt.frameNo, buf: gl.getVertexAttrib(L.v, gl.VERTEX_ATTRIB_ARRAY_BUFFER_BINDING) });
+        if (!c.mask) { rt.count('notRoute'); return 'skip'; }
+        const e = routeLevelBuf(gl, off, sub, n, c.k, sc, geo, c.mask);
+        rt.batches.set(off, { n, k: c.k, mask: c.mask, frame: rt.frameNo, buf: gl.getVertexAttrib(L.v, gl.VERTEX_ATTRIB_ARRAY_BUFFER_BINDING) });
         routeUniforms(gl, L, sc.pal);
         if (!rt.glowDone) {
             rt.glowDone = true;
@@ -3543,17 +3546,17 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
     }
 
     /** 每批線段的級數緩衝：線段對到路線哪個點只算一次（跟形狀有關），換欄只重查級數 */
-    function routeLevelBuf(gl, off, sub, n, k, sc, geo) {
+    function routeLevelBuf(gl, off, sub, n, k, sc, geo, mask) {
         let e = rt.bufs.get(off);
         if (!e) { e = { buf: gl.createBuffer() }; rt.bufs.set(off, e); }
-        if (e.ver !== sub.ver || e.geo !== geo || e.n !== n || e.start !== rt.lastIdx) {
-            const m = matchSegments(sub.bytes, n, k, geo, rt.lastIdx);
-            Object.assign(e, { ver: sub.ver, geo, n, start: rt.lastIdx, idx: m.idx, end: m.end, sc: null });
+        if (e.ver !== sub.ver || e.geo !== geo || e.n !== n || e.start !== rt.lastIdx || e.mask !== mask) {
+            const m = matchSegments(sub.bytes, n, k, geo, rt.lastIdx, mask);
+            Object.assign(e, { ver: sub.ver, geo, n, mask, start: rt.lastIdx, idx: m.idx, end: m.end, sc: null });
         }
         rt.lastIdx = e.end;
         if (e.sc !== sc) {
             const lv = levelsOfPoints(sc, geo), levels = new Float32Array(n);
-            for (let i = 0; i < n; i++) levels[i] = lv[e.idx[i]];
+            for (let i = 0; i < n; i++) levels[i] = e.idx[i] < 0 ? RT_LV_SKIP : lv[e.idx[i]];
             const saved = gl.getParameter(gl.ARRAY_BUFFER_BINDING);
             gl.bindBuffer(gl.ARRAY_BUFFER, e.buf);
             gl.bufferData(gl.ARRAY_BUFFER, levels, gl.DYNAMIC_DRAW);
@@ -3600,7 +3603,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             for (const [off, b] of list) {
                 const sub = findSub(b.buf, off, b.n * 20);
                 if (!sub) continue;
-                const e = routeLevelBuf(gl, off, sub, b.n, b.k, sc, geo);
+                const e = routeLevelBuf(gl, off, sub, b.n, b.k, sc, geo, b.mask);
                 P.forEach(p => {
                     if (!p) return;
                     gl.bindBuffer(gl.ARRAY_BUFFER, p.b);
@@ -3719,6 +3722,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
     const RT_NEAR = 5e-6;              // 線段中點離路線折線這麼近（世界單位，約 200 m）算「貼著」
     const RT_NEAR_SHARE = 0.75;        // 抽樣裡這麼多貼著就算導航路線
     const RT_SAMPLES = 12;
+    const RT_MAX_BREAKS = 3;           // 一組（同一個 w.xy）最多幾個斷點還算一條線（路線＝外框＋本體兩趟＝1；跨出圖磚再進來會多）
     const RT_CELL = 2e-5;              // 格網邊長（約 800 m）：找附近的路線點只看自己和周圍 8 格
     const geoCache = new WeakMap();
 
@@ -3756,40 +3760,71 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             k[1] + (dv.getInt16(b + 2, true) + dv.getInt16(b + 6, true)) / 2 * f];
     };
 
-    /** 這批線段是不是我們的路線：均勻抽 RT_SAMPLES 段，中點離路線折線夠近的比例夠高才算（純函式） */
-    function onRoute(bytes, n, k, geo) {
-        const pts = geo.pts;
-        if (pts.length < 2 || n < 1) return false;
-        const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-        const m = Math.min(n, RT_SAMPLES), T2 = RT_NEAR * RT_NEAR;
-        let hit = 0;
-        for (let s = 0; s < m; s++) {
-            const [x, y] = segMid(dv, Math.floor((s + 0.5) * n / m), k);
-            let near = false;
-            for (const j of nearIdx(geo, x, y)) {
-                for (const q of [j - 1, j]) {
-                    if (q < 0 || q + 1 >= pts.length) continue;
-                    const a = pts[q], c = pts[q + 1], dx = c[0] - a[0], dy = c[1] - a[1], L2 = dx * dx + dy * dy;
-                    const t = L2 ? Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / L2)) : 0;
-                    const ex = a[0] + dx * t - x, ey = a[1] + dy * t - y;
-                    if (ex * ex + ey * ey <= T2) { near = true; break; }
-                }
-                if (near) break;
+    /** 這一點離路線折線夠不夠近（RT_NEAR） */
+    function nearRoute(geo, x, y) {
+        const pts = geo.pts, T2 = RT_NEAR * RT_NEAR;
+        for (const j of nearIdx(geo, x, y)) {
+            for (const q of [j - 1, j]) {
+                if (q < 0 || q + 1 >= pts.length) continue;
+                const a = pts[q], c = pts[q + 1], dx = c[0] - a[0], dy = c[1] - a[1], L2 = dx * dx + dy * dy;
+                const t = L2 ? Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / L2)) : 0;
+                const ex = a[0] + dx * t - x, ey = a[1] + dy * t - y;
+                if (ex * ex + ey * ey <= T2) return true;
             }
-            if (near) hit++;
         }
-        return hit >= m * RT_NEAR_SHARE;
+        return false;
+    }
+
+    /**
+     * 這批線段裡哪些是我們的路線（純函式）。回傳每段一個 0／1 的 Uint8Array；一段都不是回 null。
+     * 不能整批判斷（v1.8.0～1.9.4 的做法），實機量到兩種錯（v1.9.4，自行車短路線）：
+     *  ①同一批裡有好幾條路線：選中的、兩條替代路線一起畫，各占三分之一，整批「貼著」的比例不到門檻 → 低級數整條沒換色。
+     *  ②路線旁的圖磚街道也貼著路線（RT_NEAR 約 200 m，因為取樣折線在彎路抄捷徑，不能再收緊）→ 高級數整塊街道塗成雨勢色。
+     * 線段資料 byte 8～11 是 w.xy（樣式；頂點 shader 用它查樣式貼圖），同一條線用同一個值：選中路線、每條替代路線、
+     * 每一類街道各自一組。所以依 w.xy 分組，每組自己判斷：
+     *  - 均勻抽 RT_SAMPLES 段，中點貼著路線的比例 ≥ RT_NEAR_SHARE；
+     *  - 而且整組幾乎是一條連續的線：前一段終點不等於下一段起點的「斷點」≤ RT_MAX_BREAKS。
+     *    導航路線在一塊圖磚裡是一條線，Google 畫兩趟（外框、本體）＝ 1 個斷點；一類街道是很多條路、斷點很多。
+     */
+    function routeMask(bytes, n, k, geo) {
+        if (geo.pts.length < 2 || n < 1) return null;
+        const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const groups = new Map();
+        for (let i = 0; i < n; i++) {
+            const b = i * 20, key = dv.getUint16(b + 8, true) * 65536 + dv.getUint16(b + 10, true);
+            let g = groups.get(key);
+            if (!g) groups.set(key, g = { segs: [], breaks: 0, ex: 0, ey: 0 });
+            const sx = dv.getInt16(b, true), sy = dv.getInt16(b + 2, true);
+            if (g.segs.length && (Math.abs(sx - g.ex) > 1 || Math.abs(sy - g.ey) > 1)) g.breaks++;
+            g.ex = dv.getInt16(b + 4, true); g.ey = dv.getInt16(b + 6, true);
+            g.segs.push(i);
+        }
+        let mask = null;
+        for (const g of groups.values()) {
+            if (g.breaks > RT_MAX_BREAKS) continue;
+            const m = Math.min(g.segs.length, RT_SAMPLES);
+            let hit = 0;
+            for (let s = 0; s < m; s++) {
+                const [x, y] = segMid(dv, g.segs[Math.floor((s + 0.5) * g.segs.length / m)], k);
+                if (nearRoute(geo, x, y)) hit++;
+            }
+            if (hit < m * RT_NEAR_SHARE) continue;
+            if (!mask) mask = new Uint8Array(n);
+            for (const i of g.segs) mask[i] = 1;
+        }
+        return mask;
     }
 
     /**
      * 每段線段對到路線的哪個點（純函式）。取「離線段中點最近的點」；來回走同一條路時最近點有兩個，
      * 所以從上一段對到的位置往後找、差不多近就用後面的（線段照路線順序排）。
      */
-    function matchSegments(bytes, n, k, geo, startIdx) {
+    function matchSegments(bytes, n, k, geo, startIdx, mask) {
         const pts = geo.pts, dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
         const idx = new Int32Array(n);
         let last = Math.min(startIdx || 0, pts.length - 1);
         for (let i = 0; i < n; i++) {
+            if (mask && !mask[i]) { idx[i] = -1; continue; }      // 不是我們的路線：不對點、也不影響「往後找」的位置
             const [x, y] = segMid(dv, i, k);
             const d2 = j => (pts[j][0] - x) * (pts[j][0] - x) + (pts[j][1] - y) * (pts[j][1] - y);
             let cand = nearIdx(geo, x, y);
