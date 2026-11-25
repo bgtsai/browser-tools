@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.8.1
+// @version      1.9.0
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -3308,28 +3308,44 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         log('WebGL 注入已架設');
     }
 
-    // ── 取代 Google 導航路線的顏色（v1.7.0）──
-    // 路線本體直接用 Google 自己畫的線（形狀、各縮放級的寬度、外框、轉角都是它的），只把顏色換成雨勢：
-    // 改寫線條程式的頂點 shader（document-start 攔 shaderSource），多一個「每段線段一個值」的屬性 rrL（雨勢級數，
-    // 4＝無資料）與開關 rrOn；畫導航路線那幾次（每幀第二次上傳相機之後）打開開關、綁上我們算好的級數。
-    // 每段線段的端點：攔 Google 上傳路線實例資料的 bufferSubData（每筆 20 bytes，int16×4＝起訖點，
-    // 世界座標＝k.xy＋D·k.w/16，2026-11-25 真實頁面對過起點座標）。光暈在路線之前畫（在它底下）。
-    // 任何一步拿不到（沒攔到資料、shader 改寫失敗）→ 那一幀照舊在上層畫整條色帶，不會變成錯的顏色。
+    // ── 導航路線本體與光暈都用 Google 自己的線段（v1.7.0 本體、v1.9.0 光暈）──
+    // 改寫線條程式（3092/964）的 shader（document-start 攔 shaderSource）：
+    //  rrOn＝1：本體換色。多一個「每段線段一個值」的屬性 rrL（雨勢級數，4＝無資料），顏色查 rrF／rrO。
+    //  rrOn＝2：光暈。同一批線段再畫一次，寬度 ×rrGS、顏色 rrGC、不透明度依級數查 rrGA，片段 shader 從中線往外淡出。
+    //   線段一段一段拼成，接頭會重疊；光暈半透明，重疊處會變深 → 用模板緩衝的一個位元，每個像素只畫一次。
+    // 光暈形狀＝Google 的線（含轉角、接頭），不會像我們自己拉的帶子在急彎戳出尖刺（v1.6.x～1.8.x 的蜈蚣腳）。
+    // 每段線段的端點：攔 Google 上傳線段資料的 bufferSubData（每筆 20 bytes，int16×4＝起訖點，世界座標＝k.xy＋D·k.w/16）。
+    // 哪幾批是導航路線：看資料是否貼著我們的路線（onRoute），不靠 Google 一幀分幾批畫。
+    // 任何一步拿不到 → 那一幀照舊在上層畫整條自己的色帶，不會變成錯的顏色。
     const RT_ANCHOR = 's=texture2D(e,(G?S:R)+T*Q);';
-    const RT_PATCH = 'if(rrOn>.5){float rl=clamp(rrL,0.,4.);int i0=int(floor(rl));int i1=int(min(floor(rl)+1.,4.));' +
-        'float rt=fract(rl);s.rgb=G?mix(rrO[i0],rrO[i1],rt):mix(rrF[i0],rrF[i1],rt);}';
+    const RT_PATCH = 'float rl=clamp(rrL,0.,4.);int i0=int(floor(rl));int i1=int(min(floor(rl)+1.,4.));float rt=fract(rl);' +
+        'if(rrOn>1.5){s=vec4(rrGC,mix(rrGA[i0],rrGA[i1],rt));}' +
+        'else if(rrOn>.5){s.rgb=G?mix(rrO[i0],rrO[i1],rt):mix(rrF[i0],rrF[i1],rt);}';
+    const RT_W_ANCHOR = 'Z=V*.5;';      // X＝線寬、Y＝半寬（之後用來撐開四邊形、算覆蓋率）
+    const RT_W_PATCH = 'if(rrOn>1.5){X*=rrGS;Y=X*.5;}';
+    const RT_VS_DECL = 'attribute float rrL;uniform float rrOn,rrGS;uniform vec3 rrF[5],rrO[5],rrGC;uniform float rrGA[5];void main(){';
+    const RT_FS_ANCHOR = 'gl_FragColor=s;gl_FragColor.a*=J;';
+    // 片段：G＝離中線（負的裝置 px）、F＝.5－半寬（實測讀頂點 shader 推得）。光暈從中線往外淡出，輸出預乘色
+    const RT_FS_PATCH = RT_FS_ANCHOR + 'if(rrOn>1.5){float rd=clamp(-G/max(.5-F,1.),0.,1.);float ra=s.a*J*(1.-smoothstep(.12,1.,rd));' +
+        'if(ra<=.003)discard;gl_FragColor=vec4(s.rgb*ra,ra);}';
+    const RT_GLOW_SCALE = 3.2;         // 光暈寬＝Google 線寬 × 這個（15 級時約 38 px，跟原本 SVG 光暈差不多）
+    const RT_STENCIL_BIT = 0x80;       // 光暈「每個像素只畫一次」借用的模板位元（畫完清掉）
     const RT_MAX_COPY = 400000;        // 只複製這麼大以內的上傳（路線一次幾 KB；圖磚也會經過）
     const rt = {
-        curSig: '', cams: 0, glowDone: false, colorOk: true, routeDraws: 0, broken: '',
+        curSig: '', glowDone: false, colorOk: true, routeDraws: 0, broken: '', glowBroken: '',
         subs: new Map(),                // offset → { bytes, ver }
-        cls: new Map(),                 // offset → { ver, sc, k, isRoute }
-        ver: 0, bufs: new Map(), locs: new WeakMap(), ext: null, lastIdx: 0,
-        why: {},                        // 診斷：沒換到色的原因次數（頁面上 window.__rrRoute 讀得到）
+        cls: new Map(),                 // offset → { ver, geo, k, isRoute }
+        ver: 0, bufs: new Map(), locs: new WeakMap(), lastIdx: 0,
+        batches: new Map(),             // 最近看到的導航路線批次 offset → { n, k, frame }（下一幀先畫它們的光暈）
+        frameNo: 0,
+        why: {},                        // 診斷：次數（頁面上 window.__rrRoute 讀得到）
         cacheScene: null,               // 最近一次路線全部換色成功時的色帶內容（靜止時 Google 貼的就是那張）
+        stencil: { func: [0x0207, 0, 0xff], op: [0x1E00, 0x1E00, 0x1E00], mask: 0xff },   // 追蹤 Google 的模板狀態（預設值）
         newFrame() {
             this.sawOverlay = false;
             if (this.routeDraws > 0) this.cacheScene = this.colorOk ? glr.scene : null;
-            this.cams = 0; this.glowDone = false; this.colorOk = true; this.routeDraws = 0; this.lastIdx = 0; },
+            this.glowDone = false; this.colorOk = true; this.routeDraws = 0; this.lastIdx = 0; this.frameNo++;
+        },
         /** 這一幀可以走取代模式嗎（shader 改寫成功、有色帶要畫、拿得到相機） */
         ready(gl) {
             return !this.broken && !glr.broken && !!glr.scene && glr.scene.runs.length > 0 && !!glr.cam &&
@@ -3340,8 +3356,9 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             // 靜止幀（只貼快取底圖）：快取裡的路線已經是這份色帶的顏色 → 只畫標記點；
             // 色帶換了（例如指到別欄）但 Google 還沒重畫 → 整條蓋上去頂著
             if (this.routeDraws === 0 && this.cacheScene && this.cacheScene === glr.scene) return 'marker';
-            return this.glowDone ? 'body' : 'all';
+            return 'all';
         },
+        count(w) { this.why[w] = (this.why[w] || 0) + 1; },
     };
 
     function armRouteHook(P, visible) {
@@ -3350,12 +3367,16 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         const orig = new WeakMap();      // shader → 原始碼（改寫失敗時改回）
         let ab = null;
         P.shaderSource = function (sh, src) {
-            if (!rt.broken && typeof src === 'string' && src.length === 3092 && src.split(RT_ANCHOR).length === 2 &&
-                src.split('void main(){').length === 2) {
-                glr.srcLen.set(sh, src.length);
-                orig.set(sh, src);
-                src = src.replace('void main(){', 'attribute float rrL;uniform float rrOn;uniform vec3 rrF[5],rrO[5];void main(){')
-                    .replace(RT_ANCHOR, RT_ANCHOR + RT_PATCH);
+            if (!rt.broken && typeof src === 'string') {
+                if (src.length === 3092 && src.split(RT_ANCHOR).length === 2 && src.split('void main(){').length === 2 &&
+                    src.split(RT_W_ANCHOR).length === 2) {
+                    glr.srcLen.set(sh, src.length); orig.set(sh, src);
+                    src = src.replace('void main(){', RT_VS_DECL).replace(RT_ANCHOR, RT_ANCHOR + RT_PATCH)
+                        .replace(RT_W_ANCHOR, RT_W_ANCHOR + RT_W_PATCH);
+                } else if (src.length === 964 && src.split(RT_FS_ANCHOR).length === 2 && src.split('void main(){').length === 2) {
+                    glr.srcLen.set(sh, src.length); orig.set(sh, src);
+                    src = src.replace('void main(){', 'uniform float rrOn;void main(){').replace(RT_FS_ANCHOR, RT_FS_PATCH);
+                }
             }
             return o.shaderSource.call(this, sh, src);
         };
@@ -3363,7 +3384,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             const r = o.compileShader.call(this, sh);
             const src = orig.get(sh);
             if (src) {
-                if (this.getShaderParameter(sh, this.COMPILE_STATUS)) rt.patched = true;
+                if (this.getShaderParameter(sh, this.COMPILE_STATUS)) { if (src.length === 3092) rt.patched = true; }
                 else {
                     rt.broken = '路線 shader 改寫失敗：' + this.getShaderInfoLog(sh);
                     warn(rt.broken);
@@ -3389,14 +3410,21 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             } catch (e) { /* 只是記錄 */ }
             return o.bufferSubData.apply(this, arguments);
         };
+        // 模板狀態自己記（光暈借一個位元，畫完要還原；getParameter 問 GPU 每次約 120 µs）
+        const st = rt.stencil;
+        const track = (n, f) => { const fn = P[n]; P[n] = function () { f.apply(null, arguments); return fn.apply(this, arguments); }; };
+        track('stencilFunc', (f, r, m) => { st.func = [f, r, m]; });
+        track('stencilFuncSeparate', (face, f, r, m) => { if (face !== 0x0405) st.func = [f, r, m]; });
+        track('stencilOp', (a, b, c) => { st.op = [a, b, c]; });
+        track('stencilOpSeparate', (face, a, b, c) => { if (face !== 0x0405) st.op = [a, b, c]; });
+        track('stencilMask', m => { st.mask = m; });
+        track('stencilMaskSeparate', (face, m) => { if (face !== 0x0405) st.mask = m; });
         P.getExtension = function (name) {
             const ext = o.getExtension.apply(this, arguments);
             if (ext && name === 'ANGLE_instanced_arrays' && !ext.__rr) {
                 ext.__rr = true;
                 const gl = this, draw = ext.drawArraysInstancedANGLE;
                 ext.drawArraysInstancedANGLE = function (mode, first, count, n) {
-                    // 不靠「第幾次上傳相機」認路線（Google 一幀分幾批畫是它決定的，長短路線就不同）：
-                    // 每次線條繪製都看它指向的線段資料，線段落在我們的路線上才換色
                     if (rt.curSig === GL_SIG_ROUTE && visible(gl) && rt.ready(gl)) {
                         let r = 'fail';
                         try { r = routeDraw(gl, ext, draw, mode, first, count, n); }
@@ -3411,95 +3439,231 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         };
     }
 
-    /** 用我們的顏色畫一次導航路線；拿不到這段的端點資料就回 false（照 Google 原色畫） */
-    function routeDraw(gl, ext, draw, mode, first, count, n) {
-        const prog = gl.getParameter(gl.CURRENT_PROGRAM);
+    /** 程式裡要用到的位置（每個程式查一次） */
+    function routeLocs(gl, prog) {
         let L = rt.locs.get(prog);
         if (!L) {
-            L = { v: gl.getAttribLocation(prog, 'v'), l: gl.getAttribLocation(prog, 'rrL'), on: gl.getUniformLocation(prog, 'rrOn'),
-                F: gl.getUniformLocation(prog, 'rrF'), O: gl.getUniformLocation(prog, 'rrO'), k: gl.getUniformLocation(prog, 'k') };
+            const u = n => gl.getUniformLocation(prog, n), a = n => gl.getAttribLocation(prog, n);
+            L = { v: a('v'), w: a('w'), x: a('x'), l: a('rrL'), on: u('rrOn'), F: u('rrF'), O: u('rrO'), k: u('k'),
+                GC: u('rrGC'), GA: u('rrGA'), GS: u('rrGS'), pal: null };
             rt.locs.set(prog, L);
         }
-        if (L.v < 0 || L.l < 0 || !L.on) { rt.why['noLoc'] = (rt.why['noLoc'] || 0) + 1; return 'fail'; }
-        const off = gl.getVertexAttribOffset(L.v, gl.VERTEX_ATTRIB_ARRAY_POINTER);
-        const sub = rt.subs.get(off);
-        if (!sub || sub.bytes.length < n * 20) { rt.why['noData'] = (rt.why['noData'] || 0) + 1; return 'skip'; }
-        const sc = glr.scene, pal = sc.pal;
-        // 這段資料是不是我們的路線：每段資料（offset＋版本）只判斷一次；k（圖磚原點）同一段資料不會變，順便記住
-        let c = rt.cls.get(off);
-        if (!c || c.ver !== sub.ver || c.sc !== sc) {
-            const k = (c && c.ver === sub.ver) ? c.k : Array.from(gl.getUniform(prog, L.k));
-            c = { ver: sub.ver, sc, k, isRoute: onRoute(sub.bytes, n, k, sc) };
-            rt.cls.set(off, c);
-        }
-        if (!c.isRoute) { rt.why.notRoute = (rt.why.notRoute || 0) + 1; return 'skip'; }
-        const k = c.k;
-        // 光暈畫在路線底下：這一幀第一次認出路線時先畫
-        if (!rt.glowDone) {
-            try { glInject(gl, 'glow'); } catch (err) { glBreak('光暈：' + err.message); }
-            glr.orig.useProgram.call(gl, prog);
-        }
-        let e = rt.bufs.get(off);
-        const key = sub.ver + '|' + k.join(',');
-        if (!e || e.sc !== sc || e.key !== key || e.n !== n || e.start !== rt.lastIdx) {
-            const r = routeLevels(sub.bytes, n, k, sc, rt.lastIdx);
-            if (!e) { e = { buf: gl.createBuffer() }; rt.bufs.set(off, e); }
-            const saved = gl.getParameter(gl.ARRAY_BUFFER_BINDING);
-            gl.bindBuffer(gl.ARRAY_BUFFER, e.buf);
-            gl.bufferData(gl.ARRAY_BUFFER, r.levels, gl.DYNAMIC_DRAW);
-            gl.bindBuffer(gl.ARRAY_BUFFER, saved);
-            Object.assign(e, { sc, key, n, start: rt.lastIdx, end: r.end });
-        }
-        rt.lastIdx = e.end;
+        return L;
+    }
+
+    /** 換色（rrOn＝1）或畫光暈（rrOn＝2）前，設好這個程式的配色 uniform（配色換了才重設） */
+    function routeUniforms(gl, L, pal) {
+        if (L.pal === pal) return;
         const cols = (arr, na) => { const f = []; arr.forEach(h => f.push(...rgb01(h))); f.push(...rgb01(na)); return f; };
-        const saved = gl.getParameter(gl.ARRAY_BUFFER_BINDING);
         gl.uniform3fv(L.F, cols(pal.fill, RAIN_NA_COLOR));
         gl.uniform3fv(L.O, cols(pal.out, RAIN_NA_OUT));
-        glr.orig.uniform1f.call(gl, L.on, 1);
-        gl.bindBuffer(gl.ARRAY_BUFFER, e.buf);
-        gl.enableVertexAttribArray(L.l);
-        gl.vertexAttribPointer(L.l, 1, gl.FLOAT, false, 0, 0);
-        ext.vertexAttribDivisorANGLE(L.l, 1);
-        try { draw.call(ext, mode, first, count, n); }
-        finally {
-            ext.vertexAttribDivisorANGLE(L.l, 0);
-            gl.disableVertexAttribArray(L.l);
-            gl.bindBuffer(gl.ARRAY_BUFFER, saved);
-            glr.orig.uniform1f.call(gl, L.on, 0);
+        if (L.GC) gl.uniform3fv(L.GC, rgb01(pal.fill[2]));
+        if (L.GA) gl.uniform1fv(L.GA, [...RIBBON_GLOW_ALPHA, 0]);
+        if (L.GS) glr.orig.uniform1f.call(gl, L.GS, RT_GLOW_SCALE);
+        L.pal = pal;
+    }
+
+    /**
+     * Google 畫一批線段時：是導航路線就換色畫（回 'done'），不是就回 'skip'（照原樣畫），出狀況回 'fail'。
+     * 這一幀第一次認出路線時，先把上一幀記下的所有路線批次畫一次光暈（都在本體底下）。
+     */
+    function routeDraw(gl, ext, draw, mode, first, count, n) {
+        const prog = gl.getParameter(gl.CURRENT_PROGRAM);
+        const L = routeLocs(gl, prog);
+        if (L.v < 0 || L.l < 0 || !L.on) { rt.count('noLoc'); return 'fail'; }
+        const off = gl.getVertexAttribOffset(L.v, gl.VERTEX_ATTRIB_ARRAY_POINTER);
+        const sub = rt.subs.get(off);
+        if (!sub || sub.bytes.length < n * 20) { rt.count('noData'); return 'skip'; }
+        const sc = glr.scene, geo = routeGeo(sc);
+        // 這批是不是我們的路線：只看形狀（同一條路線換欄不用重判）；每批資料（offset＋版本）只判一次
+        let c = rt.cls.get(off);
+        if (!c || c.ver !== sub.ver || c.geo !== geo) {
+            const k = (c && c.ver === sub.ver) ? c.k : Array.from(gl.getUniform(prog, L.k));
+            c = { ver: sub.ver, geo, k, isRoute: onRoute(sub.bytes, n, k, geo) };
+            rt.cls.set(off, c);
         }
+        if (!c.isRoute) { rt.count('notRoute'); return 'skip'; }
+        const e = routeLevelBuf(gl, off, sub, n, c.k, sc, geo);
+        rt.batches.set(off, { n, k: c.k, frame: rt.frameNo });
+        routeUniforms(gl, L, sc.pal);
+        if (!rt.glowDone) {
+            rt.glowDone = true;
+            if (!rt.glowBroken) {
+                try { routeGlow(gl, ext, draw, prog, L, mode, count, off); }
+                catch (err) { rt.glowBroken = err.message; warn('光暈停用：' + err.message); }
+            }
+        }
+        const saved = gl.getParameter(gl.ARRAY_BUFFER_BINDING);
+        bindLevels(gl, ext, L, e.buf);
+        glr.orig.uniform1f.call(gl, L.on, 1);
+        try { draw.call(ext, mode, first, count, n); }
+        finally { unbindLevels(gl, ext, L, saved); glr.orig.uniform1f.call(gl, L.on, 0); }
         rt.routeDraws++;
-        rt.why.ok = (rt.why.ok || 0) + 1;
+        rt.count('ok');
         return 'done';
     }
 
-    // 我們的路線折線是取樣點連起來的（點距可達幾百公尺），彎路上直線抄捷徑，會離 Google 的線一兩百公尺
-    // （v1.8.0 實機：彎的那幾批被判成「不是路線」、留著 Google 藍色）→ 放寬到約 200 m，改成抽樣裡 75% 貼著就算
-    const RT_NEAR = 5e-6;              // 世界單位，約 200 m
-    const RT_NEAR_SHARE = 0.75;
-    const RT_SAMPLES = 12;             // 每段資料抽幾個線段來比
+    function bindLevels(gl, ext, L, buf) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+        gl.enableVertexAttribArray(L.l);
+        gl.vertexAttribPointer(L.l, 1, gl.FLOAT, false, 0, 0);
+        ext.vertexAttribDivisorANGLE(L.l, 1);
+    }
+    function unbindLevels(gl, ext, L, saved) {
+        ext.vertexAttribDivisorANGLE(L.l, 0);
+        gl.disableVertexAttribArray(L.l);
+        gl.bindBuffer(gl.ARRAY_BUFFER, saved);
+    }
 
-    /** 這批線段是不是我們的路線：均勻抽 RT_SAMPLES 段，中點全部貼著路線折線才算（純函式，可單獨測） */
-    function onRoute(bytes, n, k, sc) {
-        if (!sc.flat) {
-            const f = [];
-            sc.runs.forEach(r => r.pts.forEach(p => f.push(p)));
-            sc.flat = f;
+    /** 每批線段的級數緩衝：線段對到路線哪個點只算一次（跟形狀有關），換欄只重查級數 */
+    function routeLevelBuf(gl, off, sub, n, k, sc, geo) {
+        let e = rt.bufs.get(off);
+        if (!e) { e = { buf: gl.createBuffer() }; rt.bufs.set(off, e); }
+        if (e.ver !== sub.ver || e.geo !== geo || e.n !== n || e.start !== rt.lastIdx) {
+            const m = matchSegments(sub.bytes, n, k, geo, rt.lastIdx);
+            Object.assign(e, { ver: sub.ver, geo, n, start: rt.lastIdx, idx: m.idx, end: m.end, sc: null });
         }
-        const pts = sc.flat;
+        rt.lastIdx = e.end;
+        if (e.sc !== sc) {
+            const lv = levelsOfPoints(sc, geo), levels = new Float32Array(n);
+            for (let i = 0; i < n; i++) levels[i] = lv[e.idx[i]];
+            const saved = gl.getParameter(gl.ARRAY_BUFFER_BINDING);
+            gl.bindBuffer(gl.ARRAY_BUFFER, e.buf);
+            gl.bufferData(gl.ARRAY_BUFFER, levels, gl.DYNAMIC_DRAW);
+            gl.bindBuffer(gl.ARRAY_BUFFER, saved);
+            e.sc = sc;
+        }
+        return e;
+    }
+
+    /**
+     * 光暈：把最近看到的每一批導航路線線段（含這一批）用 rrOn＝2 再畫一次。
+     * 每批的線段資料在同一個緩衝裡、只差 offset：暫時把 v／w／x 三個屬性指到那一批、k 換成那一批的，畫完還原。
+     * 模板緩衝借一個位元：第一次畫到的像素設起來，之後同一像素不再畫（接頭重疊不會變深），畫完把這個位元清掉。
+     */
+    function routeGlow(gl, ext, draw, prog, L, mode, count, curOff) {
+        for (const [off, b] of rt.batches) if (rt.frameNo - b.frame > 2) rt.batches.delete(off);
+        const list = [...rt.batches.entries()];
+        if (!list.length) return;
+        const savedIdx = rt.lastIdx;
+        const sc = glr.scene, geo = routeGeo(sc);
+        const ptr = l => ({ b: gl.getVertexAttrib(l, gl.VERTEX_ATTRIB_ARRAY_BUFFER_BINDING),
+            o: gl.getVertexAttribOffset(l, gl.VERTEX_ATTRIB_ARRAY_POINTER),
+            s: gl.getVertexAttrib(l, gl.VERTEX_ATTRIB_ARRAY_SIZE), t: gl.getVertexAttrib(l, gl.VERTEX_ATTRIB_ARRAY_TYPE),
+            n: gl.getVertexAttrib(l, gl.VERTEX_ATTRIB_ARRAY_NORMALIZED), st: gl.getVertexAttrib(l, gl.VERTEX_ATTRIB_ARRAY_STRIDE) });
+        const P = [L.v, L.w, L.x].map(l => (l >= 0 ? { l, ...ptr(l) } : null));
+        if (P[0] === null || !P[0].b) throw new Error('讀不到線段屬性');
+        const kNow = gl.getUniform(prog, L.k);
+        const savedAB = gl.getParameter(gl.ARRAY_BUFFER_BINDING);
+        const S = rt.stencil, sOn = gl.isEnabled(gl.STENCIL_TEST), bOn = gl.isEnabled(gl.BLEND);
+        const bs = glr.bs || [gl.ONE, gl.ZERO, gl.ONE, gl.ZERO], be = glr.be || [gl.FUNC_ADD, gl.FUNC_ADD];
+        try {
+            gl.enable(gl.STENCIL_TEST);
+            gl.stencilMask(RT_STENCIL_BIT);
+            gl.stencilFunc(gl.NOTEQUAL, RT_STENCIL_BIT, RT_STENCIL_BIT);
+            gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
+            gl.enable(gl.BLEND);
+            gl.blendEquation(gl.FUNC_ADD);
+            gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+            glr.orig.uniform1f.call(gl, L.on, 2);
+            rt.lastIdx = 0;
+            for (const [off, b] of list) {
+                const sub = rt.subs.get(off);
+                if (!sub || sub.bytes.length < b.n * 20) continue;
+                const e = routeLevelBuf(gl, off, sub, b.n, b.k, sc, geo);
+                P.forEach((p, i) => {
+                    if (!p) return;
+                    gl.bindBuffer(gl.ARRAY_BUFFER, p.b);
+                    gl.vertexAttribPointer(p.l, p.s, p.t, p.n, p.st, off + (p.o - P[0].o));
+                });
+                gl.uniform4fv(L.k, b.k);
+                bindLevels(gl, ext, L, e.buf);
+                draw.call(ext, mode, 0, count, b.n);
+                ext.vertexAttribDivisorANGLE(L.l, 0);
+                gl.disableVertexAttribArray(L.l);
+            }
+            // 清掉借用的模板位元
+            gl.clear(gl.STENCIL_BUFFER_BIT);
+        } finally {
+            glr.orig.uniform1f.call(gl, L.on, 0);
+            P.forEach(p => {
+                if (!p) return;
+                gl.bindBuffer(gl.ARRAY_BUFFER, p.b);
+                gl.vertexAttribPointer(p.l, p.s, p.t, p.n, p.st, p.o);
+            });
+            gl.bindBuffer(gl.ARRAY_BUFFER, savedAB);
+            gl.uniform4fv(L.k, kNow);
+            gl.stencilMask(S.mask);
+            gl.stencilFunc(S.func[0], S.func[1], S.func[2]);
+            gl.stencilOp(S.op[0], S.op[1], S.op[2]);
+            (sOn ? gl.enable : gl.disable).call(gl, gl.STENCIL_TEST);
+            (bOn ? gl.enable : gl.disable).call(gl, gl.BLEND);
+            gl.blendFuncSeparate(bs[0], bs[1], bs[2], bs[3]);
+            gl.blendEquationSeparate(be[0], be[1]);
+            rt.lastIdx = savedIdx;      // 光暈逐批對點推進過 lastIdx；還原成本體這一批之後的位置
+        }
+    }
+
+    // ── 路線形狀（跟哪一欄無關，換欄不用重算）──
+    const RT_NEAR = 5e-6;              // 線段中點離路線折線這麼近（世界單位，約 200 m）算「貼著」
+    const RT_NEAR_SHARE = 0.75;        // 抽樣裡這麼多貼著就算導航路線
+    const RT_SAMPLES = 12;
+    const RT_CELL = 2e-5;              // 格網邊長（約 800 m）：找附近的路線點只看自己和周圍 8 格
+    const geoCache = new WeakMap();
+
+    /** 這條路線的點（去掉接頭重複）＋格網。key＝時間軸陣列（同一條路線換欄時不變） */
+    function routeGeo(sc) {
+        const key = sc.geo || sc;
+        let g = geoCache.get(key);
+        if (!g) {
+            const pts = [];
+            sc.runs.forEach((r, ri) => r.pts.forEach((p, j) => { if (ri > 0 && j === 0) return; pts.push(p); }));
+            const grid = new Map();
+            pts.forEach((p, i) => {
+                const kk = Math.floor(p[0] / RT_CELL) + ',' + Math.floor(p[1] / RT_CELL);
+                let a = grid.get(kk); if (!a) grid.set(kk, a = []); a.push(i);
+            });
+            g = { pts, grid };
+            geoCache.set(key, g);
+        }
+        return g;
+    }
+
+    /** 附近的路線點序號（自己＋周圍 8 格） */
+    function nearIdx(geo, x, y) {
+        const cx = Math.floor(x / RT_CELL), cy = Math.floor(y / RT_CELL), out = [];
+        for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+            const a = geo.grid.get((cx + dx) + ',' + (cy + dy));
+            if (a) for (const i of a) out.push(i);
+        }
+        return out;
+    }
+
+    const segMid = (dv, i, k) => {
+        const b = i * 20, f = k[3] / 16;
+        return [k[0] + (dv.getInt16(b, true) + dv.getInt16(b + 4, true)) / 2 * f,
+            k[1] + (dv.getInt16(b + 2, true) + dv.getInt16(b + 6, true)) / 2 * f];
+    };
+
+    /** 這批線段是不是我們的路線：均勻抽 RT_SAMPLES 段，中點離路線折線夠近的比例夠高才算（純函式） */
+    function onRoute(bytes, n, k, geo) {
+        const pts = geo.pts;
         if (pts.length < 2 || n < 1) return false;
         const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-        const f = k[3] / 16, m = Math.min(n, RT_SAMPLES), T2 = RT_NEAR * RT_NEAR;
+        const m = Math.min(n, RT_SAMPLES), T2 = RT_NEAR * RT_NEAR;
         let hit = 0;
         for (let s = 0; s < m; s++) {
-            const i = Math.floor((s + 0.5) * n / m), b = i * 20;
-            const x = k[0] + (dv.getInt16(b, true) + dv.getInt16(b + 4, true)) / 2 * f;
-            const y = k[1] + (dv.getInt16(b + 2, true) + dv.getInt16(b + 6, true)) / 2 * f;
+            const [x, y] = segMid(dv, Math.floor((s + 0.5) * n / m), k);
             let near = false;
-            for (let j = 1; j < pts.length && !near; j++) {
-                const a = pts[j - 1], c = pts[j], dx = c[0] - a[0], dy = c[1] - a[1], L2 = dx * dx + dy * dy;
-                const t = L2 ? Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / L2)) : 0;
-                const ex = a[0] + dx * t - x, ey = a[1] + dy * t - y;
-                if (ex * ex + ey * ey <= T2) near = true;
+            for (const j of nearIdx(geo, x, y)) {
+                for (const q of [j - 1, j]) {
+                    if (q < 0 || q + 1 >= pts.length) continue;
+                    const a = pts[q], c = pts[q + 1], dx = c[0] - a[0], dy = c[1] - a[1], L2 = dx * dx + dy * dy;
+                    const t = L2 ? Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / L2)) : 0;
+                    const ex = a[0] + dx * t - x, ey = a[1] + dy * t - y;
+                    if (ex * ex + ey * ey <= T2) { near = true; break; }
+                }
+                if (near) break;
             }
             if (near) hit++;
         }
@@ -3507,29 +3671,38 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
     }
 
     /**
-     * 每段線段的雨勢級數（純函式，可單獨測）。bytes：Google 的實例資料（每筆 20 bytes，前 8 bytes＝int16 起訖點），
-     * k：該次繪製的 uniform k（圖磚原點 xy、倍率 w）。級數取「離線段中點最近的色帶點」那一段的級數；
-     * 來回走同一條路時最近點有兩個，所以從上一段對到的位置往後找、差不多近就用後面的（線段是照路線順序排的）。
+     * 每段線段對到路線的哪個點（純函式）。取「離線段中點最近的點」；來回走同一條路時最近點有兩個，
+     * 所以從上一段對到的位置往後找、差不多近就用後面的（線段照路線順序排）。
      */
-    function routeLevels(bytes, n, k, sc, startIdx) {
-        const pts = [];
-        sc.runs.forEach((r, ri) => r.pts.forEach((p, j) => { if (ri > 0 && j === 0) return; pts.push([p[0], p[1], r.level == null ? 4 : r.level]); }));
-        const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-        const f = k[3] / 16, levels = new Float32Array(n);
+    function matchSegments(bytes, n, k, geo, startIdx) {
+        const pts = geo.pts, dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const idx = new Int32Array(n);
         let last = Math.min(startIdx || 0, pts.length - 1);
         for (let i = 0; i < n; i++) {
-            const b = i * 20;
-            const x = k[0] + (dv.getInt16(b, true) + dv.getInt16(b + 4, true)) / 2 * f;
-            const y = k[1] + (dv.getInt16(b + 2, true) + dv.getInt16(b + 6, true)) / 2 * f;
-            let best = Infinity, bi = 0;
-            const d2 = q => (q[0] - x) * (q[0] - x) + (q[1] - y) * (q[1] - y);
-            for (let j = 0; j < pts.length; j++) { const d = d2(pts[j]); if (d < best) { best = d; bi = j; } }
+            const [x, y] = segMid(dv, i, k);
+            const d2 = j => (pts[j][0] - x) * (pts[j][0] - x) + (pts[j][1] - y) * (pts[j][1] - y);
+            let cand = nearIdx(geo, x, y);
+            if (!cand.length) cand = pts.map((p, j) => j);
+            let best = Infinity, bi = cand[0];
+            for (const j of cand) { const d = d2(j); if (d < best) { best = d; bi = j; } }
             const tol = Math.max(best * 2.25, 1e-16);
-            for (let j = last; j < pts.length; j++) if (d2(pts[j]) <= tol) { bi = j; break; }
+            let fwd = -1;
+            for (const j of cand) if (j >= last && d2(j) <= tol && (fwd < 0 || j < fwd)) fwd = j;
+            if (fwd >= 0) bi = fwd;
             last = bi;
-            levels[i] = pts[bi][2];
+            idx[i] = bi;
         }
-        return { levels, end: last };
+        return { idx, end: last };
+    }
+
+    /** 路線每個點的級數（4＝無資料），跟 routeGeo 的點一一對應 */
+    function levelsOfPoints(sc, geo) {
+        if (sc.lvPts && sc.lvGeo === geo) return sc.lvPts;
+        const lv = new Float32Array(geo.pts.length);
+        let i = 0;
+        sc.runs.forEach((r, ri) => r.pts.forEach((p, j) => { if (ri > 0 && j === 0) return; lv[i++] = r.level == null ? 4 : r.level; }));
+        sc.lvPts = lv; sc.lvGeo = geo;
+        return lv;
     }
 
     function glBreak(why) {
@@ -3881,7 +4054,7 @@ void main(){
             const n = view.nodes[view.hoverRow];
             marker = toW(n.lat, n.lon);
         }
-        glr.scene = { runs, pal: currentPalette(), marker };
+        glr.scene = { runs, pal: currentPalette(), marker, geo: tl };
     }
 
     function ensureRibbon() {
