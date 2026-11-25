@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.7.1
+// @version      1.7.2
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -3327,14 +3327,20 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         subs: new Map(),                // offset → { bytes, ver }
         ver: 0, bufs: new Map(), locs: new WeakMap(), ext: null, lastIdx: 0,
         why: {},                        // 診斷：沒換到色的原因次數（頁面上 window.__rrRoute 讀得到）
-        newFrame() { this.cams = 0; this.glowDone = false; this.colorOk = true; this.routeDraws = 0; this.lastIdx = 0; },
+        cacheScene: null,               // 最近一次路線全部換色成功時的色帶內容（靜止時 Google 貼的就是那張）
+        newFrame() {
+            if (this.routeDraws > 0) this.cacheScene = this.colorOk ? glr.scene : null;
+            this.cams = 0; this.glowDone = false; this.colorOk = true; this.routeDraws = 0; this.lastIdx = 0; },
         /** 這一幀可以走取代模式嗎（shader 改寫成功、有色帶要畫、拿得到相機） */
         ready(gl) {
             return !this.broken && !glr.broken && !!glr.scene && glr.scene.runs.length > 0 && !!glr.cam &&
                 this.patched && glEnsure(gl);
         },
         overlayMode() {
-            if (this.routeDraws > 0 && this.colorOk) return 'marker';
+            if (this.routeDraws > 0 && this.colorOk) { this.cacheScene = glr.scene; return 'marker'; }
+            // 靜止幀（只貼快取底圖）：快取裡的路線已經是這份色帶的顏色 → 只畫標記點；
+            // 色帶換了（例如指到別欄）但 Google 還沒重畫 → 整條蓋上去頂著
+            if (this.routeDraws === 0 && this.cacheScene && this.cacheScene === glr.scene) return 'marker';
             return this.glowDone ? 'body' : 'all';
         },
     };
