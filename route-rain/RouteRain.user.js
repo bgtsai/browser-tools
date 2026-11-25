@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.10.2
+// @version      1.10.3
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -3293,7 +3293,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         track('colorMask', (r, g, b, a) => { glr.cm = [r, g, b, a]; });
         track('depthMask', m => { glr.dm = m; });
         armRouteHook(P, visible);
-        try { w.__rrRoute = { get state() { return { ver: typeof GM_info !== "undefined" ? GM_info.script.version : "", patched: !!rt.patched, broken: rt.broken, glow: rt.glowBroken, subs: rt.subs.size, why: rt.why }; } }; } catch (e) { /* 只是診斷 */ }
+        try { w.__rrRoute = { get state() { return { ver: typeof GM_info !== "undefined" ? GM_info.script.version : "", patched: !!rt.patched, broken: rt.broken, glow: rt.glowBroken, subs: rt.subs.size, why: rt.why, diag: rt.diag }; } }; } catch (e) { /* 只是診斷 */ }
         // 要求重畫：記下「執行時有畫地圖」的那個 rAF 回呼，之後再排一次。
         // 腳本是 document-start，Google 拿到的就是包過的這個 rAF。
         const raf = w.requestAnimationFrame;
@@ -3347,6 +3347,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         batches: new Map(),             // 最近看到的導航路線批次 offset → { n, k, frame }（下一幀先畫它們的光暈）
         frameNo: 0,
         why: {},                        // 診斷：次數（頁面上 window.__rrRoute 讀得到）
+        diag: [],                       // 診斷：最近 RT_DIAG_MAX 次「判斷一批是不是路線」的細節（每組段數、斷點、沿著幾段）
         cacheScene: null,               // 最近一次路線全部換色成功時的色帶內容（靜止時 Google 貼的就是那張）
         stencil: { func: [0x0207, 0, 0xff], op: [0x1E00, 0x1E00, 0x1E00], mask: 0xff },   // 追蹤 Google 的模板狀態（預設值）
         newFrame() {
@@ -3502,13 +3503,15 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         if (L.v < 0 || L.l < 0 || !L.on) { rt.count('noLoc'); return 'fail'; }
         const off = gl.getVertexAttribOffset(L.v, gl.VERTEX_ATTRIB_ARRAY_POINTER);
         const sub = findSub(gl.getVertexAttrib(L.v, gl.VERTEX_ATTRIB_ARRAY_BUFFER_BINDING), off, n * 20);
-        if (!sub) { rt.count('noData'); return 'skip'; }
+        if (!sub) { rt.count('noData'); rtDiag({ off, n, noData: true }); return 'skip'; }
         const sc = glr.scene, geo = routeGeo(sc);
         // 這批是不是我們的路線：只看形狀（同一條路線換欄不用重判）；每批資料（offset＋版本）只判一次
         let c = rt.cls.get(off);
         if (!c || c.ver !== sub.ver || c.geo !== geo) {
             const k = (c && c.ver === sub.ver) ? c.k : Array.from(gl.getUniform(prog, L.k));
-            c = { ver: sub.ver, geo, k, mask: routeMask(sub.bytes, n, k, geo) };
+            const info = {};
+            c = { ver: sub.ver, geo, k, mask: routeMask(sub.bytes, n, k, geo, info) };
+            rtDiag({ off, n, route: !!c.mask, ...info });
             rt.cls.set(off, c);
         }
         if (!c.mask) { rt.count('notRoute'); return 'skip'; }
@@ -3761,6 +3764,14 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             k[1] + (dv.getInt16(b + 2, true) + dv.getInt16(b + 6, true)) / 2 * f];
     };
 
+    const RT_DIAG_MAX = 200;
+    /** 記一筆判斷細節（只給 window.__rrRoute.state.diag 看；時間是頁面載入後的毫秒） */
+    function rtDiag(d) {
+        d.t = Math.round(performance.now());
+        rt.diag.push(d);
+        if (rt.diag.length > RT_DIAG_MAX) rt.diag.splice(0, rt.diag.length - RT_DIAG_MAX);
+    }
+
     /**
      * 這一段線段是不是「沿著」路線：中點離路線折線夠近（RT_NEAR），而且跟那一段路線方向差不多（|cos| ≥ RT_PARALLEL）。
      * 只看距離不夠（v1.10.1 實機 17 級）：替代路線在終點附近往南岔出去那一截，圖磚裡只剩離路線 200 m 內的部分，
@@ -3795,7 +3806,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
      *    17 級時路線旁的短街、建築輪廓、路線底下那條路本身（各自斷點少）還是被塗色（實機量：圖磚批 35 批全部有 >3 斷點的組，路線批全部 ≤1）。
      *  - 再每組判斷：均勻抽 RT_SAMPLES 段，「沿著」路線（nearRoute：夠近且方向相近）的比例 ≥ RT_NEAR_SHARE 才是選中路線。
      */
-    function routeMask(bytes, n, k, geo) {
+    function routeMask(bytes, n, k, geo, info) {
         if (geo.pts.length < 2 || n < 1) return null;
         const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
         const groups = new Map();
@@ -3808,6 +3819,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             g.ex = dv.getInt16(b + 4, true); g.ey = dv.getInt16(b + 6, true);
             g.segs.push(i);
         }
+        if (info) info.groups = [...groups.entries()].map(([key, g]) => [(key >>> 16) + ',' + (key & 65535), g.segs.length, g.breaks]);
         for (const g of groups.values()) if (g.breaks > RT_MAX_BREAKS) return null;
         let mask = null;
         for (const g of groups.values()) {
@@ -3818,6 +3830,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
                 const [x, y] = segMid(dv, i, k);
                 if (nearRoute(geo, x, y, dv.getInt16(b + 4, true) - dv.getInt16(b, true), dv.getInt16(b + 6, true) - dv.getInt16(b + 2, true))) hit++;
             }
+            if (info) (info.hits || (info.hits = [])).push(hit + '/' + m);
             if (hit < m * RT_NEAR_SHARE) continue;
             if (!mask) mask = new Uint8Array(n);
             for (const i of g.segs) mask[i] = 1;
