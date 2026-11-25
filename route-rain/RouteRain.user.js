@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.11.1
+// @version      1.11.2
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -3002,6 +3002,9 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             warnings.push(`⚠ 這條路線跟 Google 清單上選中的那條對不上（${state.routeMismatch}），` +
                 '地圖色帶先不畫，表格的時間也可能不對。');
         }
+        if (rt.colorMiss >= RT_COLOR_MISS_MAX && !rt.colorHits) {
+            warnings.push('⚠ 認不出 Google 選中路線的顏色（配色可能改了），地圖換色改用形狀判斷，替代路線可能也被塗色。');
+        }
         if (meta.failures && meta.failures.length) warnings.push(`取得失敗：${meta.failures.join('、')}`);
         pop.innerHTML =
             `<h4>降雨機率</h4><div class="${P}-lg">` +
@@ -3288,7 +3291,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         track('colorMask', (r, g, b, a) => { glr.cm = [r, g, b, a]; });
         track('depthMask', m => { glr.dm = m; });
         armRouteHook(P, visible);
-        try { w.__rrRoute = { get state() { return { ver: typeof GM_info !== "undefined" ? GM_info.script.version : "", patched: !!rt.patched, broken: rt.broken, glow: rt.glowBroken, subs: rt.subs.size, why: rt.why, diag: rt.diag, votes: [...rt.votes].map(([p, v]) => p + ' ' + v) }; } }; } catch (e) { /* 只是診斷 */ }
+        try { w.__rrRoute = { get state() { return { ver: typeof GM_info !== "undefined" ? GM_info.script.version : "", patched: !!rt.patched, broken: rt.broken, glow: rt.glowBroken, subs: rt.subs.size, why: rt.why, diag: rt.diag, colorHits: rt.colorHits, colorMiss: rt.colorMiss }; } }; } catch (e) { /* 只是診斷 */ }
         // 要求重畫：記下「執行時有畫地圖」的那個 rAF 回呼，之後再排一次。
         // 腳本是 document-start，Google 拿到的就是包過的這個 rAF。
         const raf = w.requestAnimationFrame;
@@ -3344,8 +3347,9 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         why: {},                        // 診斷：次數（頁面上 window.__rrRoute 讀得到）
         style: null,                    // Google 的兩張樣式貼圖（讀出來的像素，見 routeStyle）
         pairs: new Map(),               // 樣式代號（貼圖、w.xy）→ 「本體色/外框色」
-        votes: new Map(),               // 本體色 → 幾批裡它是「沿著我們路線、而且最深」的那組（學選中路線的顏色）
-        styleVer: 0,                    // 學到的顏色有變 → 每批重判
+        colorHits: 0,                   // 本體色對上選中路線顏色的次數
+        colorMiss: 0,                   // 顏色沒對上、幾何卻像路線的組數（只在 colorHits 為 0 時累積）
+        styleVer: 0,                    // 改成退回幾何判斷時加一 → 每批重判
         diag: [],                       // 診斷：最近 RT_DIAG_MAX 次「判斷一批是不是路線」的細節（每組段數、斷點、沿著幾段）
         cacheScene: null,               // 最近一次路線全部換色成功時的色帶內容（靜止時 Google 貼的就是那張）
         stencil: { func: [0x0207, 0, 0xff], op: [0x1E00, 0x1E00, 0x1E00], mask: 0xff },   // 追蹤 Google 的模板狀態（預設值）
@@ -3776,20 +3780,24 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             k[1] + (dv.getInt16(b + 2, true) + dv.getInt16(b + 6, true)) / 2 * f];
     };
 
-    const RT_VOTE_MIN = 2;            // 一種本體色至少這麼多批是「沿著我們路線、而且最深」的那組，才當成選中路線的顏色
+    // 選中路線的本體色（樣式貼圖第 7 列）。實測（2026-11-25）：台北自行車／汽車、孟買尖峰汽車都是 #23038e，
+    // 路況（紅 #bd2b2b、橘 #ffb33f）只改第 10 列；替代路線 #3331f3、街道灰色系，都不會是這個色。
+    // 必須寫死、不能「邊用邊學」：v1.11.0～1.11.1 用投票學，只有替代路線的批次裡「最深」的就是替代色，被學進去、三條全塗。
+    const SEL_FILL = [35, 3, 142];
+    const SEL_FILL_TOL = 8;           // 每個色版容許的差（貼圖是 8 位元，留一點餘裕）
+    const RT_COLOR_MISS_MAX = 20;     // 幾何判斷像路線、但顏色一次都沒對上的組累積這麼多 → Google 換配色了，退回幾何判斷並在 ⓘ 警告
 
-    /** 「r.g.b.a/r.g.b.a」（本體/外框）的本體色亮度 */
-    function fillLum(pair) {
-        const [r, g, b] = pair.split('/')[0].split('.').map(Number);
-        return 0.299 * r + 0.587 * g + 0.114 * b;
+    /** 「r.g.b.a/r.g.b.a」（本體/外框）的本體色是不是選中路線的顏色 */
+    function isSelFill(pair) {
+        const c = pair.split('/')[0].split('.').map(Number);
+        return SEL_FILL.every((v, i) => Math.abs(c[i] - v) <= SEL_FILL_TOL);
     }
 
     /**
      * 讀 Google 的線條樣式：每段線段的 w.xy 查貼圖 g 得到樣式位置 P（Ba：g＋b·256、a），
      * 再查貼圖 e 的第 18·P.y＋7 列（本體色，shader 的 _k）、＋10 列（外框色，_j）。跟頂點 shader 的 Ca／Aa 一樣。
      * 選中路線（2026-11-25 實測，自行車與汽車相同）本體 #23038e、外框 #450efb；替代路線 #3331f3／#b8c9fd；街道灰色系。
-     * 不寫死：路線批裡「沿著我們路線」的組中本體色最深的那種投一票（vote），學到的本體色之後不看形狀就算路線。
-     * 路況（汽車，2026-11-25 實測）只改外框色：選中＋路況＝外框 #ffb33f、替代＋路況＝#ffe3b3，本體不變，所以只比本體色。
+     * 本體色＝SEL_FILL 就是選中路線（不看形狀）；路況只改外框色（第 10 列），所以只比本體色。
      * 讀一次兩張貼圖約 9 ms（1024×64＋16384×18），只在第一次或 Google 改了貼圖（texSubImage2D／texImage2D）時重讀。
      */
     function routeStyle(gl, prog, L) {
@@ -3826,13 +3834,11 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
                     rt.pairs.set(key, p);
                     return p;
                 },
-                // 只看本體色：路況是改外框色（實測選中路線＋路況＝外框 #ffb33f，本體不變）
-                isRoute(pair) { return (rt.votes.get(pair.split('/')[0]) || 0) >= RT_VOTE_MIN; },
-                vote(pair) {
-                    const f = pair.split('/')[0], v = (rt.votes.get(f) || 0) + 1;
-                    rt.votes.set(f, v);
-                    if (v === RT_VOTE_MIN) rt.styleVer++;
-                },
+                isRoute(pair) { const y = isSelFill(pair); if (y) rt.colorHits++; return y; },
+                // 顏色從沒對上、幾何卻一直像路線：Google 換了配色 → 退回幾何判斷
+                known() { return rt.colorHits > 0; },
+                fallback() { return !rt.colorHits && rt.colorMiss >= RT_COLOR_MISS_MAX; },
+                miss() { if (!rt.colorHits && ++rt.colorMiss === RT_COLOR_MISS_MAX) rt.styleVer++; },
             };
         } catch (e) { rt.count('styleErr'); return null; }
     }
@@ -3914,11 +3920,11 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         const tile = [...groups.values()].some(g => g.breaks > RT_MAX_BREAKS);
         let mask = null;
         const take = g => { if (!mask) mask = new Uint8Array(n); for (const i of g.segs) mask[i] = 1; };
-        const passed = [];
         for (const [key, g] of groups) {
-            // 已經學到的選中路線顏色（含路況色）：不管在哪一批、形狀怎樣都算——跟使用者看的是同一個東西
+            // 讀得到顏色就只看顏色：選中路線的本體色不管在哪一批、形狀怎樣都算——跟使用者看的是同一個東西
             const pair = pairOf(key);
             if (pair && style.isRoute(pair)) { take(g); continue; }
+            if (pair && !style.fallback()) { if (tile || style.known()) continue; g.colorOnly = true; }
             if (tile) continue;
             g.pair = pair;
             const m = Math.min(g.segs.length, RT_SAMPLES);
@@ -3929,16 +3935,9 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
                 if (nearRoute(geo, x, y, dv.getInt16(b + 4, true) - dv.getInt16(b, true), dv.getInt16(b + 6, true) - dv.getInt16(b + 2, true))) hit++;
             }
             if (info) (info.hits || (info.hits = [])).push(hit + '/' + m);
-            if (hit >= m * RT_NEAR_SHARE) passed.push(g);
-        }
-        // 沿著路線的組裡，只取本體色最深的那種：替代路線跟選中路線共用一段路時也會「沿著」（v1.11.0 汽車路線實機：
-        // 替代路線的顏色被學進去、三條全塗色）。實測選中路線本體 #23038e（深），替代 #3331f3（亮）；路況只改外框色。
-        const known = passed.filter(g => g.pair);
-        const dark = known.length ? Math.min(...known.map(g => fillLum(g.pair))) : null;
-        for (const g of passed) {
-            if (!g.pair) { take(g); continue; }
-            if (fillLum(g.pair) !== dark) continue;
-            style.vote(g.pair);
+            if (hit < m * RT_NEAR_SHARE) continue;
+            // 顏色讀得到但不是選中色：不算路線（替代路線共用國道時也「沿著」），只記一筆給 fallback 判斷
+            if (g.colorOnly) { style.miss(); continue; }
             take(g);
         }
         return mask;
