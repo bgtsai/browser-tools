@@ -57,7 +57,7 @@ window.frame = () => {
   const al = gl.getAttribLocation(text, 'a'); gl.enableVertexAttribArray(al); gl.vertexAttribPointer(al, 2, gl.FLOAT, false, 0, 0);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
   const rd = (x, y) => { const o = new Uint8Array(4); gl.readPixels(x, 299 - y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, o); return Array.from(o); };
-  window.px = { ribbon: rd(100, 150), ribbon2: rd(100, 151), ribbon3: rd(100, 152), label: rd(250, 150), glow: rd(100, 162), far: rd(100, 220),
+  window.px = { ribbon: rd(100, 150), ribbon2: rd(100, 151), ribbon3: rd(100, 152), label: rd(250, 150), up: rd(100, 140), glow: rd(100, 162), far: rd(100, 220),
     right: rd(330, 150), prog: gl.getParameter(gl.CURRENT_PROGRAM) === text, ab: abKeep,
     blend: gl.isEnabled(gl.BLEND) };
 };
@@ -130,17 +130,31 @@ def run(engine, pw):
     check('Google 剛畫過就不另外請它重畫', n3 - n2 == 1, (n2, n3))
     # 連續帶子：轉角處前後兩段共用頂點（不再各自一塊四邊形）
     sh = pg.evaluate("""() => { const rr = window.__rr; const pts = []; for (let i = 0; i < 40; i++) pts.push({ x: i * 4, y: (i % 2) * 3 });
-      const v = rr.buildRibbonMesh([{ level: 1, pts }], rr.PALETTES.k2, null); const n = v.length / 12; const g = [];
-      for (let i = 0; i < n; i++) if (v[i*12+4] === 0) g.push([v[i*12], v[i*12+1]]);
+      const v = rr.buildRibbonMesh([{ level: 1, pts }], rr.PALETTES.k2, null); const n = v.length / 14; const g = [];
+      for (let i = 0; i < n; i++) if (v[i*14+6] === 0) g.push([v[i*14] + v[i*14+2]*v[i*14+4], v[i*14+1] + v[i*14+3]*v[i*14+4]]);
       let shared = 0, quads = g.length / 6;
       for (let q = 0; q + 1 < quads; q++) { const endA = g[q*6+2], startB = g[(q+1)*6]; if (Math.abs(endA[0]-startB[0]) < 1e-4 && Math.abs(endA[1]-startB[1]) < 1e-4) shared++; }
       return { quads, shared }; }""")
     check('轉角處相鄰兩段的光暈共用頂點（沒有重疊或缺口）', sh['quads'] == 39 and sh['shared'] == 38, sh)
+    # 平移（只改 uniform、不重建網格）：相機往南 10 px → 路線在畫面上往上 10 px
+    mv = pg.evaluate("""() => { const rr = window.__rr, C = window.CAM, w = px => C.cx + px / C.S;
+      rr.glr.scene = { runs: [ { level: 0, pts: [[w(-180), C.cy], [w(0), C.cy]] }, { level: 3, pts: [[w(0), C.cy], [w(180), C.cy]] } ], pal: rr.PALETTES.k2, marker: null };
+      window.frame(); const m1 = rr.glr.built.verts; C.cy += 10 / C.S; window.frame(); const r = { up: window.px.up, same: rr.glr.built.verts === m1 }; C.cy -= 10 / C.S; return r; }""")
+    check('平移只改 uniform：路線跟著移動且沒重建網格', (near(mv['up'], f0) or near(mv['up'], [round(v * 0.72) for v in f0], 8)) and mv['same'], mv)
+    # 長路線縮小看：幾千個點擠在幾百 px 裡，注入要快（v1.6.2 實機一幀 400 ms）且不能每幀重算
+    perf = pg.evaluate("""() => { const rr = window.__rr, C = window.CAM, w = px => C.cx + px / C.S; const pts = [];
+      for (let i = 0; i < 6000; i++) pts.push([w(-150 + i * 0.05), C.cy + Math.sin(i / 7) * 2 / C.S]);
+      rr.glr.scene = { runs: [{ level: 1, pts: pts.slice(0, 3001) }, { level: 3, pts: pts.slice(3000) }], pal: rr.PALETTES.k2, marker: null };
+      const t0 = performance.now(); window.frame(); const t1 = performance.now(); const m1 = rr.glr.built.verts;
+      C.cx += 20 / C.S; C.S *= 1.2; window.frame(); const same = rr.glr.built.verts === m1; C.S *= 1.8; window.frame(); const rebuilt = rr.glr.built.verts !== m1; C.S /= 2.16; C.cx -= 20 / C.S;
+      return { first: t1 - t0, same, rebuilt, verts: m1.length / 14 }; }""")
+    check('長路線（6000 點）注入一幀 < 30 ms、點數有略過', perf['first'] < 30 and perf['verts'] < 6000, perf)
+    check('平移＋縮放不到半級沿用網格、超過半級才重建', perf['same'] and perf['rebuilt'], perf)
     # 色帶網格（純函式）
     m = pg.evaluate("""() => { const rr = window.__rr; const v = rr.buildRibbonMesh([{ level: 0, pts: [{x:0,y:0},{x:100,y:0}] }, { level: 2, pts: [{x:100,y:0},{x:200,y:0}] }], rr.PALETTES.k2, {x: 50, y: 0});
-      const n = v.length / 12, kinds = {}; let gmin = 9, gmax = 0;
-      for (let i = 0; i < n; i++) { const k = v[i*12+4]; kinds[k] = (kinds[k]||0)+1; if (k === 0) { gmin = Math.min(gmin, v[i*12+11]); gmax = Math.max(gmax, v[i*12+11]); } }
-      return { n, kinds, gmin, gmax, firstGlow: v[4] === 0 }; }""")
+      const n = v.length / 14, kinds = {}; let gmin = 9, gmax = 0;
+      for (let i = 0; i < n; i++) { const k = v[i*14+6]; kinds[k] = (kinds[k]||0)+1; if (k === 0) { gmin = Math.min(gmin, v[i*14+13]); gmax = Math.max(gmax, v[i*14+13]); } }
+      return { n, kinds, gmin, gmax, firstGlow: v[6] === 0 }; }""")
     check('網格：先光暈、再本體、最後標記點；交界有漸變小段', m['firstGlow'] and m['kinds'].get('2') == 6 and m['kinds'].get('0', 0) > 12, m)
     check('光暈強度從第 1 級 0.15 漸變到第 3 級 0.45', abs(m['gmin'] - 0.15) < 1e-6 and abs(m['gmax'] - 0.45) < 1e-6, m)
     # 認不出文字程式（Google 改版）→ 不注入、不算 live

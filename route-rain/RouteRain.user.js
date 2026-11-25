@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.6.2
+// @version      1.6.3
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -3310,8 +3310,8 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
         glr.sig.set(prog, 'mine');
         const loc = { M: gl.getUniformLocation(prog, 'M'), k: gl.getUniformLocation(prog, 'k'),
-            dpr: gl.getUniformLocation(prog, 'dpr') };
-        for (const a of ['aP', 'aQ', 'aK', 'aF', 'aO', 'aG']) loc[a] = gl.getAttribLocation(prog, a);
+            dpr: gl.getUniformLocation(prog, 'dpr'), a: gl.getUniformLocation(prog, 'a'), off: gl.getUniformLocation(prog, 'off') };
+        for (const a of ['aP', 'aN', 'aQ', 'aK', 'aF', 'aO', 'aG']) loc[a] = gl.getAttribLocation(prog, a);
         const buf = gl.createBuffer();
         const vao = vaoExt.createVertexArrayOES();
         const savedVao = gl.getParameter(vaoExt.VERTEX_ARRAY_BINDING_OES);
@@ -3320,7 +3320,7 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         gl.bindBuffer(gl.ARRAY_BUFFER, buf);
         const F = 4, stride = GL_VERT_FLOATS * F;
         const attr = (l, n, off) => { gl.enableVertexAttribArray(l); gl.vertexAttribPointer(l, n, gl.FLOAT, false, stride, off * F); };
-        attr(loc.aP, 2, 0); attr(loc.aQ, 2, 2); attr(loc.aK, 1, 4); attr(loc.aF, 3, 5); attr(loc.aO, 3, 8); attr(loc.aG, 1, 11);
+        attr(loc.aP, 2, 0); attr(loc.aN, 2, 2); attr(loc.aQ, 2, 4); attr(loc.aK, 1, 6); attr(loc.aF, 3, 7); attr(loc.aO, 3, 10); attr(loc.aG, 1, 13);
         vaoExt.bindVertexArrayOES(savedVao);
         gl.bindBuffer(gl.ARRAY_BUFFER, savedBuf);
         Object.assign(glr, { gl, prog, buf, vao, vaoExt, loc });
@@ -3341,9 +3341,32 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         // 相機單位／CSS px（不傾斜時）：clip_x = M0·X / M15，畫面半寬 = cssW/2
         const k = cam.M[15] / (cssW / 2) / cam.M[0];
         if (!(k > 0) || Math.abs(cam.M[4]) > 1e-6 || Math.abs(cam.M[1]) > 1e-6) return;   // 有旋轉或傾斜：先不畫
-        const toPx = ([wx, wy]) => ({ x: (wx - cam.cx) * cam.S / k, y: (wy - cam.cy) * cam.S / k });
-        const runs = sc.runs.map(r => ({ level: r.level, pts: r.pts.map(toPx) }));
-        const verts = buildRibbonMesh(runs, sc.pal, sc.marker && toPx(sc.marker));
+        // 縮放差超過半級、畫布大小變了、或內容換了才重建網格；平移與小幅縮放只改 uniform
+        const z = Math.log2(cam.S);
+        const bm = glr.built;
+        let verts;
+        if (bm && bm.sc === sc && bm.pal === sc.pal && bm.marker === sc.marker && bm.k === k && Math.abs(z - bm.z) <= 0.5) {
+            verts = bm.verts;
+        } else {
+            const o = sc.runs[0].pts[0];
+            const f = cam.S / k;                                     // 建網格這時的 px／世界單位
+            const toPx = ([wx, wy]) => ({ x: (wx - o[0]) * f, y: (wy - o[1]) * f });
+            // 投影後離上一個保留點不到 RIBBON_MIN_STEP_PX 就略過（每段頭尾一定保留）：
+            // 縮小時一整條路線幾千個點擠在幾百 px 裡，不略過的話網格上千段（v1.6.2 實測長路線注入一次 400 ms），
+            // 而且相鄰點近到不到 1 px 時斜接法線會亂翻，帶子自己折疊成一節一節（使用者實機看到的蜈蚣條紋）
+            const runs = sc.runs.map(r => {
+                const pts = [];
+                r.pts.forEach((w, i) => {
+                    const p = toPx(w), last = pts[pts.length - 1];
+                    if (last && i < r.pts.length - 1 && Math.abs(p.x - last.x) < RIBBON_MIN_STEP_PX &&
+                        Math.abs(p.y - last.y) < RIBBON_MIN_STEP_PX) return;
+                    pts.push(p);
+                });
+                return { level: r.level, pts };
+            });
+            verts = buildRibbonMesh(runs, sc.pal, sc.marker && toPx(sc.marker));
+            glr.built = { sc, pal: sc.pal, marker: sc.marker, k, z, S: cam.S, o, verts, uploaded: false };
+        }
         if (!verts.length) return;
         const { prog, buf, vao, vaoExt, loc } = glr;
         const st = {
@@ -3362,7 +3385,13 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             glr.orig.useProgram.call(gl, prog);
             vaoExt.bindVertexArrayOES(vao);
             gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-            gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STREAM_DRAW);
+            if (!glr.built.uploaded || glr.uploadedTo !== glr.buf) {
+                gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
+                glr.built.uploaded = true; glr.uploadedTo = glr.buf;
+            }
+            const B = glr.built;
+            glr.orig.uniform1f.call(gl, loc.a, k * cam.S / B.S);             // 建網格時的 1 px → 現在的相機單位
+            gl.uniform2f(loc.off, (B.o[0] - cam.cx) * cam.S, (B.o[1] - cam.cy) * cam.S);
             glr.orig.uniformMatrix4fv.call(gl, loc.M, false, cam.M);
             glr.orig.uniform1f.call(gl, loc.k, k);
             glr.orig.uniform1f.call(gl, loc.dpr, canvas.width / cssW);
@@ -3388,10 +3417,14 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
     }
 
     // 每個頂點：aP 位置(px，相對畫面中心) aQ 局部座標(px：x＝離中心線、y＝標記用) aK 種類 aF 填色 aO 外框色 aG 光暈強度
-    const GL_VERT_FLOATS = 12;
-    const GL_VS = `attribute vec2 aP,aQ;attribute float aK,aG;attribute vec3 aF,aO;
-uniform mat4 M;uniform float k;varying vec2 vQ;varying float vK,vG;varying vec3 vF,vO;
-void main(){vQ=aQ;vK=aK;vG=aG;vF=aF;vO=aO;gl_Position=M*vec4(aP*k,0.0,1.0);}`;
+    // 網格跟縮放無關：aP 是建網格那時的 px（相對網格原點），每幀只換 uniform（off、a、k）就跟著縮放平移，
+    // 不用每幀重算、重新上傳（v1.6.2 每幀重算，長路線一幀十幾 ms，縮放卡頓）。縮放差超過半級才重建。
+    // aN 是斜接法線、aQ.x 是離中心線的 px（帶正負號）、aQ 也是標記點的局部 px
+    const GL_VERT_FLOATS = 14;
+    const GL_VS = `attribute vec2 aP,aN,aQ;attribute float aK,aG;attribute vec3 aF,aO;
+uniform mat4 M;uniform float k,a;uniform vec2 off;varying vec2 vQ;varying float vK,vG;varying vec3 vF,vO;
+void main(){vQ=aQ;vK=aK;vG=aG;vF=aF;vO=aO;vec2 px=aK>1.5?aQ:aN*aQ.x;
+gl_Position=M*vec4(off+aP*a+px*k,0.0,1.0);}`;
     const GL_FS = `precision mediump float;varying vec2 vQ;varying float vK,vG;varying vec3 vF,vO;uniform float dpr;
 void main(){
  if(vK<0.5){float d=abs(vQ.x);float a=vG*(1.0-smoothstep(${GL_GLOW_FADE_FROM_PX.toFixed(1)},${GL_GLOW_HALF_PX.toFixed(1)},d));
@@ -3404,7 +3437,8 @@ void main(){
  else if(r<=${(MARK_R_PX + 1.5).toFixed(1)})c=vec4(0.125,0.129,0.141,1.0);else discard;
  gl_FragColor=c;}`;
 
-    const rgb01 = h => hexRgb(h).map(v => v / 255);
+    const rgbCache = new Map();
+    const rgb01 = h => { let v = rgbCache.get(h); if (!v) { v = hexRgb(h).map(x => x / 255); rgbCache.set(h, v); } return v; };
     const mix01 = (a, b, t) => a.map((v, i) => v + (b[i] - v) * t);
     const colAt = (cols, x) => {
         const i = Math.min(cols.length - 2, Math.floor(x));
@@ -3469,7 +3503,7 @@ void main(){
             const i = Math.min(2, Math.floor(x));
             return RIBBON_GLOW_ALPHA[i] + (RIBBON_GLOW_ALPHA[i + 1] - RIBBON_GLOW_ALPHA[i]) * Math.min(1, x - i);
         };
-        const v = (x, y, qx, qy, kind, f, o, g) => out.push(x, y, qx, qy, kind, f[0], f[1], f[2], o[0], o[1], o[2], g);
+        const v = (x, y, nx, ny, qx, qy, kind, f, o, g) => out.push(x, y, nx, ny, qx, qy, kind, f[0], f[1], f[2], o[0], o[1], o[2], g);
         // 每一點的法線：前後兩段法線的平均（斜接），長度補成讓帶子寬度不變，最多 2 倍免得尖角炸開
         const normals = st => st.map((p, j) => {
             const a0 = st[j - 1] || p, a1 = st[j + 1] || p;
@@ -3488,12 +3522,12 @@ void main(){
             for (let j = 1; j < st.length; j++) {
                 const p = st[j - 1], q = st[j], np = nm[j - 1], nq = nm[j];
                 const fp = colF(p), fq = colF(q), op = colO(p), oq = colO(q), gp = g(p), gq = g(q);
-                v(p.x + np[0] * hw, p.y + np[1] * hw, hw, 0, kind, fp, op, gp);
-                v(p.x - np[0] * hw, p.y - np[1] * hw, -hw, 0, kind, fp, op, gp);
-                v(q.x + nq[0] * hw, q.y + nq[1] * hw, hw, 0, kind, fq, oq, gq);
-                v(q.x + nq[0] * hw, q.y + nq[1] * hw, hw, 0, kind, fq, oq, gq);
-                v(p.x - np[0] * hw, p.y - np[1] * hw, -hw, 0, kind, fp, op, gp);
-                v(q.x - nq[0] * hw, q.y - nq[1] * hw, -hw, 0, kind, fq, oq, gq);
+                v(p.x, p.y, np[0], np[1], hw, 0, kind, fp, op, gp);
+                v(p.x, p.y, np[0], np[1], -hw, 0, kind, fp, op, gp);
+                v(q.x, q.y, nq[0], nq[1], hw, 0, kind, fq, oq, gq);
+                v(q.x, q.y, nq[0], nq[1], hw, 0, kind, fq, oq, gq);
+                v(p.x, p.y, np[0], np[1], -hw, 0, kind, fp, op, gp);
+                v(q.x, q.y, nq[0], nq[1], -hw, 0, kind, fq, oq, gq);
             }
         };
         const good = strips.filter(st => st.length >= 2);
@@ -3509,7 +3543,7 @@ void main(){
         });
         if (marker) {
             const R = MARK_R_PX + 2, z = [0, 0, 0];
-            const c = (qx, qy) => v(marker.x + qx, marker.y + qy, qx, qy, 2, z, z, 1);
+            const c = (qx, qy) => v(marker.x, marker.y, 0, 0, qx, qy, 2, z, z, 1);
             c(-R, -R); c(R, -R); c(R, R); c(-R, -R); c(R, R); c(-R, R);
         }
         return new Float32Array(out);
