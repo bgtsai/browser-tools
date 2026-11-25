@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.3.1
+// @version      1.4.0
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -111,6 +111,16 @@
     //   ③ 等速移動            → 加上 easeInOutCubic 緩動，起停自然
     //   ④ 縮放一級一級跳      → 改用滾輪（實測是連續的，會出現 17.6z 這種非整數）
     const PAN_MIN_MS = 350;                    // 平移最短時長
+    // ── 點格子把地圖移到那個點（v0.77.0 的做法，v1.4.0 搬回來）──
+    // 與 Google 自己一致：實測點路線節點時，它一律縮放到整數 17.00
+    //（18.03→17.00、16.17→17.00，一個往下一個往上都精準落在 17）
+    const MAP_FOCUS_ZOOM = 17;                 // 點擊節點時要拉近到的縮放層級
+    const PAN_MS_PER_SCREEN = 300;             // 每多移動一個畫面寬就多這麼久
+    const PAN_MAX_MS = 900;                    // 平移最長時長
+    const ARC_MAX_ZOOM_OUT = 10;               // 拉遠的級數上限（台北→高雄這種極遠距離需要 9 級）
+    const CONVERGE_MIN_EFFECT = 0.5;           // 一次修正的實際改善量，至少要有該次拖曳量的一半；
+                                               // 也用於「再點同一個節點」時判斷不必動作
+    const DEAD_ZONE_PX = 50;                   // 停滯時若剩下的誤差在此範圍內，視為抖動、接受它
     // 滾輪縮放的實測結果（間隔 vs 每事件縮放量）：
     //   16ms → 0.000 級（完全無效，那正是 requestAnimationFrame 的間隔）
     //   30ms → 0.256 級（打折）
@@ -221,6 +231,8 @@
         lastRouteKey: '',
         lastRouteKeyHref: '',
         ownFetches: new Set(),      // 自己補抓的網址：它也會經過攔截器，要跳過，不然會被當成 Google 的請求
+        focusSeq: 0,                // 點格子移動地圖的第幾趟；新的一趟開始，舊的就停手
+        sidebarCollapseDone: false, // 這次打開已經收過 Google 左側面板（重算時不再收）
         sawIntercept: false,        // 頁面載入後攔到過 Google 自己的路線請求（之後畫面用的就不是 preload 那份）
         capturedDirections: null,   // 攔截到的 /maps/preview/directions 回應
         gToken: '',                 // Google 內部端點的 session 權杖
@@ -2152,6 +2164,9 @@ ${field('API 授權碼',
         const prev = state.pageMode;
         state.pageMode = mode;
         state.forceShown = false;
+        // 離開路線地圖：正在跑的「點格子移動地圖」作廢。只在 alive() 檢查時看畫面不夠——
+        // 街景只待一下就回來的話，檢查時又是路線地圖，舊的那趟會接著拖（v1.4.0 無頭測試抓到）
+        if (mode !== 'route') state.focusSeq++;
         // 點地點自動收合；回到路線自動展開（使用者自己按〔收合〕的 state.collapsed 不動）
         state.autoCollapsed = mode === 'place';
         log('畫面切換', prev, '→', mode);
@@ -2436,6 +2451,7 @@ ${field('API 授權碼',
 
         state.lastRouteKey = routeSignature(location.href);
         state.lastRouteKeyHref = location.href;
+        state.sidebarCollapseDone = false;
         state.collapsed = false;
         state.autoCollapsed = false;
         state.forceShown = false;
@@ -2568,9 +2584,13 @@ ${field('API 授權碼',
         let names = readEndpointNames();
         if (!names.length && cachedSel) names = cachedSel.names;
         state.lastSelected = { key: dataKey, names };
-        // 資料都讀完了才收 Google 的左側面板：收起後路線面板尺寸變 0，選中的路線、
-        // 起訖名稱都讀不到（2026-11-24 實測）
-        collapseGoogleSidebar();
+        // 資料都讀完了才收 Google 的左側面板：收起後路線面板尺寸變 0，起訖名稱讀不到（2026-11-24 實測）。
+        // 只在按開「旅途中的雨」後的第一次收：之後的重算多半是使用者打開左側面板選別條路線觸發的，
+        // 再收回去他就得重開一次（2026-11-25 實機，使用者決定）
+        if (!state.sidebarCollapseDone) {
+            state.sidebarCollapseDone = true;
+            collapseGoogleSidebar();
+        }
         if (names.length) {
             log('面板讀到的地點名稱：', names.join(' ／ '));
         } else {
@@ -2994,10 +3014,17 @@ ${field('API 授權碼',
         scroll.addEventListener('click', ev => {
             const h = hit(ev);
             if (!h) return;
-            // 點一下釘住這一欄，再點同一欄取消
+            // 點一下釘住這一欄，再點同一欄取消。
+            // 點在格子上（不是摘要條、刻度）而且是釘住，就把地圖移到那個點並拉近（使用者選 C1，2026-11-25）；
+            // 取消釘住不動地圖
             view.pinnedCol = view.pinnedCol === h.ci ? null : h.ci;
             state.pinnedMs = view.pinnedCol == null ? null : view.departures[h.ci].getTime();
             updateShownColumn();
+            const node = h.onCell && view.pinnedCol === h.ci ? view.nodes[h.ri] : null;
+            if (node && Number.isFinite(node.lat) && Number.isFinite(node.lon)) {
+                log('點格子，地圖移到', (node.county || '') + (node.town || ''));
+                focusMapOn(node.lat, node.lon).catch(err => warn('移動地圖失敗｜', err.message));
+            }
         });
     }
 
@@ -3197,6 +3224,273 @@ ${field('API 授權碼',
     }
 
     /** 路線外框在目前視野下的螢幕範圍 */
+    // ── 點格子：把地圖移到那個點並拉近（從 v0.77.0 搬回來）──
+    /**
+     * 目標要停在「面板上方的可見區」中心，不是畫布中心：底部面板蓋住了下半部
+     * （v0.77.0 的舊版沒有底部面板，對準的是畫布中心）。回傳可見區中心減畫布中心。
+     */
+    function focusBias() {
+        const canvas = findMapCanvas();
+        const a = visibleMapArea();
+        if (!canvas || !a) return { bx: 0, by: 0 };
+        const r = canvas.getBoundingClientRect();
+        return { bx: (a.left + a.right) / 2 - (r.left + r.width / 2),
+            by: (a.top + a.bottom) / 2 - (r.top + r.height / 2) };
+    }
+
+    /**
+     * 自有的視野模型。
+     *
+     * 為什麼不每一步都讀網址：網址更新是非同步的，每次都要輪詢等它反映，
+     * 實測那些等待佔掉整段動畫 31% 的時間，而且畫面在等待期間完全靜止——
+     * 那正是「一段一段、不連續」的來源。
+     *
+     * 我們自己知道送了幾個滾輪事件、拖了幾像素，可以直接推算新的視野，
+     * 讓各階段無縫接續。累積的誤差在最後統一校正一次即可。
+     */
+    function makeViewModel(vp) {
+        return {
+            lat: vp.lat, lon: vp.lon, zoom: vp.zoom,
+            /** 縮放以畫面中心為錨點，中心座標不變 */
+            applyZoom(delta) { this.zoom += delta; },
+            /** 拖曳 (dx, dy) 像素：地圖跟著游標走，等於中心往反方向移動 */
+            applyPan(dx, dy) {
+                const p = projectToPixel(this.lat, this.lon, this.zoom);
+                const n = unprojectFromPixel(p.x - dx, p.y - dy, this.zoom);
+                this.lat = n.lat; this.lon = n.lon;
+            },
+            /** 目標相對於畫面中心的像素位移 */
+            offsetTo(lat, lon) {
+                const c = projectToPixel(this.lat, this.lon, this.zoom);
+                const t = projectToPixel(lat, lon, this.zoom);
+                const b = focusBias();
+                return { dx: c.x - t.x + b.bx, dy: c.y - t.y + b.by };
+            },
+        };
+    }
+
+    /** 目前視野下，目標相對於畫面中心的像素位移 */
+    function offsetToTarget(lat, lon) {
+        const vp = readViewport();
+        if (!vp) return null;
+        const c = projectToPixel(vp.lat, vp.lon, vp.zoom);
+        const t = projectToPixel(lat, lon, vp.zoom);
+        const b = focusBias();
+        return { dx: c.x - t.x + b.bx, dy: c.y - t.y + b.by, zoom: vp.zoom };
+    }
+
+    /** 整段動畫結束後才校正，而且只在誤差夠大時才動——這是流暢度的關鍵取捨 */
+    /**
+     * 最後校正：等視野真的停穩，量實際誤差，超過門檻就修，修完再量。
+     * 迴圈直到到位或次數用盡——這是「結果一定要對」的保證。
+     */
+    /**
+     * 最後校正：等視野確實反映出動作結果，量實際誤差，超過門檻才修，修完再量。
+     *
+     */
+    /**
+     * 最後校正：確保結果一定是對的。
+     *
+     * 關鍵前提是**先讓縮放到位再量位置**。像素距離會隨縮放層級改變，
+     * 在還沒縮放完的狀態下量到的數字，跟縮放完之後的數字不能相比——
+     * 實測踩過：同一個誤差在 zoom 11.04 量到 727px、在 15.83 量到 20109px，
+     * 收斂保護就誤判成「越修越糟」而停手，其實誤差根本沒變。
+     *
+     */
+    async function correctIfNeeded(canvas, lat, lon, alive = () => true) {
+        // ── 第一步：確認縮放到位，不到就補 ──
+        // 動作本身已經等過視野反映，這裡直接讀值即可
+        let settled = lastSettled;
+        for (let z = 0; z < 3; z++) {
+            const vp = readViewport();
+            if (!vp) break;
+            const diff = MAP_FOCUS_ZOOM - vp.zoom;
+            if (Math.abs(diff) <= ZOOM_TOLERANCE) break;
+            writeDiag({ step: 'zoom-fix', round: z, realZoom: vp.zoom, need: +diff.toFixed(2) });
+            if (!alive()) return null;   // 換了點、或離開路線地圖（例如進街景）就停手
+            await smoothZoom(canvas, diff);
+            settled = lastSettled;
+        }
+
+        // ── 第二步：縮放已固定，此時的像素距離才可以互相比較 ──
+        let dist = null;
+        let lastDist = Infinity;
+        let lastApplied = Infinity;
+        for (let i = 0; i < PAN_MAX_ITERATIONS; i++) {
+            const off = offsetToTarget(lat, lon);
+            if (!off) return dist;
+            dist = Math.hypot(off.dx, off.dy);
+            writeDiag({ step: 'correct', round: i, settled,
+                zoom: off.zoom, distPx: Math.round(dist) });
+            if (dist <= PAN_TOLERANCE_PX) return dist;      // 已經到位
+
+            if (i > 0) {
+                // 這次拖曳「能夠」貢獻的量：要嘛是整段誤差，要嘛被單次上限夾住
+                const couldFix = Math.min(lastApplied, lastDist);
+                const improved = lastDist - dist;
+                if (improved < couldFix * CONVERGE_MIN_EFFECT) {
+                    // 改善停滯。此時才判斷是「小到修不動的抖動」還是「真的有問題」
+                    writeDiag({ step: 'correct-stall', round: i,
+                        distPx: Math.round(dist), improvedPx: Math.round(improved),
+                        couldFixPx: Math.round(couldFix),
+                        verdict: dist <= DEAD_ZONE_PX ? '抖動，接受' : '無法收斂' });
+                    return dist;
+                }
+            }
+            lastDist = dist;
+
+            const r = canvas.getBoundingClientRect();
+            const dx = Math.max(-r.width * DRAG_MAX_SCREENS,
+                Math.min(r.width * DRAG_MAX_SCREENS, off.dx));
+            const dy = Math.max(-r.height * DRAG_MAX_SCREENS,
+                Math.min(r.height * DRAG_MAX_SCREENS, off.dy));
+            lastApplied = Math.hypot(dx, dy);
+            if (!alive()) return null;   // 換了點、或離開路線地圖（例如進街景）就停手
+            await smoothPan(canvas, dx, dy, PAN_MIN_MS, findPressPoint(canvas, dx, dy));
+            settled = lastSettled;
+        }
+        const off = offsetToTarget(lat, lon);
+        return off ? Math.hypot(off.dx, off.dy) : dist;
+    }
+
+    /**
+     * 已經夠接近就什麼都不做。
+     *
+     * 沒有這道判斷的話，反覆點同一個節點會在兩個位置之間來回橫跳：
+     * 每次都為了幾十像素的誤差再拖一次，而那次拖曳自己又留下差不多的誤差。
+     * 對使用者來說那就是「程式有問題」，而不是「更精確」。
+     */
+    function withinDeadZone(lat, lon) {
+        const vp = readViewport();
+        if (!vp) return false;
+        if (Math.abs(vp.zoom - MAP_FOCUS_ZOOM) > 0.3) return false;   // 縮放層級還不對
+        const off = offsetToTarget(lat, lon);
+        return off ? Math.hypot(off.dx, off.dy) <= DEAD_ZONE_PX : false;
+    }
+
+    async function focusMapOn(lat, lon) {
+        // 動畫要好幾秒：期間又點了別的格子，或離開路線地圖（進街景、點地點；見 applyPageMode），
+        // 這一趟就停手——不然它會在街景裡繼續拖、把網址改回路線（v1.4.0 無頭測試抓到）
+        const seq = ++state.focusSeq;
+        const alive = () => seq === state.focusSeq;
+        if (withinDeadZone(lat, lon)) {
+            writeDiag({ step: 'skip', reason: '已在死區內，不動作' });
+            log('已經夠接近目標，不動作');
+            return;
+        }
+        const canvas = findMapCanvas();
+        const vp0 = readViewport();
+        if (!canvas || !vp0) {
+            writeDiag({ step: 'abort', reason: !canvas ? '找不到畫布' : '讀不到視野' });
+            return;
+        }
+        const r = canvas.getBoundingClientRect();
+        const limX = r.width * DRAG_MAX_SCREENS;
+        const limY = r.height * DRAG_MAX_SCREENS;
+
+        // 全程以自有模型推算，不在階段之間讀網址——那些等待會讓畫面靜止，
+        // 是「一段一段」感受的主因。誤差留到最後統一校正。
+        const model = makeViewModel(vp0);
+        const off0 = model.offsetTo(lat, lon);
+        const screens = Math.max(Math.abs(off0.dx) / r.width, Math.abs(off0.dy) / r.height);
+        const panMs = Math.min(PAN_MAX_MS, PAN_MIN_MS + screens * PAN_MS_PER_SCREEN);
+
+        // ① 太遠先拉遠，拉到剛好塞得進一次手勢即可——多拉一級就多一次圖磚重載
+        const arcOut = screens > DRAG_MAX_SCREENS
+            ? Math.min(ARC_MAX_ZOOM_OUT,
+                Math.ceil(Math.log2(screens / DRAG_MAX_SCREENS)),
+                Math.max(0, Math.floor(vp0.zoom - MIN_WORK_ZOOM)))
+            : 0;
+        writeDiag({ step: 'plan', from: [vp0.lat, vp0.lon, vp0.zoom],
+            target: [+lat.toFixed(5), +lon.toFixed(5)],
+            screens: +screens.toFixed(2), arcOut, panMs: Math.round(panMs) });
+
+        if (arcOut > 0) {
+            if (!alive()) return;   // 換了點、或離開路線地圖（例如進街景）就停手
+            const applied = await smoothZoom(canvas, -arcOut);
+            model.applyZoom(applied);
+            // smoothZoom 內部已等到視野反映，這裡的讀值可以安全採用
+            const vpAfterZoom = readViewport();
+            if (lastSettled && vpAfterZoom) {
+                // 此時的讀值已確認反映了動作，可以安全地校準模型
+                model.lat = vpAfterZoom.lat;
+                model.lon = vpAfterZoom.lon;
+                model.zoom = vpAfterZoom.zoom;
+            }
+            writeDiag({ step: 'after-arc-out', settled: lastSettled,
+                modelZoom: +model.zoom.toFixed(2),
+                realZoom: vpAfterZoom ? vpAfterZoom.zoom : null });
+        }
+
+        // ② 平移。位移在「拉遠後的層級」重新算——用舊層級會差十幾倍。
+        //
+        //    最後一輪之後一定要驗證實際位置：**殘留誤差會被接下來的拉近放大 2^N 倍**
+        //    （拉近 5 級＝32 倍）。在低縮放層級修，同樣的角度誤差只對應少少的像素，
+        //    一次就修得完；等到拉近後才發現，就得拖好幾次而且每次上限只有 0.6 個畫面。
+        let pans = 0;
+        let lastDist = Infinity;
+        let lastApplied = Infinity;
+        for (let i = 0; i < PAN_MAX_ITERATIONS; i++) {
+            const off = model.offsetTo(lat, lon);
+            const dist = Math.hypot(off.dx, off.dy);
+            if (dist <= PAN_TOLERANCE_PX) break;
+            if (i > 0) {
+                // 停滯判斷同樣看「改善量 vs 該次拖曳量」，不用固定比例——
+                // 拖曳有上限，誤差比上限大時本來就只能一次減少一個上限的量
+                const couldFix = Math.min(lastApplied, lastDist);
+                const improved = lastDist - dist;
+                if (improved < couldFix * CONVERGE_MIN_EFFECT) {
+                    writeDiag({ step: 'pan-stall', round: i,
+                        distPx: Math.round(dist), improvedPx: Math.round(improved),
+                        couldFixPx: Math.round(couldFix) });
+                    break;
+                }
+            }
+            lastDist = dist;
+            const dx = Math.max(-limX, Math.min(limX, off.dx));
+            const dy = Math.max(-limY, Math.min(limY, off.dy));
+            lastApplied = Math.hypot(dx, dy);
+            pans++;
+            if (!alive()) return;   // 換了點、或離開路線地圖（例如進街景）就停手
+            await smoothPan(canvas, dx, dy, i === 0 ? panMs : PAN_MIN_MS,
+                findPressPoint(canvas, dx, dy));
+            model.applyPan(dx, dy);
+            // 平移後的殘留會被接下來的拉近放大 2^N 倍，所以要確認實際位置
+            const vpAfterPan = readViewport();
+            if (lastSettled && vpAfterPan) {
+                model.lat = vpAfterPan.lat;
+                model.lon = vpAfterPan.lon;
+                model.zoom = vpAfterPan.zoom;
+            }
+            writeDiag({ step: 'after-pan', round: i, settled: lastSettled,
+                remainPx: Math.round(Math.hypot(
+                    model.offsetTo(lat, lon).dx, model.offsetTo(lat, lon).dy)) });
+        }
+
+        // ③ 拉近到目標層級（滾輪錨定畫面中心，目標會留在原地）。
+        //    這裡一定要就地等它跑完：縮放動畫進行中網址不會更新，
+        //    若留到後面才用「整段開始前」的舊 key 去等，第一段比對會立刻通過，
+        //    退化成「連續兩次讀到相同」而誤判停穩——實測因此重複拉近、衝到 18.82 級。
+        if (!alive()) return;   // 換了點、或離開路線地圖（例如進街景）就停手
+        const applied = await smoothZoom(canvas, MAP_FOCUS_ZOOM - model.zoom);
+        model.applyZoom(applied);
+        writeDiag({ step: 'after-zoom-in', settled: lastSettled,
+            modelZoom: +model.zoom.toFixed(2),
+            realZoom: (readViewport() || {}).zoom });
+
+        // ④ 動畫全部結束後才讀真實視野、校正累積誤差。
+        //    只在這裡等一次，而不是每個階段都等。
+        const finalDist = await correctIfNeeded(canvas, lat, lon, alive);
+        const vpEnd = readViewport();
+        writeDiag({
+            step: 'done', target: [+lat.toFixed(5), +lon.toFixed(5)],
+            screens: +screens.toFixed(2), arcZoomOut: arcOut, pans,
+            modelZoom: +model.zoom.toFixed(2), realZoom: vpEnd ? vpEnd.zoom : null,
+            finalDistPx: finalDist === null ? null : Math.round(finalDist),
+            errorKm: vpEnd ? +(haversine(vpEnd.lat, vpEnd.lon, lat, lon) / 1000).toFixed(3) : null,
+        });
+    }
+
     function routeScreenBox(timeline) {
         const proj = screenProjector();
         if (!proj) return null;
@@ -3271,7 +3565,16 @@ ${field('API 授權碼',
     }
 
     /** Web Mercator：經緯度 → 世界像素座標 */
-    function projectToPixel(lat, lon, zoom) {
+/** Web Mercator 反投影：世界像素座標 → 經緯度。點格子移動地圖時維護自有視野模型要用 */
+    function unprojectFromPixel(x, y, zoom) {
+        const world = 256 * Math.pow(2, zoom);
+        const lon = x / world * 360 - 180;
+        const n = Math.PI - 2 * Math.PI * y / world;
+        const lat = 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+        return { lat, lon };
+    }
+
+        function projectToPixel(lat, lon, zoom) {
         const world = 256 * Math.pow(2, zoom);
         const x = (lon + 180) / 360 * world;
         const s = Math.sin(lat * Math.PI / 180);

@@ -49,6 +49,13 @@ def run(engine, pw):
     # 先釘住一欄、拖矮，之後看能不能恢復原狀
     cell = pg.evaluate("(() => { const e = document.querySelectorAll('.rr-row')[2].querySelectorAll('.rr-c')[40].getBoundingClientRect(); return [e.left + 6, e.top + 6]; })()")
     pg.mouse.click(*cell); pg.mouse.move(700, 100)
+    # v1.4.0 起點格子會把地圖移過去（假地圖放開後才寫網址）：等它做完，免得跟後面的街景搶網址
+    pg.wait_for_function("__map.drags + __map.wheels > 0", timeout=10000)
+    prev = -1
+    for _ in range(40):
+        cur = pg.evaluate("__map.drags + __map.wheels")
+        if cur == prev: break
+        prev = cur; pg.wait_for_timeout(800)
     gr = R('.rr-grip'); gx, gy = gr[0] + gr[2] / 2, gr[1] + 4
     pg.mouse.move(gx, gy); pg.mouse.down(); pg.mouse.move(gx, gy + 60, steps=4)
     hd = R('#rr-panel')[3]

@@ -10,7 +10,8 @@
 - 改法（使用者同意）：只用 Google 自己收到的資料（每份記 dataKey＝停靠點＋3e，`directionsFor` 等這條路線的資料最多 3 秒；頁面載入後還沒攔到過才用 preload 補抓）；用 `!5i` 取第幾條；簽章含 5i；攔到同一條路線的新內容就重算；`routeMismatchReason` 核對清單選中那列的距離與時間，對不上先用同網址重抓一次，還是不對就不畫色帶、ⓘ 紅字。`pickAlternative`（比距離）、`readSelectedRoute` 已刪除。
 - 測試：新增 `tests/test_route_pick.py`（8 個改壞版全抓到）；四支測試 Chromium＋Firefox 全通過。
 - v1.3.1：實機打開就「出錯了：alts is not defined」（run() 結尾還留著舊變數名；當時的未定義檢查只看函式呼叫，抓不到一般變數）——改名修好，靜態檢查改用 ESLint no-undef（拿 v1.3.0 反證抓得到）。自己補抓的 fetch 也經過攔截器、被當成 Google 的請求：加 `ownFetches` 跳過（新測試＋改壞版 M9 抓得到）。run() 本身沒有端到端測試，靠真實頁面驗。
-- 還沒決定：點格子要不要恢復「把地圖移到那個點」（v1.0.0 我自己拿掉、沒先問；選項 C1 點格子同時移動／C2 點地點名稱才移動／C3 雙擊），以及要不要為此歸因。
+- v1.4.0（使用者決定）：①重算時不再收 Google 左側面板，只在按開「旅途中的雨」後第一次收（`state.sidebarCollapseDone`）；②C1：點格子＝釘住那一欄＋把地圖移到那個點並拉近到 17 級（從 v0.77.0 搬回 focusMapOn／correctIfNeeded／withinDeadZone／makeViewModel／offsetToTarget／unprojectFromPixel 與常數；沒搬 hoverOnMap，所以不會冒出 Google 的資訊卡）。點摘要條、取消釘住不動地圖。目標對準「面板上方可見區」中心（`focusBias`），不是畫布中心。離開路線地圖（applyPageMode）或又點別格時 `focusSeq++`，舊的那趟停手。測試 `tests/test_focus.py`（F1～F5 改壞版都抓到）。歸因已改 01 v2.70。
+- 實機要驗（v1.4.0）：重算後左側面板維持使用者的狀態；點格子移動、拉近，點停在面板上方。
 - 實機要驗：切別條（!5i）色帶跟著換、切交通方式、收著面板時也對；再接原本的 ①～⑤。
 
 ### 目前狀態（2026-11-24）
