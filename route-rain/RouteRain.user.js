@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.4.0
+// @version      1.4.1
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -3224,20 +3224,12 @@ ${field('API 授權碼',
     }
 
     /** 路線外框在目前視野下的螢幕範圍 */
-    // ── 點格子：把地圖移到那個點並拉近（從 v0.77.0 搬回來）──
-    /**
-     * 目標要停在「面板上方的可見區」中心，不是畫布中心：底部面板蓋住了下半部
-     * （v0.77.0 的舊版沒有底部面板，對準的是畫布中心）。回傳可見區中心減畫布中心。
-     */
-    function focusBias() {
-        const canvas = findMapCanvas();
-        const a = visibleMapArea();
-        if (!canvas || !a) return { bx: 0, by: 0 };
-        const r = canvas.getBoundingClientRect();
-        return { bx: (a.left + a.right) / 2 - (r.left + r.width / 2),
-            by: (a.top + a.bottom) / 2 - (r.top + r.height / 2) };
-    }
-
+    // ── 點格子：把地圖移到那個點並拉近（從 v0.77.0 照原樣搬回來）──
+    //
+    // 目標必須是「畫面（畫布）中心」，不能改成別的點：Google 的滾輪縮放以畫面中心為錨點，
+    // 只有停在中心的點拉近時不會跑掉。改成別的點（例如底部面板上方的可見區中心），
+    // 偏移在拉近 N 級時放大 2^N 倍——v1.4.0 就這樣改過，從 11 級拉到 17 級時偏了幾千 px、
+    // 要點兩次才對準。面板蓋不到畫面中心（實測面板上緣 773、中心 476，視窗高 953）。
     /**
      * 自有的視野模型。
      *
@@ -3259,12 +3251,11 @@ ${field('API 授權碼',
                 const n = unprojectFromPixel(p.x - dx, p.y - dy, this.zoom);
                 this.lat = n.lat; this.lon = n.lon;
             },
-            /** 目標相對於畫面中心的像素位移 */
+            /** 目標相對於畫面中心的像素位移（必須是畫面中心，見本段開頭：縮放錨點） */
             offsetTo(lat, lon) {
                 const c = projectToPixel(this.lat, this.lon, this.zoom);
                 const t = projectToPixel(lat, lon, this.zoom);
-                const b = focusBias();
-                return { dx: c.x - t.x + b.bx, dy: c.y - t.y + b.by };
+                return { dx: c.x - t.x, dy: c.y - t.y };
             },
         };
     }
@@ -3275,8 +3266,7 @@ ${field('API 授權碼',
         if (!vp) return null;
         const c = projectToPixel(vp.lat, vp.lon, vp.zoom);
         const t = projectToPixel(lat, lon, vp.zoom);
-        const b = focusBias();
-        return { dx: c.x - t.x + b.bx, dy: c.y - t.y + b.by, zoom: vp.zoom };
+        return { dx: c.x - t.x, dy: c.y - t.y, zoom: vp.zoom };
     }
 
     /** 整段動畫結束後才校正，而且只在誤差夠大時才動——這是流暢度的關鍵取捨 */

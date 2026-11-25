@@ -51,10 +51,12 @@ def run(engine, pw):
     pg.mouse.click(*cell); pg.mouse.move(700, 100)
     # v1.4.0 起點格子會把地圖移過去（假地圖放開後才寫網址）：等它做完，免得跟後面的街景搶網址
     pg.wait_for_function("__map.drags + __map.wheels > 0", timeout=10000)
-    prev = -1
-    for _ in range(40):
+    # 移動分好幾段，段與段之間會等網址停穩（最多 3 秒）：連續 4 秒沒動才算做完
+    prev, still = -1, 0
+    for _ in range(60):
         cur = pg.evaluate("__map.drags + __map.wheels")
-        if cur == prev: break
+        still = still + 1 if cur == prev else 0
+        if still >= 5: break
         prev = cur; pg.wait_for_timeout(800)
     gr = R('.rr-grip'); gx, gy = gr[0] + gr[2] / 2, gr[1] + 4
     pg.mouse.move(gx, gy); pg.mouse.down(); pg.mouse.move(gx, gy + 60, steps=4)

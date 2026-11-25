@@ -1,4 +1,4 @@
-"""RouteRain v1.4.0 點格子：釘住那一欄並把地圖移到那個點（使用者選 C1）。
+"""RouteRain v1.4.1 點格子：釘住那一欄並把地圖移到那個點（使用者選 C1；照 v0.77.0 原樣停在畫面中心）。
 用法：python3 test_focus.py ../RouteRain.user.js [--shots 目錄] [--engines chromium,firefox]
 假地圖見 harness.html 的 __fakeMapOn：視野只寫在網址，放開後延遲才更新。
 """
@@ -57,10 +57,10 @@ def run(engine, pw):
       const p = (""" + PROJ + """)(n.lat, n.lon);
       return { p, area: [a.left, a.top, a.right, a.bottom], zoom: window.__rr.readViewport().zoom,
         pinned: !!document.querySelector('.rr-pin'), pinnedMs: window.__rr.state.pinnedMs, moves: __map.drags + __map.wheels }; })()""")
-    a = res['area']; cx, cy = (a[0] + a[2]) / 2, (a[1] + a[3]) / 2
+    a = res['area']; cx, cy = 1512 / 2, 888 / 2      # 畫面（畫布）中心：Google 滾輪縮放的錨點
     check('點格子：那一欄被釘住', res['pinnedMs'] is not None, res)
     check('地圖拉近到 17 級（±0.3）', abs(res['zoom'] - 17) <= 0.3, res)
-    check('那個點停在面板上方可見區的中心（±25）', abs(res['p'][0] - cx) <= 25 and abs(res['p'][1] - cy) <= 25, (res['p'], cx, cy))
+    check('那個點停在畫面中心（±25）', abs(res['p'][0] - cx) <= 25 and abs(res['p'][1] - cy) <= 25, (res['p'], cx, cy))
     check('點在可見區內、不被面板蓋住', a[1] <= res['p'][1] <= a[3], res)
     # 把地圖移走，取消釘住時才看得出有沒有被移回來
     pg.evaluate("(() => { Object.assign(__map, { lat: 25.03, lon: 121.50, zoom: 15 }); location.hash = `/maps/dir/a/b/@25.0300000,121.5000000,15.00z`; })()")
@@ -86,6 +86,23 @@ def run(engine, pw):
     pg.wait_for_timeout(6000)
     s2 = pg.evaluate("__map.drags + __map.wheels")
     check('移動途中進街景：停手、不再拖', s2 == s1, (s1, s2))
+    # 從很低的縮放層級、很遠的地方點（大範圍路線）：一次就要對準，不能要點兩次
+    pg.evaluate("(() => { Object.assign(__map, { lat: 24.95, lon: 121.30, zoom: 11 }); __map.path = '/maps/dir/a/b'; location.hash = `/maps/dir/a/b/@24.9500000,121.3000000,11.00z`; })()")
+    pg.wait_for_timeout(1500)
+    w0 = pg.evaluate("__map.drags + __map.wheels")
+    cell3 = pg.evaluate("(() => { const e = document.querySelectorAll('.rr-row')[6].querySelectorAll('.rr-c')[20].getBoundingClientRect(); return [e.left + 6, e.top + 6]; })()")
+    pg.mouse.click(*cell3)
+    pg.wait_for_function("__map.drags + __map.wheels > " + str(w0), timeout=10000)
+    # 移動分好幾段，段與段之間會等網址停穩（最多 3 秒）：連續 4 秒沒動才算做完
+    prev, still = -1, 0
+    for _ in range(60):
+        cur = pg.evaluate("__map.drags + __map.wheels")
+        still = still + 1 if cur == prev else 0
+        if still >= 5: break
+        prev = cur; pg.wait_for_timeout(800)
+    res4 = pg.evaluate("""(() => { const n = window.__fixture(window.__rr).nodes[6];
+      const p = (""" + PROJ + """)(n.lat, n.lon); return { p, zoom: window.__rr.readViewport().zoom }; })()""")
+    check('從 11 級點：一次就拉近到 17 級、停在畫面中心（±25）', abs(res4['zoom'] - 17) <= 0.3 and abs(res4['p'][0] - cx) <= 25 and abs(res4['p'][1] - cy) <= 25, res4)
     check('沒有頁面錯誤', not errs, errs)
     b.close()
 

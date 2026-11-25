@@ -11,7 +11,8 @@
 - 測試：新增 `tests/test_route_pick.py`（8 個改壞版全抓到）；四支測試 Chromium＋Firefox 全通過。
 - v1.3.1：實機打開就「出錯了：alts is not defined」（run() 結尾還留著舊變數名；當時的未定義檢查只看函式呼叫，抓不到一般變數）——改名修好，靜態檢查改用 ESLint no-undef（拿 v1.3.0 反證抓得到）。自己補抓的 fetch 也經過攔截器、被當成 Google 的請求：加 `ownFetches` 跳過（新測試＋改壞版 M9 抓得到）。run() 本身沒有端到端測試，靠真實頁面驗。
 - v1.4.0（使用者決定）：①重算時不再收 Google 左側面板，只在按開「旅途中的雨」後第一次收（`state.sidebarCollapseDone`）；②C1：點格子＝釘住那一欄＋把地圖移到那個點並拉近到 17 級（從 v0.77.0 搬回 focusMapOn／correctIfNeeded／withinDeadZone／makeViewModel／offsetToTarget／unprojectFromPixel 與常數；沒搬 hoverOnMap，所以不會冒出 Google 的資訊卡）。點摘要條、取消釘住不動地圖。目標對準「面板上方可見區」中心（`focusBias`），不是畫布中心。離開路線地圖（applyPageMode）或又點別格時 `focusSeq++`，舊的那趟停手。測試 `tests/test_focus.py`（F1～F5 改壞版都抓到）。歸因已改 01 v2.70。
-- 實機要驗（v1.4.0）：重算後左側面板維持使用者的狀態；點格子移動、拉近，點停在面板上方。
+- v1.4.1：拿掉 v1.4.0 我自己加的 `focusBias`（目標改對準可見區中心）——照 v0.77.0 原樣停在畫面中心。原因：Google 滾輪縮放以畫面中心為錨點，偏離中心的目標拉近 N 級偏移放大 2^N 倍（實機：使用者的基隆／石門大路線從 11 級點，差 3.46 km 要點兩次；測試從 11 級點，v1.4.0 偏了 6500 px）。依賴寫在「點格子」那段開頭的註解。歸因：01 v2.71。`test_focus.py` 補「從 11 級點」，等動畫結束改成連續 4 秒沒動。
+- 實機要驗（v1.4.1）：重算後左側面板維持使用者的狀態；大範圍路線點格子一次就對準。
 - 實機要驗：切別條（!5i）色帶跟著換、切交通方式、收著面板時也對；再接原本的 ①～⑤。
 
 ### 目前狀態（2026-11-24）
