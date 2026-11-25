@@ -26,6 +26,12 @@ window.GM_registerMenuCommand=()=>{}; window.GM_setClipboard=()=>{}; window.GM_x
 window.unsafeWindow=window;
 const pad = (s, n) => { s += '\n//'; while (s.length < n) s += 'x'; return s.slice(0, n); };
 const cv = document.getElementById('cv');
+// 隱藏畫布（display:none）跑同一批程式：注入不能用在它身上
+const hid = document.createElement('canvas'); hid.width = 400; hid.height = 300; hid.style.display = 'none'; document.body.appendChild(hid);
+const hgl = hid.getContext('webgl');
+window.hiddenPass = () => { const sh = (t, s) => { const o = hgl.createShader(t); hgl.shaderSource(o, s); hgl.compileShader(o); return o; };
+  if (!window.hp) { window.hp = hgl.createProgram(); hgl.attachShader(window.hp, sh(hgl.VERTEX_SHADER, pad('attribute vec2 a;void main(){gl_Position=vec4(a,0.,1.);}', 1480))); hgl.attachShader(window.hp, sh(hgl.FRAGMENT_SHADER, pad('precision mediump float;void main(){gl_FragColor=vec4(1.);}', 548))); hgl.linkProgram(window.hp); }
+  hgl.useProgram(window.hp); };
 const gl = cv.getContext('webgl', { premultipliedAlpha: true, preserveDrawingBuffer: false });
 const mk = (vs, fs, lv, lf) => { const sh = (t, s) => { const o = gl.createShader(t); gl.shaderSource(o, s); gl.compileShader(o); return o; };
   const p = gl.createProgram(); gl.attachShader(p, sh(gl.VERTEX_SHADER, pad(vs, lv))); gl.attachShader(p, sh(gl.FRAGMENT_SHADER, pad(fs, lf))); gl.linkProgram(p); return p; };
@@ -44,6 +50,7 @@ const hi = v => Math.fround(v);
 window.frames = 0; window.px = {};
 window.frame = () => {
   window.frames++;
+  window.hiddenPass();
   gl.viewport(0, 0, 400, 300); gl.clearColor(1, 1, 1, 1); gl.clear(gl.COLOR_BUFFER_BIT); gl.disable(gl.BLEND);
   if (window.blitOnly) { gl.useProgram(blit); } else {
   gl.useProgram(cam);

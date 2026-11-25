@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Route Rain — 路線降雨預報
 // @namespace    https://github.com/bgtsai/browser-tools
-// @version      1.6.5
+// @version      1.6.6
 // @description  在 Google Maps 路線畫面底部加一個時間軸面板，顯示沿途各點在不同出發時間下的降雨機率
 // @author       bgtsai
 // @match        https://www.google.com/maps*
@@ -3226,8 +3226,17 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
             }
             return s;
         };
+        // 頁面上另有隱藏的畫布（display:none）也跑同一批繪圖程式（推測是點擊判定用）。
+        // 只處理看得見的那張：否則注入會用在隱藏畫布上、這一幀就不再注入（v1.6.5 實機：色帶整條不見）
+        // 每個 context 只判斷一次（讀 clientWidth 可能觸發排版，不能每次 useProgram 都讀）
+        const visCache = new WeakMap();
+        const visible = gl => {
+            let v = visCache.get(gl);
+            if (v === undefined) { const cv = gl.canvas; v = !!cv && cv.clientWidth > 0; visCache.set(gl, v); }
+            return v;
+        };
         P.useProgram = function (p) {
-            if (p !== glr.prog && !glr.broken) {
+            if (p !== glr.prog && !glr.broken && visible(this)) {
                 try {
                     const s = sigOf(this, p);
                     // 每一幀都要畫一次：重算相機的幀、只貼底圖的幀、或新的 rAF 回呼開始，都算新的一幀
@@ -3246,19 +3255,19 @@ ${[0, 1, 2, 3].map(i => `[class].${P}-l${i}{background:var(--${P}-f${i});box-sha
         // 相機：圖磚程式每幀依序上傳 中心高位(3fv) → 中心低位(3fv) → 投影矩陣(Matrix4fv) → 倍率(1f)
         P.uniform3fv = function (loc, v) {
             const p = glr.pend;
-            if (p && cur && glr.sig.get(cur) === GL_SIG_CAM && !p.M) {
+            if (p && cur && glr.sig.get(cur) === GL_SIG_CAM && !p.M && visible(this)) {
                 if (!p.c) p.c = [v[0], v[1]]; else if (!p.v) p.v = [v[0], v[1]];
             }
             return orig.uniform3fv.apply(this, arguments);
         };
         P.uniformMatrix4fv = function (loc, tr, m) {
             const p = glr.pend;
-            if (p && cur && glr.sig.get(cur) === GL_SIG_CAM && !p.M && p.v) p.M = Float32Array.from(m);
+            if (p && cur && glr.sig.get(cur) === GL_SIG_CAM && !p.M && p.v && visible(this)) p.M = Float32Array.from(m);
             return orig.uniformMatrix4fv.apply(this, arguments);
         };
         P.uniform1f = function (loc, x) {
             const p = glr.pend;
-            if (p && cur && glr.sig.get(cur) === GL_SIG_CAM && p.M && p.S === undefined) {
+            if (p && cur && glr.sig.get(cur) === GL_SIG_CAM && p.M && p.S === undefined && visible(this)) {
                 p.S = x;
                 glr.cam = { cx: p.c[0] + p.v[0], cy: p.c[1] + p.v[1], M: p.M, S: x };
             }
